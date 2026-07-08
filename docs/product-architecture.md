@@ -77,10 +77,16 @@ Mobile MCP starts with remote MCP only:
 
 Local stdio MCP is deferred. It requires packaging executables, sandboxing them, managing background processes, and handling Android filesystem/runtime differences. That can be revisited after the core chat app is stable.
 
+## Model Capability Resolution
+
+Model capability checks live behind one module seam: `src/services/modelCapabilities.ts`. Callers should ask predicates such as `isVisionModel`, `isWebSearchModel`, `isToolCallingModel`, and `inferModelTask` instead of doing local string matching.
+
+Discovery keeps `GET /models` as the provider-specific source of model IDs, then enriches each ID through local metadata/rules. Provider-level capabilities describe transport support; they are not blindly copied onto every remote model. Health checks should verify model/API-key availability only, not infer multimodal or web-search support.
+
 ## Data Model
 
-- `ProviderProfile`: provider identity, adapter kind, base URL, capabilities, model list, and in-memory API key.
-- `ModelInfo`: model ID plus capability hints.
+- `ProviderProfile`: provider identity, adapter kind, base URL, API key, transport capability hints, and model list.
+- `ModelInfo`: model ID plus resolved capability hints.
 - `ChatMessage`: role, content, status, attachments, and error information.
 - `MediaAttachment`: local URI, MIME type, size, optional base64 image payload.
 - `PluginManifest`: mobile-safe plugin or remote MCP entry.

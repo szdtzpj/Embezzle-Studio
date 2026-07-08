@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Linking,
   Modal,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -19,8 +20,8 @@ import {
 } from 'react-native';
 import type { PressableProps, StyleProp, ViewStyle } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { AudioLines, Camera, ChevronDown, Copy, Download, ExternalLink, Image as ImageIcon, Lightbulb, Menu, MessageSquare, MoreHorizontal, Paperclip, PenSquare, Pencil, Plus, RefreshCw, Search, Share2, Settings, X } from 'lucide-react-native';
-import { Bailian, ChatGLM, Claude, DeepSeek, Doubao, Gemini, Kimi, Minimax, NewAPI, OpenAI, Qwen, Volcengine } from '@lobehub/icons-rn';
+import { AudioLines, Camera, ChevronDown, Copy, Download, ExternalLink, Image as ImageIcon, Lightbulb, Menu, MessageSquare, MoreHorizontal, Paperclip, PenSquare, Pencil, Plus, RefreshCw, Search, Share2, Settings, Trash2, X } from 'lucide-react-native';
+import { Bailian, ChatGLM, Claude, DeepSeek, Doubao, Gemini, Kimi, Minimax, NewAPI, OpenAI, Qwen, Volcengine, Zhipu } from '@lobehub/icons-rn';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/arkModels';
 import { appInfo } from './src/data/appInfo';
@@ -28,7 +29,6 @@ import { createDefaultWorkspace } from './src/data/providerCatalog';
 import type {
   AppWorkspace,
   ChatTokenUsage,
-  Capability,
   ChatConversation,
   GenerationTaskInfo,
   ChatMessage,
@@ -45,6 +45,15 @@ import { refreshProviderModels } from './src/services/modelDiscovery';
 import { createId } from './src/services/id';
 import { loadWorkspace, saveWorkspace } from './src/services/storage';
 import { checkForAppUpdate, type AppUpdateInfo } from './src/services/updateChecker';
+import {
+  createModelInfoFromId,
+  inferModelTask,
+  isVideoInputModel,
+  isVisionModel,
+  modelMatchesCapabilityFilter,
+  modelSearchText,
+  type ModelCapabilityFilter,
+} from './src/services/modelCapabilities';
 
 /**
  * Anthropic / Claude 风格视觉令牌。
@@ -281,14 +290,19 @@ const capabilityLabel: Record<string, string> = {
   text: '文本',
   'image-input': '图片',
   'video-input': '视频',
+  'file-input': '文件',
   'tool-calling': '工具',
+  reasoning: '推理',
+  'web-search': '联网',
+  'image-generation': '生图',
+  'video-generation': '生视频',
+  embedding: '嵌入',
+  rerank: '重排',
   streaming: '流式',
   mcp: 'MCP',
 };
 
-type CandidateModelFilter = 'all' | 'reasoning' | 'vision' | 'web' | 'free' | 'embedding' | 'rerank' | 'tool';
-
-const candidateModelFilters: Array<{ key: CandidateModelFilter; label: string }> = [
+const candidateModelFilters: Array<{ key: ModelCapabilityFilter; label: string }> = [
   { key: 'all', label: '全部' },
   { key: 'reasoning', label: '推理' },
   { key: 'vision', label: '视觉' },
@@ -307,16 +321,6 @@ const reasoningEffortOptions: Array<{ key: ReasoningEffort; label: string }> = [
   { key: 'high', label: '高' },
   { key: 'max', label: '极高' },
 ];
-
-const modelFilterKeywords = {
-  reasoning: ['reason', 'thinking', 'think', 'deepseek-r1', '-r1', 'r1-', 'qwq', 'qvq', 'o1', 'o3', 'o4', 'z1'],
-  vision: ['vision', 'visual', 'vl', 'image', 'img', 'omni', '4v', 'multimodal', 'multi-modal', 'qwen-vl', 'glm-4v', 'gpt-4o'],
-  web: ['web', 'search', 'browsing', 'browser', 'online', 'internet'],
-  free: ['free', 'gratis', 'trial'],
-  embedding: ['embedding', 'embeddings', 'embed', 'bge', 'm3e', 'jina-embeddings'],
-  rerank: ['rerank', 'reranker', 're-rank', 'bge-reranker'],
-  tool: ['functioncall', 'function-call', 'function', 'tool', 'tools', 'mcp'],
-};
 
 const modelTaskLabel: Record<ModelTask, string> = {
   chat: '对话',
@@ -342,75 +346,11 @@ function getSelectableModels(provider: ProviderProfile) {
 }
 
 function modelIndexText(model: ModelInfo) {
-  return `${model.name ?? ''} ${model.id}`.toLowerCase();
+  return modelSearchText(model);
 }
 
-function inferModelTask(model: ModelInfo): ModelTask {
-  if (model.task) {
-    return model.task;
-  }
-
-  const text = modelIndexText(model);
-
-  if (text.includes('seedream') || text.includes('image-generation') || text.includes('text-to-image')) {
-    return 'image-generation';
-  }
-
-  if (text.includes('seedance') || text.includes('video-generation') || text.includes('text-to-video')) {
-    return 'video-generation';
-  }
-
-  if (text.includes('embedding') || text.includes('embed')) {
-    return 'embedding';
-  }
-
-  if (text.includes('rerank') || text.includes('reranker')) {
-    return 'rerank';
-  }
-
-  return 'chat';
-}
-
-function includesAny(value: string, keywords: string[]) {
-  return keywords.some((keyword) => value.includes(keyword));
-}
-
-function hasExplicitCapability(model: ModelInfo, capability: Capability) {
-  return model.source !== 'remote' && model.capabilities.includes(capability);
-}
-
-function matchesCandidateModelFilter(model: ModelInfo, filter: CandidateModelFilter) {
-  if (filter === 'all') {
-    return true;
-  }
-
-  const text = modelIndexText(model);
-
-  if (filter === 'reasoning') {
-    return includesAny(text, modelFilterKeywords.reasoning);
-  }
-
-  if (filter === 'vision') {
-    return hasExplicitCapability(model, 'image-input') || includesAny(text, modelFilterKeywords.vision);
-  }
-
-  if (filter === 'web') {
-    return includesAny(text, modelFilterKeywords.web);
-  }
-
-  if (filter === 'free') {
-    return includesAny(text, modelFilterKeywords.free);
-  }
-
-  if (filter === 'embedding') {
-    return includesAny(text, modelFilterKeywords.embedding);
-  }
-
-  if (filter === 'rerank') {
-    return includesAny(text, modelFilterKeywords.rerank);
-  }
-
-  return hasExplicitCapability(model, 'tool-calling') || includesAny(text, modelFilterKeywords.tool);
+function matchesCandidateModelFilter(model: ModelInfo, filter: ModelCapabilityFilter) {
+  return modelMatchesCapabilityFilter(model, filter);
 }
 
 const maxSavedConversations = 100;
@@ -543,7 +483,7 @@ export default function App() {
   const [input, setInput] = useState('');
   const [manualModelId, setManualModelId] = useState('');
   const [modelSearchQuery, setModelSearchQuery] = useState('');
-  const [modelCapabilityFilter, setModelCapabilityFilter] = useState<CandidateModelFilter>('all');
+  const [modelCapabilityFilter, setModelCapabilityFilter] = useState<ModelCapabilityFilter>('all');
   const [historySearchQuery, setHistorySearchQuery] = useState('');
   const [attachments, setAttachments] = useState<MediaAttachment[]>([]);
   const [busy, setBusy] = useState(false);
@@ -769,12 +709,7 @@ export default function App() {
       return;
     }
 
-    const model: ModelInfo = {
-      id: modelId,
-      name: modelId,
-      capabilities: activeProvider.capabilities,
-      source: 'manual',
-    };
+    const model = createModelInfoFromId(activeProvider, modelId, 'manual');
 
     setWorkspace((current) => ({
       ...current,
@@ -812,7 +747,7 @@ export default function App() {
                 ...provider.models.filter((existing) => existing.id !== model.id),
                 {
                   ...model,
-                  capabilities: model.capabilities.length ? model.capabilities : activeProvider.capabilities,
+                  task: inferModelTask(model),
                   source: model.source === 'preset' ? 'manual' : model.source,
                 },
               ],
@@ -922,6 +857,21 @@ export default function App() {
 
   async function addAttachments(kind: 'image' | 'video' | 'file') {
     setNotice('');
+
+    if (!activeModel) {
+      setNotice('请先添加并选择模型。');
+      return;
+    }
+
+    if (kind === 'image' && !isVisionModel(activeModel)) {
+      setNotice('当前模型未标记为支持图片输入，请先切换视觉模型。');
+      return;
+    }
+
+    if (kind === 'video' && !isVideoInputModel(activeModel)) {
+      setNotice('当前模型未标记为支持视频输入，请先切换视频模型。');
+      return;
+    }
 
     try {
       const picked =
@@ -1144,6 +1094,7 @@ export default function App() {
       const result = await sendOpenAiCompatibleChat({
         provider: activeProvider,
         modelId: activeModelId,
+        model: activeModel,
         messages: transcript,
         reasoningEffort: activeReasoningEffort,
         onStreamUpdate: (update) => {
@@ -1209,6 +1160,9 @@ export default function App() {
                 >
                   <Text numberOfLines={1} style={styles.modelPickerPillText}>
                     {(activeModel?.name ?? activeModelId) || '选择模型'}
+                    {activeReasoningEffort !== 'default' && activeModelTask === 'chat'
+                      ? ` ${reasoningEffortOptions.find((o) => o.key === activeReasoningEffort)?.label ?? ''}`
+                      : ''}
                   </Text>
                   <ChevronDown size={16} color={palette.textSecondary} strokeWidth={2} />
                 </AnimatedPressable>
@@ -1228,8 +1182,11 @@ export default function App() {
             groups={providerModelGroups}
             activeProviderId={activeProvider.id}
             activeModelId={activeModelId}
+            activeModelTask={activeModelTask}
+            activeReasoningEffort={activeReasoningEffort}
             onClose={() => setModelPickerOpen(false)}
             onSelect={selectProviderModel}
+            onReasoningEffortChange={setActiveReasoningEffort}
           />
 
           {settingsOpen ? (
@@ -1299,14 +1256,6 @@ export default function App() {
                   />
                 </View>
 
-                <View style={styles.capabilityRow}>
-                  {activeProvider.capabilities.map((capability) => (
-                    <View key={capability} style={styles.capabilityChip}>
-                      <Text style={styles.capabilityText}>{capabilityLabel[capability] ?? capability}</Text>
-                    </View>
-                  ))}
-                </View>
-
                 <AnimatedPressable
                   accessibilityRole="button"
                   disabled={busy}
@@ -1320,7 +1269,28 @@ export default function App() {
               {notice ? <Text style={styles.settingsNotice}>{notice}</Text> : null}
 
               <View style={styles.settingsCard}>
-                <Text style={styles.settingsCardTitle}>可添加模型</Text>
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>可添加模型</Text>
+                  {modelCandidates.length ? (
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      onPress={() => {
+                        setWorkspace((current) => ({
+                          ...current,
+                          modelCandidatesByProvider: {
+                            ...current.modelCandidatesByProvider,
+                            [activeProvider.id]: [],
+                          },
+                        }));
+                        setModelSearchQuery('');
+                        setModelCapabilityFilter('all');
+                      }}
+                      style={styles.settingsCardHeaderAction}
+                    >
+                      <Trash2 size={16} color={palette.textSecondary} strokeWidth={2} />
+                    </AnimatedPressable>
+                  ) : null}
+                </View>
                 {modelCandidates.length ? (
                   <>
                     <View style={styles.modelSearchRow}>
@@ -1854,6 +1824,7 @@ type ModelIconKey =
   | 'deepseek'
   | 'doubao'
   | 'chatglm'
+  | 'zhipu'
   | 'kimi'
   | 'minimax'
   | 'bailian'
@@ -1887,8 +1858,11 @@ function modelIconKey(modelId?: string, providerName?: string): ModelIconKey {
   if (modelText.includes('doubao') || modelText.includes('seed')) {
     return 'doubao';
   }
-  if (text.includes('glm') || text.includes('zhipu')) {
+  if (modelText.includes('chatglm')) {
     return 'chatglm';
+  }
+  if (/^glm(?:[-_.]|$)/.test(modelText) || text.includes('zhipu') || text.includes('bigmodel') || text.includes('智谱')) {
+    return 'zhipu';
   }
   if (text.includes('kimi') || text.includes('moonshot')) {
     return 'kimi';
@@ -1930,6 +1904,7 @@ function ModelAvatar({
       {iconKey === 'deepseek' ? <DeepSeek.Color size={size} /> : null}
       {iconKey === 'doubao' ? <Doubao.Color size={size} /> : null}
       {iconKey === 'chatglm' ? <ChatGLM.Color size={size} /> : null}
+      {iconKey === 'zhipu' ? <Zhipu.Color size={size} /> : null}
       {iconKey === 'kimi' ? <Kimi.Color size={size} /> : null}
       {iconKey === 'minimax' ? <Minimax.Color size={size} /> : null}
       {iconKey === 'bailian' ? <Bailian.Color size={size} /> : null}
@@ -2056,6 +2031,82 @@ function GenerationTaskPanel({
   );
 }
 
+const reasoningSliderStops: ReasoningEffort[] = ['off', 'low', 'medium', 'high', 'max'];
+const reasoningSliderLabels: Record<string, string> = {
+  off: '关闭',
+  low: '低',
+  medium: '中',
+  high: '高',
+  max: '极高',
+};
+
+function ReasoningSlider({
+  value,
+  onChange,
+}: {
+  value: ReasoningEffort;
+  onChange: (effort: ReasoningEffort) => void;
+}) {
+  const activeIndex = reasoningSliderStops.indexOf(value === 'default' ? 'medium' : value);
+  const trackWidth = useRef(0);
+  const currentIndex = useRef(activeIndex);
+  currentIndex.current = activeIndex;
+
+  const snapToIndex = (locationX: number) => {
+    const width = trackWidth.current;
+    if (!width) return;
+    const ratio = Math.max(0, Math.min(1, locationX / width));
+    const index = Math.round(ratio * (reasoningSliderStops.length - 1));
+    if (index !== currentIndex.current) {
+      onChange(reasoningSliderStops[index]);
+    }
+  };
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (event) => {
+        snapToIndex(event.nativeEvent.locationX);
+      },
+      onPanResponderMove: (event) => {
+        snapToIndex(event.nativeEvent.locationX);
+      },
+    })
+  ).current;
+
+  const thumbPosition = reasoningSliderStops.length > 1
+    ? (activeIndex / (reasoningSliderStops.length - 1)) * 100
+    : 50;
+
+  return (
+    <View style={styles.reasoningSlider}>
+      <View
+        style={styles.reasoningSliderTrackArea}
+        onLayout={(e) => { trackWidth.current = e.nativeEvent.layout.width; }}
+        {...panResponder.panHandlers}
+      >
+        <View style={styles.reasoningSliderTrack} />
+        <View style={[styles.reasoningSliderThumb, { left: `${thumbPosition}%` as any }]} />
+      </View>
+      <View style={styles.reasoningSliderLabels}>
+        {reasoningSliderStops.map((stop, index) => (
+          <Pressable key={stop} onPress={() => onChange(stop)}>
+            <Text
+              style={[
+                styles.reasoningSliderLabel,
+                index === activeIndex && styles.reasoningSliderLabelActive,
+              ]}
+            >
+              {reasoningSliderLabels[stop]}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+    </View>
+  );
+}
+
 interface ModelPickerModalProps {
   visible: boolean;
   groups: Array<{
@@ -2064,8 +2115,11 @@ interface ModelPickerModalProps {
   }>;
   activeProviderId: string;
   activeModelId: string;
+  activeModelTask: ModelTask;
+  activeReasoningEffort: ReasoningEffort;
   onClose: () => void;
   onSelect: (providerId: string, modelId: string) => void;
+  onReasoningEffortChange: (effort: ReasoningEffort) => void;
 }
 
 function ModelPickerModal({
@@ -2073,8 +2127,11 @@ function ModelPickerModal({
   groups,
   activeProviderId,
   activeModelId,
+  activeModelTask,
+  activeReasoningEffort,
   onClose,
   onSelect,
+  onReasoningEffortChange,
 }: ModelPickerModalProps) {
   const anim = useRef(new Animated.Value(0)).current;
 
@@ -2116,6 +2173,15 @@ function ModelPickerModal({
           </View>
 
           <ScrollView contentContainerStyle={styles.modelPickerList}>
+            {activeModelTask === 'chat' ? (
+              <View style={styles.modelPickerReasoningSection}>
+                <View style={styles.reasoningSliderEndpoints}>
+                  <Text style={styles.reasoningSliderEndpointText}>快速</Text>
+                  <Text style={styles.reasoningSliderEndpointText}>深思</Text>
+                </View>
+                <ReasoningSlider value={activeReasoningEffort} onChange={onReasoningEffortChange} />
+              </View>
+            ) : null}
             {groups.length ? (
               groups.map((group) => (
                 <View key={group.provider.id} style={styles.modelPickerGroup}>
@@ -2374,54 +2440,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
   },
-  reasoningControl: {
-    minHeight: 40,
-    borderRadius: radii.md,
-    borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: palette.surface,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingLeft: 12,
-  },
-  reasoningLabel: {
-    color: palette.textSecondary,
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  reasoningScroller: {
-    flex: 1,
-  },
-  reasoningOptions: {
-    gap: 7,
-    paddingRight: 8,
-    paddingVertical: 6,
-  },
-  reasoningOption: {
-    height: 28,
-    minWidth: 42,
-    borderRadius: radii.pill,
-    borderWidth: 1,
-    borderColor: palette.borderStrong,
-    backgroundColor: palette.surface,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 12,
-  },
-  reasoningOptionActive: {
-    borderColor: palette.accentBorder,
-    backgroundColor: palette.accentSoft,
-  },
-  reasoningOptionText: {
-    color: palette.textSecondary,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  reasoningOptionTextActive: {
-    color: palette.accentText,
-    fontWeight: '700',
-  },
   secondaryButton: {
     height: 40,
     minWidth: 60,
@@ -2478,6 +2496,18 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
     marginBottom: 2,
+  },
+  settingsCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  settingsCardHeaderAction: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   providerRow: {
     gap: 10,
@@ -2865,6 +2895,64 @@ const styles = StyleSheet.create({
   modelPickerList: {
     padding: 14,
     gap: 14,
+  },
+  modelPickerReasoningSection: {
+    gap: 8,
+    paddingBottom: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.border,
+  },
+  reasoningSliderEndpoints: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  reasoningSliderEndpointText: {
+    color: palette.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  reasoningSlider: {
+    gap: 6,
+  },
+  reasoningSliderTrackArea: {
+    height: 28,
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  reasoningSliderTrack: {
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: palette.borderStrong,
+  },
+  reasoningSliderThumb: {
+    position: 'absolute',
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: palette.accent,
+    marginLeft: -9,
+    top: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  reasoningSliderLabels: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  reasoningSliderLabel: {
+    color: palette.textSecondary,
+    fontSize: 12,
+    fontWeight: '500',
+    paddingHorizontal: 2,
+  },
+  reasoningSliderLabelActive: {
+    color: palette.accent,
+    fontWeight: '700',
   },
   modelPickerGroup: {
     gap: 8,
@@ -3382,7 +3470,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 2,
     color: palette.text,
     fontSize: 15,
-    lineHeight: 28,
+    lineHeight: 30,
+    textAlignVertical: 'center',
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
   composerFooter: {
     minHeight: 30,

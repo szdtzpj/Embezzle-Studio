@@ -5,15 +5,23 @@ import type {
   GenerationTaskInfo,
   MediaAttachment,
   ModelInfo,
-  ModelTask,
   ProviderProfile,
   ReasoningEffort,
 } from '../domain/types';
 import { Platform } from 'react-native';
+import {
+  createModelInfoFromId,
+  enrichDiscoveredModel,
+  inferModelTask,
+  isVideoInputModel,
+  isVisionModel,
+  type RemoteModelMetadata,
+} from './modelCapabilities';
 
 interface ChatCompletionArgs {
   provider: ProviderProfile;
   modelId: string;
+  model?: ModelInfo;
   messages: ChatMessage[];
   reasoningEffort: ReasoningEffort;
   onStreamUpdate?: (update: ChatStreamUpdate) => void;
@@ -26,7 +34,7 @@ interface ChatStreamUpdate {
   raw?: unknown;
 }
 
-interface RemoteModel {
+interface RemoteModel extends RemoteModelMetadata {
   id?: string;
   object?: string;
   owned_by?: string;
@@ -531,28 +539,6 @@ function modelText(modelId: string): string {
   return modelId.toLowerCase();
 }
 
-function inferModelTask(modelId: string): ModelTask {
-  const text = modelText(modelId);
-
-  if (text.includes('seedream') || text.includes('image-generation') || text.includes('text-to-image')) {
-    return 'image-generation';
-  }
-
-  if (text.includes('seedance') || text.includes('video-generation') || text.includes('text-to-video')) {
-    return 'video-generation';
-  }
-
-  if (text.includes('embedding') || text.includes('embed')) {
-    return 'embedding';
-  }
-
-  if (text.includes('rerank') || text.includes('reranker')) {
-    return 'rerank';
-  }
-
-  return 'chat';
-}
-
 function isOpenAiBaseUrl(provider: ProviderProfile): boolean {
   return provider.baseUrl.toLowerCase().includes('api.openai.com');
 }
@@ -700,14 +686,8 @@ export async function fetchOpenAiCompatibleModels(provider: ProviderProfile): Pr
   const remoteModels = Array.isArray(payload.data) ? payload.data : [];
 
   return remoteModels
-    .filter((model) => typeof model.id === 'string' && model.id.length > 0)
-    .map((model) => ({
-      id: model.id as string,
-      name: model.id,
-      capabilities: provider.capabilities,
-      task: inferModelTask(model.id as string),
-      source: 'remote',
-    }));
+    .map((model) => enrichDiscoveredModel(provider, model))
+    .filter((model): model is ModelInfo => Boolean(model));
 }
 
 function latestUserPrompt(messages: ChatMessage[]): string {
@@ -937,9 +917,33 @@ async function sendArkVideoGenerationRequest(
   };
 }
 
+function assertChatAttachmentsSupported(messages: ChatMessage[], model: ModelInfo): void {
+  const attachments = messages.flatMap((message) => message.attachments ?? []);
+  const hasImage = attachments.some((attachment) => attachment.kind === 'image');
+  const hasVideo = attachments.some((attachment) => attachment.kind === 'video');
+  const hasFile = attachments.some((attachment) => attachment.kind === 'file');
+
+  if (hasImage && !isVisionModel(model)) {
+    throw new Error(`当前模型「${model.name ?? model.id}」未标记为支持图片输入，请切换视觉模型或在模型能力中开启图片输入。`);
+  }
+
+  if (hasVideo) {
+    if (!isVideoInputModel(model)) {
+      throw new Error(`当前模型「${model.name ?? model.id}」未标记为支持视频输入，请切换视频模型。`);
+    }
+
+    throw new Error('当前通用 OpenAI 兼容适配器尚未支持视频附件上传，需要 provider-specific 视频适配器。');
+  }
+
+  if (hasFile) {
+    throw new Error('当前通用 OpenAI 兼容适配器尚未支持文件附件上传。');
+  }
+}
+
 export async function sendOpenAiCompatibleChat({
   provider,
   modelId,
+  model,
   messages,
   reasoningEffort,
   onStreamUpdate,
@@ -948,7 +952,8 @@ export async function sendOpenAiCompatibleChat({
     throw new Error('请先选择一个模型。');
   }
 
-  const task = inferModelTask(modelId);
+  const requestModel = model ?? createModelInfoFromId(provider, modelId, 'manual');
+  const task = inferModelTask(requestModel);
 
   if (task === 'image-generation') {
     return sendImageGenerationRequest(provider, modelId, messages);
@@ -965,6 +970,8 @@ export async function sendOpenAiCompatibleChat({
   if (task === 'embedding' || task === 'rerank') {
     throw new Error('当前模型不是对话模型，不能在聊天窗口中调用。请切换到文本/多模态对话模型。');
   }
+
+  assertChatAttachmentsSupported(messages, requestModel);
 
   const baseUrl = assertBaseUrl(provider);
   const body: Record<string, unknown> = {

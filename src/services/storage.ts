@@ -2,7 +2,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from '../data/arkModels';
-import type { AppWorkspace, ChatConversation, ChatMessage, ModelInfo, ProviderProfile, ReasoningEffort } from '../domain/types';
+import type { AppWorkspace, ChatConversation, ModelInfo, ProviderProfile, ReasoningEffort } from '../domain/types';
+import { createModelInfoFromId, inferModelTask } from './modelCapabilities';
 
 const WORKSPACE_KEY = '@embezzle-studio/workspace-v1';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
@@ -71,49 +72,19 @@ function stripSecret(provider: ProviderProfile): PersistedProvider {
   return persistedProvider;
 }
 
-function isConversationMessage(message: ChatMessage): boolean {
-  return (
-    message.id !== 'welcome' &&
-    (message.content.trim().length > 0 ||
-      Boolean(message.attachments?.length) ||
-      Boolean(message.reasoningContent?.trim()) ||
-      Boolean(message.generationTask) ||
-      Boolean(message.error))
-  );
-}
-
-function inferConversationTitle(messages: ChatMessage[]): string {
-  const userMessage = messages.find(
-    (message) => message.role === 'user' && (message.content.trim() || message.attachments?.length)
-  );
-
-  if (userMessage?.content.trim()) {
-    const title = userMessage.content.trim().replace(/\s+/g, ' ');
-    return title.length > 28 ? `${title.slice(0, 28)}...` : title;
+function normalizeModelCapabilities(provider: ProviderProfile, model: ModelInfo): ModelInfo {
+  if (model.source === 'remote') {
+    const inferred = createModelInfoFromId(provider, model.id, 'remote', { id: model.id, name: model.name });
+    return {
+      ...model,
+      capabilities: inferred.capabilities,
+      task: inferred.task,
+    };
   }
-
-  if (userMessage?.attachments?.length) {
-    return '附件对话';
-  }
-
-  return '新对话';
-}
-
-function migrateConversationFromMessages(messages: ChatMessage[], activeConversationId?: string): ChatConversation | null {
-  if (!messages.some(isConversationMessage)) {
-    return null;
-  }
-
-  const timestamps = messages.map((message) => message.createdAt).filter((value) => Number.isFinite(value));
-  const createdAt = timestamps.length ? Math.min(...timestamps) : Date.now();
-  const updatedAt = timestamps.length ? Math.max(...timestamps) : createdAt;
 
   return {
-    id: activeConversationId || 'conversation-migrated',
-    title: inferConversationTitle(messages),
-    createdAt,
-    updatedAt,
-    messages,
+    ...model,
+    task: model.task ?? inferModelTask(model),
   };
 }
 
@@ -121,14 +92,18 @@ function normalizeWorkspace(snapshot: PersistedWorkspace, providers: ProviderPro
   const modelCandidatesByProvider = { ...(snapshot.modelCandidatesByProvider ?? {}) };
   const normalizedProviders = providers.map((provider) => {
     const isArkProvider = isVolcengineArkProvider(provider);
-    const addedModels = provider.models.filter(
-      (model) => model.source !== 'preset' && !(isArkProvider && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
-    );
+    const addedModels = provider.models
+      .filter(
+        (model) => model.source !== 'preset' && !(isArkProvider && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
+      )
+      .map((model) => normalizeModelCapabilities(provider, model));
 
     const existingCandidates = modelCandidatesByProvider[provider.id] ?? [];
-    const retainedCandidates = existingCandidates.filter(
-      (model) => model.source !== 'preset' && !(isArkProvider && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
-    );
+    const retainedCandidates = existingCandidates
+      .filter(
+        (model) => model.source !== 'preset' && !(isArkProvider && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
+      )
+      .map((model) => normalizeModelCapabilities(provider, model));
 
     modelCandidatesByProvider[provider.id] = retainedCandidates;
 
@@ -146,26 +121,15 @@ function normalizeWorkspace(snapshot: PersistedWorkspace, providers: ProviderPro
       : provider.models[0]?.id ?? '';
   }
 
-  const snapshotMessages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
-  const migratedConversation = migrateConversationFromMessages(snapshotMessages, snapshot.activeConversationId);
-  const persistedConversations = Array.isArray(snapshot.conversations) ? snapshot.conversations : [];
-  const conversations =
-    migratedConversation && !persistedConversations.some((conversation) => conversation.id === migratedConversation.id)
-      ? [migratedConversation, ...persistedConversations]
-      : persistedConversations.length
-        ? persistedConversations
-        : migratedConversation
-          ? [migratedConversation]
-          : [];
-  const snapshotActiveConversation = conversations.find(
-    (conversation) => conversation.id === snapshot.activeConversationId
-  );
+  const conversations = Array.isArray(snapshot.conversations)
+    ? snapshot.conversations.filter((conversation) => Number.isFinite(conversation.updatedAt))
+    : [];
   const activeConversationId =
-    snapshotActiveConversation && (snapshotActiveConversation.messages.some(isConversationMessage) || !migratedConversation)
-      ? snapshotActiveConversation.id
-      : migratedConversation?.id ?? conversations[0]?.id ?? 'conversation-default';
+    conversations.find((conversation) => conversation.id === snapshot.activeConversationId)?.id ??
+    conversations[0]?.id ??
+    'conversation-default';
   const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
-  const messages = activeConversation?.messages ?? snapshotMessages;
+  const messages = activeConversation?.messages ?? [];
 
   return {
     ...snapshot,

@@ -9,7 +9,14 @@ export type Capability =
   | 'text'
   | 'image-input'
   | 'video-input'
+  | 'file-input'
   | 'tool-calling'
+  | 'reasoning'
+  | 'web-search'
+  | 'image-generation'
+  | 'video-generation'
+  | 'embedding'
+  | 'rerank'
   | 'streaming'
   | 'mcp';
 
