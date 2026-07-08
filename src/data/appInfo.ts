@@ -1,6 +1,6 @@
 export const appInfo = {
   name: 'Embezzle Studio',
-  version: '1.0.1',
+  version: '1.0.2',
   githubOwner: 'szdtzpj',
   githubRepo: 'Embezzle-Studio',
   githubPagesUrl: 'https://szdtzpj.github.io/Embezzle-Studio/',
