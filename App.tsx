@@ -4,6 +4,7 @@ import {
   ActivityIndicator,
   Image,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -32,6 +33,13 @@ const capabilityLabel: Record<string, string> = {
   mcp: 'MCP',
 };
 
+function getSelectableModels(provider: ProviderProfile) {
+  return provider.models.filter(
+    (model) =>
+      !(isVolcengineArkProvider(provider) && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
+  );
+}
+
 export default function App() {
   const [workspace, setWorkspace] = useState<AppWorkspace>(() => createDefaultWorkspace());
   const [booting, setBooting] = useState(true);
@@ -41,6 +49,7 @@ export default function App() {
   const [attachments, setAttachments] = useState<MediaAttachment[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -85,10 +94,7 @@ export default function App() {
       return [];
     }
 
-    return activeProvider.models.filter(
-      (model) =>
-        !(isVolcengineArkProvider(activeProvider) && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
-    );
+    return getSelectableModels(activeProvider);
   }, [activeProvider]);
   const savedActiveModelId = activeProvider ? workspace.activeModelIdByProvider[activeProvider.id] : '';
   const activeModelId = activeProvider
@@ -107,6 +113,16 @@ export default function App() {
   const addedModelIds = useMemo(
     () => new Set(addedModels.map((model) => model.id)),
     [addedModels]
+  );
+  const providerModelGroups = useMemo(
+    () =>
+      workspace.providers
+        .map((provider) => ({
+          provider,
+          models: getSelectableModels(provider),
+        }))
+        .filter((group) => group.models.length > 0),
+    [workspace.providers]
   );
 
   function updateActiveProvider(patch: Partial<ProviderProfile>) {
@@ -141,6 +157,18 @@ export default function App() {
         [activeProvider.id]: modelId,
       },
     }));
+  }
+
+  function selectProviderModel(providerId: string, modelId: string) {
+    setWorkspace((current) => ({
+      ...current,
+      activeProviderId: providerId,
+      activeModelIdByProvider: {
+        ...current.activeModelIdByProvider,
+        [providerId]: modelId,
+      },
+    }));
+    setModelPickerOpen(false);
   }
 
   function addCustomProvider() {
@@ -414,25 +442,50 @@ export default function App() {
           style={styles.keyboard}
         >
           <View style={styles.topBar}>
-            <View>
+            <View style={styles.topHeaderRow}>
               <Text style={styles.appName}>Embezzle Studio</Text>
-              <Text style={styles.activeLine}>
-                {activeProvider.name} / {(activeModel?.name ?? activeModelId) || '未选择模型'}
-              </Text>
+              <View style={styles.topActions}>
+                <Pressable accessibilityRole="button" onPress={clearMessages} style={styles.secondaryButton}>
+                  <Text style={styles.secondaryButtonText}>清空</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => setSettingsOpen((current) => !current)}
+                  style={styles.secondaryButton}
+                >
+                  <Text style={styles.secondaryButtonText}>{settingsOpen ? '聊天' : '配置'}</Text>
+                </Pressable>
+              </View>
             </View>
-            <View style={styles.topActions}>
-              <Pressable accessibilityRole="button" onPress={clearMessages} style={styles.secondaryButton}>
-                <Text style={styles.secondaryButtonText}>清空</Text>
-              </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                onPress={() => setSettingsOpen((current) => !current)}
-                style={styles.secondaryButton}
-              >
-                <Text style={styles.secondaryButtonText}>{settingsOpen ? '聊天' : '配置'}</Text>
-              </Pressable>
-            </View>
+            <Pressable
+              accessibilityRole="button"
+              testID="model-picker-trigger"
+              onPress={() => setModelPickerOpen(true)}
+              style={styles.modelPickerTrigger}
+            >
+              <View style={styles.modelPickerLabelBadge}>
+                <Text style={styles.modelPickerLabelText}>模型</Text>
+              </View>
+              <View style={styles.modelPickerCurrent}>
+                <Text numberOfLines={1} style={styles.modelPickerProviderText}>
+                  {activeProvider.name}
+                </Text>
+                <Text numberOfLines={1} style={styles.modelPickerModelText}>
+                  {(activeModel?.name ?? activeModelId) || '未选择模型'}
+                </Text>
+              </View>
+              <Text style={styles.modelPickerChevron}>v</Text>
+            </Pressable>
           </View>
+
+          <ModelPickerModal
+            visible={modelPickerOpen}
+            groups={providerModelGroups}
+            activeProviderId={activeProvider.id}
+            activeModelId={activeModelId}
+            onClose={() => setModelPickerOpen(false)}
+            onSelect={selectProviderModel}
+          />
 
           {settingsOpen ? (
             <ScrollView style={styles.content} contentContainerStyle={styles.settingsContent}>
@@ -599,36 +652,6 @@ export default function App() {
 
               {notice ? <Text style={styles.notice}>{notice}</Text> : null}
 
-              {addedModels.length ? (
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.modelSwitchRow}
-                >
-                  {addedModels.map((model) => (
-                    <Pressable
-                      key={model.id}
-                      accessibilityRole="button"
-                      onPress={() => selectModel(model.id)}
-                      style={[
-                        styles.modelSwitchChip,
-                        model.id === activeModelId && styles.modelSwitchChipActive,
-                      ]}
-                    >
-                      <Text
-                        numberOfLines={1}
-                        style={[
-                          styles.modelSwitchText,
-                          model.id === activeModelId && styles.modelSwitchTextActive,
-                        ]}
-                      >
-                        {model.name ?? model.id}
-                      </Text>
-                    </Pressable>
-                  ))}
-                </ScrollView>
-              ) : null}
-
               {attachments.length ? (
                 <ScrollView
                   horizontal
@@ -686,6 +709,96 @@ export default function App() {
         </KeyboardAvoidingView>
       </SafeAreaView>
     </SafeAreaProvider>
+  );
+}
+
+interface ModelPickerModalProps {
+  visible: boolean;
+  groups: Array<{
+    provider: ProviderProfile;
+    models: ModelInfo[];
+  }>;
+  activeProviderId: string;
+  activeModelId: string;
+  onClose: () => void;
+  onSelect: (providerId: string, modelId: string) => void;
+}
+
+function ModelPickerModal({
+  visible,
+  groups,
+  activeProviderId,
+  activeModelId,
+  onClose,
+  onSelect,
+}: ModelPickerModalProps) {
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modelPickerModalRoot}>
+        <Pressable accessibilityRole="button" onPress={onClose} style={styles.modelPickerBackdrop} />
+        <View testID="model-picker-sheet" style={styles.modelPickerSheet}>
+          <View style={styles.modelPickerSheetHeader}>
+            <View style={styles.modelPickerTitleBlock}>
+              <Text style={styles.modelPickerTitle}>选择模型</Text>
+              <Text style={styles.modelPickerSubtitle}>已添加模型</Text>
+            </View>
+            <Pressable accessibilityRole="button" onPress={onClose} style={styles.modelPickerCloseButton}>
+              <Text style={styles.modelPickerCloseText}>×</Text>
+            </Pressable>
+          </View>
+
+          <ScrollView contentContainerStyle={styles.modelPickerList}>
+            {groups.length ? (
+              groups.map((group) => (
+                <View key={group.provider.id} style={styles.modelPickerGroup}>
+                  <View style={styles.modelPickerGroupHeader}>
+                    <Text numberOfLines={1} style={styles.modelPickerGroupName}>
+                      {group.provider.name}
+                    </Text>
+                    <Text style={styles.modelPickerGroupCount}>{group.models.length}</Text>
+                  </View>
+                  {group.models.map((model) => {
+                    const selected = group.provider.id === activeProviderId && model.id === activeModelId;
+
+                    return (
+                      <Pressable
+                        key={`${group.provider.id}:${model.id}`}
+                        accessibilityRole="button"
+                        onPress={() => onSelect(group.provider.id, model.id)}
+                        style={[
+                          styles.modelPickerRow,
+                          selected && styles.modelPickerRowActive,
+                        ]}
+                      >
+                        <View style={styles.modelPickerRowTextBlock}>
+                          <Text
+                            numberOfLines={1}
+                            style={[
+                              styles.modelPickerRowName,
+                              selected && styles.modelPickerRowNameActive,
+                            ]}
+                          >
+                            {model.name ?? model.id}
+                          </Text>
+                          <Text numberOfLines={1} style={styles.modelPickerRowMeta}>
+                            {model.id}
+                          </Text>
+                        </View>
+                        {selected ? <Text style={styles.modelPickerSelectedText}>当前</Text> : null}
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              ))
+            ) : (
+              <View style={styles.modelPickerEmpty}>
+                <Text style={styles.modelPickerEmptyText}>暂无已添加模型</Text>
+              </View>
+            )}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -778,12 +891,14 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   topBar: {
-    minHeight: 72,
     paddingHorizontal: 18,
     paddingVertical: 12,
     backgroundColor: '#ffffff',
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#d9e1ec',
+    gap: 10,
+  },
+  topHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -794,15 +909,56 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '700',
   },
-  activeLine: {
-    marginTop: 4,
-    color: '#596779',
-    fontSize: 12,
-  },
   topActions: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+  },
+  modelPickerTrigger: {
+    minHeight: 46,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#cbd8ea',
+    backgroundColor: '#f7faff',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 10,
+  },
+  modelPickerLabelBadge: {
+    height: 26,
+    borderRadius: 7,
+    backgroundColor: '#e8f1ff',
+    borderWidth: 1,
+    borderColor: '#c7dcfb',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 9,
+  },
+  modelPickerLabelText: {
+    color: '#174ea6',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  modelPickerCurrent: {
+    flex: 1,
+    minWidth: 0,
+  },
+  modelPickerProviderText: {
+    color: '#5c6a7d',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  modelPickerModelText: {
+    marginTop: 2,
+    color: '#142033',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  modelPickerChevron: {
+    color: '#526070',
+    fontSize: 13,
+    fontWeight: '900',
   },
   secondaryButton: {
     height: 40,
@@ -1000,32 +1156,161 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
   },
-  modelSwitchRow: {
+  modelPickerModalRoot: {
+    flex: 1,
+    justifyContent: 'flex-start',
     paddingHorizontal: 14,
-    paddingBottom: 8,
-    gap: 8,
+    paddingTop: 104,
+    backgroundColor: 'rgba(20, 32, 51, 0.24)',
   },
-  modelSwitchChip: {
-    maxWidth: 180,
+  modelPickerBackdrop: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
+  modelPickerSheet: {
+    maxHeight: '72%',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e2ef',
+    backgroundColor: '#ffffff',
+    shadowColor: '#142033',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.15,
+    shadowRadius: 24,
+    elevation: 8,
+    overflow: 'hidden',
+  },
+  modelPickerSheetHeader: {
+    minHeight: 58,
+    paddingHorizontal: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#dbe4f0',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  modelPickerTitleBlock: {
+    flex: 1,
+    minWidth: 0,
+  },
+  modelPickerTitle: {
+    color: '#142033',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  modelPickerSubtitle: {
+    marginTop: 3,
+    color: '#64748b',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  modelPickerCloseButton: {
+    width: 34,
     height: 34,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#cbd6e5',
-    backgroundColor: '#ffffff',
+    borderColor: '#d5dfec',
+    alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: '#ffffff',
+  },
+  modelPickerCloseText: {
+    color: '#425166',
+    fontSize: 20,
+    lineHeight: 22,
+    fontWeight: '700',
+  },
+  modelPickerList: {
+    padding: 12,
+    gap: 12,
+  },
+  modelPickerGroup: {
+    gap: 8,
+  },
+  modelPickerGroupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  modelPickerGroupName: {
+    flex: 1,
+    color: '#40516a',
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  modelPickerGroupCount: {
+    minWidth: 24,
+    height: 22,
+    borderRadius: 7,
+    backgroundColor: '#edf3fb',
+    color: '#50627b',
+    overflow: 'hidden',
+    textAlign: 'center',
+    textAlignVertical: 'center',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  modelPickerRow: {
+    minHeight: 54,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d6e0ed',
+    backgroundColor: '#ffffff',
     paddingHorizontal: 12,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
   },
-  modelSwitchChipActive: {
+  modelPickerRowActive: {
     borderColor: '#1f5fbf',
-    backgroundColor: '#e8f1ff',
+    backgroundColor: '#edf5ff',
   },
-  modelSwitchText: {
-    color: '#35465f',
+  modelPickerRowTextBlock: {
+    flex: 1,
+    minWidth: 0,
+  },
+  modelPickerRowName: {
+    color: '#142033',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  modelPickerRowNameActive: {
+    color: '#174ea6',
+  },
+  modelPickerRowMeta: {
+    marginTop: 4,
+    color: '#6a778a',
+    fontSize: 12,
+  },
+  modelPickerSelectedText: {
+    borderRadius: 7,
+    backgroundColor: '#1f5fbf',
+    color: '#ffffff',
+    overflow: 'hidden',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
     fontSize: 12,
     fontWeight: '800',
   },
-  modelSwitchTextActive: {
-    color: '#174ea6',
+  modelPickerEmpty: {
+    minHeight: 84,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e2ef',
+    backgroundColor: '#f8fbff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modelPickerEmptyText: {
+    color: '#607086',
+    fontSize: 13,
+    fontWeight: '800',
   },
   messageBubble: {
     maxWidth: '92%',
