@@ -1,4 +1,5 @@
 import type { AppWorkspace, Capability, ProviderProfile } from '../domain/types';
+import { arkPresetModels } from './arkModels';
 
 const textOnly: Capability[] = ['text', 'streaming'];
 const vision: Capability[] = ['text', 'image-input', 'streaming'];
@@ -11,14 +12,7 @@ export const defaultProviders: ProviderProfile[] = [
     kind: 'volcengine-ark',
     baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
     capabilities: video,
-    models: [
-      {
-        id: 'doubao-seed-1-6',
-        name: 'Doubao Seed 1.6',
-        capabilities: video,
-        source: 'preset',
-      },
-    ],
+    models: arkPresetModels,
     notes: 'Use Ark-compatible endpoints first; add a dedicated video adapter for Doubao media flows.',
   },
   {

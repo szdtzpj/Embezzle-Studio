@@ -1,19 +1,11 @@
 import type { ModelInfo, ProviderProfile } from '../domain/types';
+import { arkPresetModels, isVolcengineArkProvider } from '../data/arkModels';
 import { fetchOpenAiCompatibleModels } from './openAiCompatible';
 
 interface ModelDiscoveryResult {
   models: ModelInfo[];
   notice: string;
 }
-
-const arkModelHints: ModelInfo[] = [
-  {
-    id: 'doubao-seed-evolving',
-    name: 'Doubao Seed Evolving',
-    capabilities: ['text', 'image-input', 'tool-calling', 'streaming'],
-    source: 'preset',
-  },
-];
 
 function mergeModels(existingModels: ModelInfo[], discoveredModels: ModelInfo[]): ModelInfo[] {
   const byId = new Map<string, ModelInfo>();
@@ -26,15 +18,17 @@ function mergeModels(existingModels: ModelInfo[], discoveredModels: ModelInfo[])
 }
 
 function discoverArkModels(provider: ProviderProfile): ModelDiscoveryResult {
+  const models = mergeModels(arkPresetModels, provider.models);
+
   return {
-    models: mergeModels(provider.models, arkModelHints),
+    models,
     notice:
-      '火山方舟不提供通用 OpenAI /models 拉取。已保留预置模型；如果你在控制台看到的是其他 Model ID，请在下方手动添加。',
+      `火山方舟不能用普通 API Key 枚举模型。已加载 ${models.length} 个预置 Doubao 模型；控制台里的专属 Endpoint 或新 Model ID 请手动添加。`,
   };
 }
 
 export async function refreshProviderModels(provider: ProviderProfile): Promise<ModelDiscoveryResult> {
-  if (provider.kind === 'volcengine-ark') {
+  if (isVolcengineArkProvider(provider)) {
     return discoverArkModels(provider);
   }
 

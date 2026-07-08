@@ -19,7 +19,10 @@ interface RemoteModel {
 }
 
 function normalizeBaseUrl(baseUrl: string): string {
-  return baseUrl.trim().replace(/\/+$/, '');
+  return baseUrl
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/(?:chat\/completions|models)$/i, '');
 }
 
 function authHeaders(provider: ProviderProfile): HeadersInit {
