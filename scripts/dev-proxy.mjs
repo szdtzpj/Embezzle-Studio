@@ -56,6 +56,37 @@ function cleanHeaders(headers) {
   return result;
 }
 
+function waitForDrain(response) {
+  return new Promise((resolve) => {
+    response.once('drain', resolve);
+  });
+}
+
+async function pipeUpstreamBody(upstream, response) {
+  if (!upstream.body) {
+    const body = await upstream.arrayBuffer();
+    response.end(Buffer.from(body));
+    return;
+  }
+
+  const reader = upstream.body.getReader();
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      if (value && !response.write(Buffer.from(value))) {
+        await waitForDrain(response);
+      }
+    }
+  } finally {
+    response.end();
+  }
+}
+
 async function handleProxy(request, response) {
   let payload;
   try {
@@ -85,14 +116,15 @@ async function handleProxy(request, response) {
       headers: cleanHeaders(payload.headers),
       body: payload.body == null ? undefined : String(payload.body),
     });
-    const body = await upstream.arrayBuffer();
     const headers = {
       'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-cache, no-transform',
       'Content-Type': upstream.headers.get('content-type') ?? 'application/octet-stream',
+      'X-Accel-Buffering': 'no',
     };
 
     response.writeHead(upstream.status, headers);
-    response.end(Buffer.from(body));
+    await pipeUpstreamBody(upstream, response);
   } catch (error) {
     sendJson(response, 502, {
       error: error instanceof Error ? error.message : 'Proxy upstream request failed.',

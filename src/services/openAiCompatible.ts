@@ -16,6 +16,14 @@ interface ChatCompletionArgs {
   modelId: string;
   messages: ChatMessage[];
   reasoningEffort: ReasoningEffort;
+  onStreamUpdate?: (update: ChatStreamUpdate) => void;
+}
+
+interface ChatStreamUpdate {
+  content: string;
+  reasoningContent?: string;
+  usage?: ChatTokenUsage;
+  raw?: unknown;
 }
 
 interface RemoteModel {
@@ -287,6 +295,211 @@ function readReasoningText(payload: any): string | undefined {
   }
 
   return undefined;
+}
+
+function readDeltaText(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const text = value
+    .map((part) => {
+      if (typeof part === 'string') {
+        return part;
+      }
+
+      return part?.text ?? part?.content ?? '';
+    })
+    .join('');
+
+  return text || undefined;
+}
+
+function readStreamContentDelta(payload: any): string | undefined {
+  const choice = payload?.choices?.[0];
+  const delta = choice?.delta;
+
+  return readDeltaText(delta?.content) ?? readDeltaText(choice?.message?.content);
+}
+
+function readStreamReasoningDelta(payload: any): string | undefined {
+  const choice = payload?.choices?.[0];
+  const delta = choice?.delta;
+
+  return (
+    readDeltaText(delta?.reasoning_content) ??
+    readDeltaText(delta?.reasoningContent) ??
+    readDeltaText(delta?.reasoning) ??
+    readDeltaText(delta?.thinking) ??
+    readDeltaText(delta?.thoughts) ??
+    readDeltaText(delta?.reasoning_details)
+  );
+}
+
+function readFinalChatPayload(payload: any): ChatCompletionResult {
+  return {
+    content: readAssistantText(payload),
+    reasoningContent: readReasoningText(payload),
+    usage: readTokenUsage(payload),
+    raw: payload,
+  };
+}
+
+function applyStreamPayload(
+  payload: any,
+  state: {
+    content: string;
+    reasoningContent: string;
+    usage?: ChatTokenUsage;
+    lastPayload?: unknown;
+    sawStreamPayload: boolean;
+  },
+  onStreamUpdate?: (update: ChatStreamUpdate) => void
+) {
+  state.sawStreamPayload = true;
+  state.lastPayload = payload;
+
+  const contentDelta = readStreamContentDelta(payload);
+  const reasoningDelta = readStreamReasoningDelta(payload);
+  const usage = readTokenUsage(payload);
+
+  if (typeof contentDelta === 'string') {
+    state.content += contentDelta;
+  }
+
+  if (typeof reasoningDelta === 'string') {
+    state.reasoningContent += reasoningDelta;
+  }
+
+  if (usage) {
+    state.usage = usage;
+  }
+
+  if (contentDelta || reasoningDelta || usage) {
+    onStreamUpdate?.({
+      content: state.content,
+      reasoningContent: state.reasoningContent || undefined,
+      usage: state.usage,
+      raw: payload,
+    });
+  }
+}
+
+function processSseBlock(
+  block: string,
+  state: {
+    content: string;
+    reasoningContent: string;
+    usage?: ChatTokenUsage;
+    lastPayload?: unknown;
+    sawStreamPayload: boolean;
+    done: boolean;
+  },
+  onStreamUpdate?: (update: ChatStreamUpdate) => void
+) {
+  const data = block
+    .split('\n')
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trimStart())
+    .join('\n')
+    .trim();
+
+  if (!data) {
+    return;
+  }
+
+  if (data === '[DONE]') {
+    state.done = true;
+    return;
+  }
+
+  const payload = JSON.parse(data);
+  if (payload?.error) {
+    const message =
+      typeof payload.error?.message === 'string'
+        ? payload.error.message
+        : compactResponseText(JSON.stringify(payload.error));
+    throw new Error(`对话流式请求失败：${message}`);
+  }
+  applyStreamPayload(payload, state, onStreamUpdate);
+}
+
+function finalizeStreamResult(
+  state: {
+    content: string;
+    reasoningContent: string;
+    usage?: ChatTokenUsage;
+    lastPayload?: unknown;
+    sawStreamPayload: boolean;
+  },
+  fullText: string
+): ChatCompletionResult {
+  if (!state.sawStreamPayload) {
+    const payload = JSON.parse(fullText);
+    return readFinalChatPayload(payload);
+  }
+
+  return {
+    content: state.content || (state.reasoningContent ? '' : '模型返回了空内容。'),
+    reasoningContent: state.reasoningContent || undefined,
+    usage: state.usage,
+    raw: state.lastPayload ?? fullText,
+  };
+}
+
+async function readStreamingChatCompletion(
+  response: Response,
+  onStreamUpdate?: (update: ChatStreamUpdate) => void
+): Promise<ChatCompletionResult> {
+  const state = {
+    content: '',
+    reasoningContent: '',
+    usage: undefined as ChatTokenUsage | undefined,
+    lastPayload: undefined as unknown,
+    sawStreamPayload: false,
+    done: false,
+  };
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let fullText = '';
+
+  const consumeText = (text: string) => {
+    fullText += text;
+    buffer += text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+    let separatorIndex = buffer.indexOf('\n\n');
+    while (separatorIndex >= 0) {
+      const block = buffer.slice(0, separatorIndex);
+      buffer = buffer.slice(separatorIndex + 2);
+      processSseBlock(block, state, onStreamUpdate);
+      separatorIndex = buffer.indexOf('\n\n');
+    }
+  };
+
+  const reader = response.body?.getReader();
+
+  if (!reader) {
+    consumeText(await response.text());
+  } else {
+    while (!state.done) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      consumeText(decoder.decode(value, { stream: true }));
+    }
+    consumeText(decoder.decode());
+  }
+
+  if (buffer.trim()) {
+    processSseBlock(buffer, state, onStreamUpdate);
+  }
+
+  return finalizeStreamResult(state, fullText);
 }
 
 function optionalNumber(value: unknown): number | undefined {
@@ -729,6 +942,7 @@ export async function sendOpenAiCompatibleChat({
   modelId,
   messages,
   reasoningEffort,
+  onStreamUpdate,
 }: ChatCompletionArgs): Promise<ChatCompletionResult> {
   if (!modelId) {
     throw new Error('请先选择一个模型。');
@@ -757,13 +971,16 @@ export async function sendOpenAiCompatibleChat({
     model: modelId,
     messages: messages.map(toOpenAiMessage),
     temperature: 0.7,
-    stream: false,
+    stream: true,
   };
   applyReasoningOptions(body, provider, modelId, reasoningEffort);
 
   const response = await providerFetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
-    headers: authHeaders(provider),
+    headers: {
+      ...authHeaders(provider),
+      Accept: 'text/event-stream, application/json',
+    },
     body: JSON.stringify(body),
   });
 
@@ -777,12 +994,5 @@ export async function sendOpenAiCompatibleChat({
     throw new Error(`对话请求失败：${response.status} ${body.slice(0, 320)}`);
   }
 
-  const payload = await response.json();
-
-  return {
-    content: readAssistantText(payload),
-    reasoningContent: readReasoningText(payload),
-    usage: readTokenUsage(payload),
-    raw: payload,
-  };
+  return readStreamingChatCompletion(response, onStreamUpdate);
 }

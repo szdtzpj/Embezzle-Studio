@@ -829,7 +829,7 @@ export default function App() {
     const assistantMessage: ChatMessage = {
       id: createId('msg'),
       role: 'assistant',
-      content: '正在请求模型...',
+      content: '',
       createdAt: Date.now(),
       status: 'pending',
     };
@@ -850,6 +850,14 @@ export default function App() {
         modelId: activeModelId,
         messages: transcript,
         reasoningEffort: activeReasoningEffort,
+        onStreamUpdate: (update) => {
+          updateAssistantMessage(assistantMessage.id, {
+            content: update.content,
+            reasoningContent: update.reasoningContent,
+            usage: update.usage,
+            status: 'pending',
+          });
+        },
       });
 
       updateAssistantMessage(assistantMessage.id, {
@@ -1175,7 +1183,11 @@ export default function App() {
                     message.role === 'assistant'
                       ? message.generationTask ?? inferMessageGenerationTask(message)
                       : undefined;
-                  const showThinking = message.role === 'assistant' && message.status === 'pending';
+                  const showThinking =
+                    message.role === 'assistant' &&
+                    message.status === 'pending' &&
+                    !message.content &&
+                    !message.reasoningContent;
 
                   return (
                   <AnimatedMessage
