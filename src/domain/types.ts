@@ -21,11 +21,14 @@ export type AttachmentKind = 'image' | 'video' | 'file';
 
 export type ReasoningEffort = 'default' | 'off' | 'low' | 'medium' | 'high' | 'max';
 
+export type ModelTask = 'chat' | 'image-generation' | 'video-generation' | 'embedding' | 'rerank';
+
 export interface ModelInfo {
   id: string;
   name?: string;
   capabilities: Capability[];
   contextWindow?: number;
+  task?: ModelTask;
   source: 'preset' | 'remote' | 'manual';
 }
 
@@ -97,5 +100,6 @@ export interface ChatCompletionResult {
   content: string;
   reasoningContent?: string;
   usage?: ChatTokenUsage;
+  attachments?: MediaAttachment[];
   raw: unknown;
 }

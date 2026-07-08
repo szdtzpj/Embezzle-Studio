@@ -4,6 +4,7 @@ import type {
   ChatTokenUsage,
   MediaAttachment,
   ModelInfo,
+  ModelTask,
   ProviderProfile,
   ReasoningEffort,
 } from '../domain/types';
@@ -20,6 +21,25 @@ interface RemoteModel {
   id?: string;
   object?: string;
   owned_by?: string;
+}
+
+interface ArkVideoTaskResponse {
+  id?: string;
+  status?: string;
+  content?: {
+    video_url?: string;
+    url?: string;
+  };
+  data?: {
+    status?: string;
+    content?: {
+      video_url?: string;
+      url?: string;
+    };
+  };
+  error?: {
+    message?: string;
+  };
 }
 
 const webDevProxyUrl = 'http://127.0.0.1:8787/proxy';
@@ -244,6 +264,28 @@ function modelText(modelId: string): string {
   return modelId.toLowerCase();
 }
 
+function inferModelTask(modelId: string): ModelTask {
+  const text = modelText(modelId);
+
+  if (text.includes('seedream') || text.includes('image-generation') || text.includes('text-to-image')) {
+    return 'image-generation';
+  }
+
+  if (text.includes('seedance') || text.includes('video-generation') || text.includes('text-to-video')) {
+    return 'video-generation';
+  }
+
+  if (text.includes('embedding') || text.includes('embed')) {
+    return 'embedding';
+  }
+
+  if (text.includes('rerank') || text.includes('reranker')) {
+    return 'rerank';
+  }
+
+  return 'chat';
+}
+
 function isOpenAiBaseUrl(provider: ProviderProfile): boolean {
   return provider.baseUrl.toLowerCase().includes('api.openai.com');
 }
@@ -400,8 +442,180 @@ export async function fetchOpenAiCompatibleModels(provider: ProviderProfile): Pr
       id: model.id as string,
       name: model.id,
       capabilities: provider.capabilities,
+      task: inferModelTask(model.id as string),
       source: 'remote',
     }));
+}
+
+function latestUserPrompt(messages: ChatMessage[]): string {
+  const message = [...messages].reverse().find((item) => item.role === 'user' && item.content.trim());
+  return message?.content.trim() ?? '';
+}
+
+function generatedImageUrls(payload: any): string[] {
+  if (!Array.isArray(payload?.data)) {
+    return [];
+  }
+
+  return payload.data
+    .map((image: any) => nonEmptyText(image?.url) ?? nonEmptyText(image?.image_url?.url) ?? nonEmptyText(image?.b64_json))
+    .filter((url: string | undefined): url is string => Boolean(url));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function videoTaskStatus(task: ArkVideoTaskResponse): string | undefined {
+  return task.status ?? task.data?.status;
+}
+
+function videoTaskUrl(task: ArkVideoTaskResponse): string | undefined {
+  return nonEmptyText(task.content?.video_url) ??
+    nonEmptyText(task.content?.url) ??
+    nonEmptyText(task.data?.content?.video_url) ??
+    nonEmptyText(task.data?.content?.url);
+}
+
+async function retrieveArkVideoTask(provider: ProviderProfile, taskId: string): Promise<ArkVideoTaskResponse> {
+  const baseUrl = assertBaseUrl(provider);
+  const response = await providerFetch(`${baseUrl}/contents/generations/tasks/${taskId}`, {
+    method: 'GET',
+    headers: authHeaders(provider),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`视频生成任务查询失败：${response.status} ${body.slice(0, 240)}`);
+  }
+
+  return (await response.json()) as ArkVideoTaskResponse;
+}
+
+async function sendImageGenerationRequest(
+  provider: ProviderProfile,
+  modelId: string,
+  messages: ChatMessage[]
+): Promise<ChatCompletionResult> {
+  const baseUrl = assertBaseUrl(provider);
+  const prompt = latestUserPrompt(messages);
+
+  if (!prompt) {
+    throw new Error('请先输入图片生成提示词。');
+  }
+
+  const response = await providerFetch(`${baseUrl}/images/generations`, {
+    method: 'POST',
+    headers: authHeaders(provider),
+    body: JSON.stringify({
+      model: modelId,
+      prompt,
+      response_format: 'url',
+      size: '1024x1024',
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`图片生成请求失败：${response.status} ${body.slice(0, 320)}`);
+  }
+
+  const payload = await response.json();
+  const attachments: MediaAttachment[] = generatedImageUrls(payload).map((imageUrl, index) => ({
+    id: `generated-image-${Date.now()}-${index}`,
+    kind: 'image',
+    uri: imageUrl.startsWith('data:') ? imageUrl : imageUrl.startsWith('http') ? imageUrl : `data:image/png;base64,${imageUrl}`,
+    name: `${modelId}-${index + 1}.png`,
+  }));
+
+  return {
+    content: attachments.length ? '图片生成完成。' : '图片生成完成，但响应中没有可展示的图片 URL。',
+    usage: readTokenUsage(payload),
+    attachments,
+    raw: payload,
+  };
+}
+
+async function sendArkVideoGenerationRequest(
+  provider: ProviderProfile,
+  modelId: string,
+  messages: ChatMessage[]
+): Promise<ChatCompletionResult> {
+  const baseUrl = assertBaseUrl(provider);
+  const prompt = latestUserPrompt(messages);
+
+  if (!prompt) {
+    throw new Error('请先输入视频生成提示词。');
+  }
+
+  const response = await providerFetch(`${baseUrl}/contents/generations/tasks`, {
+    method: 'POST',
+    headers: authHeaders(provider),
+    body: JSON.stringify({
+      model: modelId,
+      content: [
+        {
+          type: 'text',
+          text: prompt,
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`视频生成任务提交失败：${response.status} ${body.slice(0, 320)}`);
+  }
+
+  const payload = (await response.json()) as ArkVideoTaskResponse;
+  const taskId = payload.id;
+
+  if (!taskId) {
+    return {
+      content: '视频生成任务已提交，但响应中没有返回任务 ID。',
+      raw: payload,
+    };
+  }
+
+  let task = payload;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const status = videoTaskStatus(task);
+    if (status === 'succeeded' || status === 'failed' || status === 'cancelled') {
+      break;
+    }
+
+    await sleep(2500);
+    task = await retrieveArkVideoTask(provider, taskId);
+  }
+
+  const status = videoTaskStatus(task) ?? 'submitted';
+  const videoUrl = videoTaskUrl(task);
+
+  if (status === 'failed') {
+    throw new Error(`视频生成任务失败：${task.error?.message ?? taskId}`);
+  }
+
+  if (videoUrl) {
+    return {
+      content: `视频生成完成。任务 ID：${taskId}`,
+      attachments: [
+        {
+          id: `generated-video-${taskId}`,
+          kind: 'video',
+          uri: videoUrl,
+          name: `${modelId}.mp4`,
+        },
+      ],
+      raw: task,
+    };
+  }
+
+  return {
+    content: `视频生成任务已提交，任务 ID：${taskId}，当前状态：${status}。生成时间较长时需要稍后查询任务结果。`,
+    raw: task,
+  };
 }
 
 export async function sendOpenAiCompatibleChat({
@@ -410,12 +624,29 @@ export async function sendOpenAiCompatibleChat({
   messages,
   reasoningEffort,
 }: ChatCompletionArgs): Promise<ChatCompletionResult> {
-  const baseUrl = assertBaseUrl(provider);
-
   if (!modelId) {
     throw new Error('请先选择一个模型。');
   }
 
+  const task = inferModelTask(modelId);
+
+  if (task === 'image-generation') {
+    return sendImageGenerationRequest(provider, modelId, messages);
+  }
+
+  if (task === 'video-generation') {
+    if (provider.kind !== 'volcengine-ark') {
+      throw new Error('当前只适配了火山 Ark 的视频生成任务接口。');
+    }
+
+    return sendArkVideoGenerationRequest(provider, modelId, messages);
+  }
+
+  if (task === 'embedding' || task === 'rerank') {
+    throw new Error('当前模型不是对话模型，不能在聊天窗口中调用。请切换到文本/多模态对话模型。');
+  }
+
+  const baseUrl = assertBaseUrl(provider);
   const body: Record<string, unknown> = {
     model: modelId,
     messages: messages.map(toOpenAiMessage),

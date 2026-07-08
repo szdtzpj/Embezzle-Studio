@@ -24,6 +24,7 @@ import type {
   ChatMessage,
   MediaAttachment,
   ModelInfo,
+  ModelTask,
   ProviderProfile,
   ReasoningEffort,
 } from './src/domain/types';
@@ -74,6 +75,14 @@ const modelFilterKeywords = {
   tool: ['functioncall', 'function-call', 'function', 'tool', 'tools', 'mcp'],
 };
 
+const modelTaskLabel: Record<ModelTask, string> = {
+  chat: '对话',
+  'image-generation': '图片生成',
+  'video-generation': '视频生成',
+  embedding: '嵌入',
+  rerank: '重排',
+};
+
 function getSelectableModels(provider: ProviderProfile) {
   return provider.models.filter(
     (model) =>
@@ -84,6 +93,32 @@ function getSelectableModels(provider: ProviderProfile) {
 
 function modelIndexText(model: ModelInfo) {
   return `${model.name ?? ''} ${model.id}`.toLowerCase();
+}
+
+function inferModelTask(model: ModelInfo): ModelTask {
+  if (model.task) {
+    return model.task;
+  }
+
+  const text = modelIndexText(model);
+
+  if (text.includes('seedream') || text.includes('image-generation') || text.includes('text-to-image')) {
+    return 'image-generation';
+  }
+
+  if (text.includes('seedance') || text.includes('video-generation') || text.includes('text-to-video')) {
+    return 'video-generation';
+  }
+
+  if (text.includes('embedding') || text.includes('embed')) {
+    return 'embedding';
+  }
+
+  if (text.includes('rerank') || text.includes('reranker')) {
+    return 'rerank';
+  }
+
+  return 'chat';
 }
 
 function includesAny(value: string, keywords: string[]) {
@@ -195,6 +230,7 @@ export default function App() {
     : '';
 
   const activeModel = addedModels.find((model) => model.id === activeModelId);
+  const activeModelTask = activeModel ? inferModelTask(activeModel) : 'chat';
   const activeModelKey = activeProvider && activeModelId ? `${activeProvider.id}:${activeModelId}` : '';
   const activeReasoningEffort: ReasoningEffort = activeModelKey
     ? workspace.reasoningEffortByModel[activeModelKey] ?? 'default'
@@ -551,6 +587,7 @@ export default function App() {
         content: result.content,
         reasoningContent: result.reasoningContent,
         usage: result.usage,
+        attachments: result.attachments,
         status: 'ready',
       });
     } catch (error) {
@@ -619,7 +656,7 @@ export default function App() {
               </View>
               <Text style={styles.modelPickerChevron}>v</Text>
             </Pressable>
-            {activeModelId ? (
+            {activeModelId && activeModelTask === 'chat' ? (
               <View style={styles.reasoningControl}>
                 <Text style={styles.reasoningLabel}>思考</Text>
                 <ScrollView
@@ -1081,6 +1118,7 @@ function ModelPickerModal({
                             {model.id}
                           </Text>
                         </View>
+                        <ModelTaskBadge model={model} />
                         {selected ? <Text style={styles.modelPickerSelectedText}>当前</Text> : null}
                       </Pressable>
                     );
@@ -1106,6 +1144,16 @@ interface ModelButtonProps {
   onRemove: () => void;
 }
 
+function ModelTaskBadge({ model }: { model: ModelInfo }) {
+  const task = inferModelTask(model);
+
+  return (
+    <View style={styles.modelTaskBadge}>
+      <Text style={styles.modelTaskBadgeText}>{modelTaskLabel[task]}</Text>
+    </View>
+  );
+}
+
 function ModelButton({ model, active, onPress, onRemove }: ModelButtonProps) {
   return (
     <View style={[styles.modelButton, active && styles.modelButtonActive]}>
@@ -1116,6 +1164,7 @@ function ModelButton({ model, active, onPress, onRemove }: ModelButtonProps) {
         <Text numberOfLines={1} style={styles.modelMeta}>
           {model.id}
         </Text>
+        <ModelTaskBadge model={model} />
       </Pressable>
       <Pressable accessibilityRole="button" onPress={onRemove} style={styles.compactButton}>
         <Text style={styles.compactButtonText}>删除</Text>
@@ -1140,6 +1189,7 @@ function CandidateModelRow({ model, added, onAdd }: CandidateModelRowProps) {
         <Text numberOfLines={1} style={styles.modelMeta}>
           {model.id}
         </Text>
+        <ModelTaskBadge model={model} />
       </View>
       <Pressable
         accessibilityRole="button"
@@ -1511,6 +1561,21 @@ const styles = StyleSheet.create({
     marginTop: 4,
     color: '#6a778a',
     fontSize: 12,
+  },
+  modelTaskBadge: {
+    alignSelf: 'flex-start',
+    marginTop: 6,
+    borderRadius: 7,
+    backgroundColor: '#eef4fb',
+    borderWidth: 1,
+    borderColor: '#d7e1ee',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  modelTaskBadgeText: {
+    color: '#40516a',
+    fontSize: 11,
+    fontWeight: '900',
   },
   candidateRow: {
     minHeight: 58,
