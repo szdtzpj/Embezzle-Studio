@@ -43,6 +43,15 @@ export const defaultProviders: ProviderProfile[] = [
 ];
 
 export function createDefaultWorkspace(): AppWorkspace {
+  const now = Date.now();
+  const initialConversationId = 'conversation-default';
+  const welcomeMessage = {
+    id: 'welcome',
+    role: 'assistant' as const,
+    content: '配置服务商后即可开始移动端多模型对话。',
+    createdAt: now,
+    status: 'ready' as const,
+  };
   const providers = defaultProviders.map((provider) => ({
     ...provider,
     models: provider.models.map((model) => ({ ...model })),
@@ -57,15 +66,17 @@ export function createDefaultWorkspace(): AppWorkspace {
     ),
     reasoningEffortByModel: {},
     modelCandidatesByProvider: {},
-    messages: [
+    activeConversationId: initialConversationId,
+    conversations: [
       {
-        id: 'welcome',
-        role: 'assistant',
-        content: '配置服务商后即可开始移动端多模型对话。',
-        createdAt: Date.now(),
-        status: 'ready',
+        id: initialConversationId,
+        title: '新对话',
+        createdAt: now,
+        updatedAt: now,
+        messages: [welcomeMessage],
       },
     ],
+    messages: [welcomeMessage],
     plugins: [],
   };
 }

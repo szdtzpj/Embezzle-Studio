@@ -3,11 +3,13 @@
   "version": "1.0.0",
   "main": "index.ts",
   "dependencies": {
+    "@lobehub/icons-rn": "^2.8.1",
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~57.0.4",
     "expo-document-picker": "~57.0.0",
     "expo-file-system": "~57.0.0",
     "expo-image-picker": "~57.0.2",
+    "expo-linear-gradient": "^57.0.0",
     "expo-secure-store": "~57.0.0",
     "expo-status-bar": "~57.0.0",
     "lucide-react-native": "^1.23.0",
@@ -29,7 +31,8 @@
     "web": "node scripts/start-web.mjs",
     "web:expo": "expo start --web",
     "web:proxy": "node scripts/dev-proxy.mjs",
-    "typecheck": "tsc --noEmit"
+    "build:web": "expo export --platform web --output-dir dist",
+    "typecheck": "node --stack_size=16384 ./node_modules/typescript/lib/tsc.js --noEmit"
   },
   "private": true
 }

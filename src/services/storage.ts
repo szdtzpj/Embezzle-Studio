@@ -2,17 +2,19 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from '../data/arkModels';
-import type { AppWorkspace, ModelInfo, ProviderProfile, ReasoningEffort } from '../domain/types';
+import type { AppWorkspace, ChatConversation, ChatMessage, ModelInfo, ProviderProfile, ReasoningEffort } from '../domain/types';
 
 const WORKSPACE_KEY = '@embezzle-studio/workspace-v1';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
 
 type PersistedProvider = Omit<ProviderProfile, 'apiKey'>;
 
-interface PersistedWorkspace extends Omit<AppWorkspace, 'providers' | 'modelCandidatesByProvider' | 'reasoningEffortByModel'> {
+interface PersistedWorkspace extends Omit<AppWorkspace, 'providers' | 'modelCandidatesByProvider' | 'reasoningEffortByModel' | 'activeConversationId' | 'conversations'> {
   providers: PersistedProvider[];
   modelCandidatesByProvider?: Record<string, ModelInfo[]>;
   reasoningEffortByModel?: Record<string, ReasoningEffort>;
+  activeConversationId?: string;
+  conversations?: ChatConversation[];
 }
 
 let secureStoreAvailability: boolean | null = null;
@@ -69,6 +71,52 @@ function stripSecret(provider: ProviderProfile): PersistedProvider {
   return persistedProvider;
 }
 
+function isConversationMessage(message: ChatMessage): boolean {
+  return (
+    message.id !== 'welcome' &&
+    (message.content.trim().length > 0 ||
+      Boolean(message.attachments?.length) ||
+      Boolean(message.reasoningContent?.trim()) ||
+      Boolean(message.generationTask) ||
+      Boolean(message.error))
+  );
+}
+
+function inferConversationTitle(messages: ChatMessage[]): string {
+  const userMessage = messages.find(
+    (message) => message.role === 'user' && (message.content.trim() || message.attachments?.length)
+  );
+
+  if (userMessage?.content.trim()) {
+    const title = userMessage.content.trim().replace(/\s+/g, ' ');
+    return title.length > 28 ? `${title.slice(0, 28)}...` : title;
+  }
+
+  if (userMessage?.attachments?.length) {
+    return '附件对话';
+  }
+
+  return '新对话';
+}
+
+function migrateConversationFromMessages(messages: ChatMessage[], activeConversationId?: string): ChatConversation | null {
+  if (!messages.some(isConversationMessage)) {
+    return null;
+  }
+
+  const timestamps = messages.map((message) => message.createdAt).filter((value) => Number.isFinite(value));
+  const createdAt = timestamps.length ? Math.min(...timestamps) : Date.now();
+  const updatedAt = timestamps.length ? Math.max(...timestamps) : createdAt;
+
+  return {
+    id: activeConversationId || 'conversation-migrated',
+    title: inferConversationTitle(messages),
+    createdAt,
+    updatedAt,
+    messages,
+  };
+}
+
 function normalizeWorkspace(snapshot: PersistedWorkspace, providers: ProviderProfile[]): AppWorkspace {
   const modelCandidatesByProvider = { ...(snapshot.modelCandidatesByProvider ?? {}) };
   const normalizedProviders = providers.map((provider) => {
@@ -98,12 +146,36 @@ function normalizeWorkspace(snapshot: PersistedWorkspace, providers: ProviderPro
       : provider.models[0]?.id ?? '';
   }
 
+  const snapshotMessages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
+  const migratedConversation = migrateConversationFromMessages(snapshotMessages, snapshot.activeConversationId);
+  const persistedConversations = Array.isArray(snapshot.conversations) ? snapshot.conversations : [];
+  const conversations =
+    migratedConversation && !persistedConversations.some((conversation) => conversation.id === migratedConversation.id)
+      ? [migratedConversation, ...persistedConversations]
+      : persistedConversations.length
+        ? persistedConversations
+        : migratedConversation
+          ? [migratedConversation]
+          : [];
+  const snapshotActiveConversation = conversations.find(
+    (conversation) => conversation.id === snapshot.activeConversationId
+  );
+  const activeConversationId =
+    snapshotActiveConversation && (snapshotActiveConversation.messages.some(isConversationMessage) || !migratedConversation)
+      ? snapshotActiveConversation.id
+      : migratedConversation?.id ?? conversations[0]?.id ?? 'conversation-default';
+  const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId);
+  const messages = activeConversation?.messages ?? snapshotMessages;
+
   return {
     ...snapshot,
     providers: normalizedProviders,
     activeModelIdByProvider,
     reasoningEffortByModel: snapshot.reasoningEffortByModel ?? {},
     modelCandidatesByProvider,
+    activeConversationId,
+    conversations,
+    messages,
   };
 }
 

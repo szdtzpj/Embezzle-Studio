@@ -19,16 +19,20 @@ import {
 } from 'react-native';
 import type { PressableProps, StyleProp, ViewStyle } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { Camera, ChevronDown, Image as ImageIcon, Menu, MessageSquare, Paperclip, PenSquare, Plus, Settings, X } from 'lucide-react-native';
+import { AudioLines, Camera, ChevronDown, Copy, Download, ExternalLink, Image as ImageIcon, Lightbulb, Menu, MessageSquare, MoreHorizontal, Paperclip, PenSquare, Pencil, Plus, RefreshCw, Search, Share2, Settings, X } from 'lucide-react-native';
+import { Bailian, ChatGLM, Claude, DeepSeek, Doubao, Gemini, Kimi, Minimax, NewAPI, OpenAI, Qwen, Volcengine } from '@lobehub/icons-rn';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/arkModels';
+import { appInfo } from './src/data/appInfo';
 import { createDefaultWorkspace } from './src/data/providerCatalog';
 import type {
   AppWorkspace,
   ChatTokenUsage,
   Capability,
+  ChatConversation,
   GenerationTaskInfo,
   ChatMessage,
+  MessageRole,
   MediaAttachment,
   ModelInfo,
   ModelTask,
@@ -40,6 +44,7 @@ import { queryGenerationTask, sendOpenAiCompatibleChat } from './src/services/op
 import { refreshProviderModels } from './src/services/modelDiscovery';
 import { createId } from './src/services/id';
 import { loadWorkspace, saveWorkspace } from './src/services/storage';
+import { checkForAppUpdate, type AppUpdateInfo } from './src/services/updateChecker';
 
 /**
  * Anthropic / Claude 风格视觉令牌。
@@ -93,6 +98,13 @@ type AnimatedPressableProps = PressableProps & {
 };
 
 const PressableAnimated = Animated.createAnimatedComponent(Pressable);
+const webInteractiveStyle =
+  Platform.OS === 'web'
+    ? ({
+        cursor: 'pointer',
+        userSelect: 'none',
+      } as unknown as ViewStyle)
+    : undefined;
 
 /**
  * 带按压缩放反馈的 Pressable，行为与原生 Pressable 完全一致，只是多了触感动画。
@@ -106,14 +118,32 @@ function AnimatedPressable({
   ...rest
 }: AnimatedPressableProps) {
   const scale = useRef(new Animated.Value(1)).current;
+  const opacity = useRef(new Animated.Value(disabled ? 0.55 : 1)).current;
 
-  const animateTo = (toValue: number) => {
-    Animated.spring(scale, {
-      toValue,
+  useEffect(() => {
+    Animated.timing(opacity, {
+      toValue: disabled ? 0.55 : 1,
+      duration: 120,
+      easing: Easing.out(Easing.quad),
       useNativeDriver,
-      speed: 50,
-      bounciness: 0,
     }).start();
+  }, [disabled, opacity]);
+
+  const animateTo = (toScale: number, toOpacity: number) => {
+    Animated.parallel([
+      Animated.spring(scale, {
+        toValue: toScale,
+        useNativeDriver,
+        speed: 60,
+        bounciness: 0,
+      }),
+      Animated.timing(opacity, {
+        toValue: toOpacity,
+        duration: 90,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver,
+      }),
+    ]).start();
   };
 
   return (
@@ -122,15 +152,22 @@ function AnimatedPressable({
       disabled={disabled}
       onPressIn={(event) => {
         if (!disabled) {
-          animateTo(0.96);
+          animateTo(0.93, 0.62);
         }
         onPressIn?.(event);
       }}
       onPressOut={(event) => {
-        animateTo(1);
+        animateTo(1, disabled ? 0.55 : 1);
         onPressOut?.(event);
       }}
-      style={[style, { transform: [{ scale }] }]}
+      style={[
+        style,
+        webInteractiveStyle,
+        {
+          opacity,
+          transform: [{ scale }],
+        },
+      ]}
     >
       {children}
     </PressableAnimated>
@@ -376,19 +413,144 @@ function matchesCandidateModelFilter(model: ModelInfo, filter: CandidateModelFil
   return hasExplicitCapability(model, 'tool-calling') || includesAny(text, modelFilterKeywords.tool);
 }
 
+const maxSavedConversations = 100;
+
+function isConversationMessage(message: ChatMessage): boolean {
+  return (
+    message.id !== 'welcome' &&
+    (message.content.trim().length > 0 ||
+      Boolean(message.attachments?.length) ||
+      Boolean(message.reasoningContent?.trim()) ||
+      Boolean(message.generationTask) ||
+      Boolean(message.error))
+  );
+}
+
+function hasConversationHistory(conversation: ChatConversation): boolean {
+  return conversation.messages.some(isConversationMessage);
+}
+
+function conversationSearchText(conversation: ChatConversation): string {
+  return [
+    conversation.title,
+    ...conversation.messages.flatMap((message) => [
+      message.content,
+      message.reasoningContent ?? '',
+      message.modelId ?? '',
+      message.providerName ?? '',
+      message.attachments?.map((attachment) => attachment.name).join(' ') ?? '',
+    ]),
+  ]
+    .join(' ')
+    .toLowerCase();
+}
+
+function conversationTitleFromMessages(messages: ChatMessage[]): string {
+  const userMessage = messages.find(
+    (message) => message.role === 'user' && (message.content.trim() || message.attachments?.length)
+  );
+
+  if (userMessage?.content.trim()) {
+    const title = userMessage.content.trim().replace(/\s+/g, ' ');
+    return title.length > 28 ? `${title.slice(0, 28)}...` : title;
+  }
+
+  if (userMessage?.attachments?.length) {
+    return '附件对话';
+  }
+
+  return '新对话';
+}
+
+function dominantConversationModel(conversation: ChatConversation): { modelId: string; providerName?: string; count: number } | null {
+  const counts = new Map<string, { modelId: string; providerName?: string; count: number; latestAt: number }>();
+
+  for (const message of conversation.messages) {
+    if (message.role !== 'assistant' || !message.modelId) {
+      continue;
+    }
+
+    const key = `${message.providerId ?? message.providerName ?? ''}:${message.modelId}`;
+    const current = counts.get(key);
+    counts.set(key, {
+      modelId: message.modelId,
+      providerName: message.providerName,
+      count: (current?.count ?? 0) + 1,
+      latestAt: Math.max(current?.latestAt ?? 0, message.createdAt),
+    });
+  }
+
+  return (
+    [...counts.values()].sort((a, b) => b.count - a.count || b.latestAt - a.latestAt)[0] ?? null
+  );
+}
+
+function upsertConversation(
+  conversations: ChatConversation[],
+  conversationId: string,
+  messages: ChatMessage[],
+  updatedAt = Date.now()
+): ChatConversation[] {
+  const existing = conversations.find((conversation) => conversation.id === conversationId);
+  const firstTimestamp = messages[0]?.createdAt;
+  const conversation: ChatConversation = {
+    id: conversationId,
+    title: conversationTitleFromMessages(messages),
+    createdAt: existing?.createdAt ?? firstTimestamp ?? updatedAt,
+    updatedAt,
+    messages,
+  };
+
+  return [conversation, ...conversations.filter((item) => item.id !== conversationId)]
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, maxSavedConversations);
+}
+
+function formatConversationTime(timestamp: number) {
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(timestamp));
+}
+
+function formatUpdateStatusTitle(updateInfo: AppUpdateInfo | null, updateNotice: string) {
+  if (updateInfo) {
+    return updateInfo.updateAvailable
+      ? `可更新到 v${updateInfo.latestVersion}`
+      : `最新版本 v${updateInfo.latestVersion}`;
+  }
+
+  if (updateNotice.includes('暂未找到')) {
+    return '暂无可用 Release';
+  }
+
+  if (updateNotice) {
+    return '检查失败';
+  }
+
+  return '尚未检查';
+}
+
 export default function App() {
   const [workspace, setWorkspace] = useState<AppWorkspace>(() => createDefaultWorkspace());
   const [booting, setBooting] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [input, setInput] = useState('');
   const [manualModelId, setManualModelId] = useState('');
   const [modelSearchQuery, setModelSearchQuery] = useState('');
   const [modelCapabilityFilter, setModelCapabilityFilter] = useState<CandidateModelFilter>('all');
+  const [historySearchQuery, setHistorySearchQuery] = useState('');
   const [attachments, setAttachments] = useState<MediaAttachment[]>([]);
   const [busy, setBusy] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [notice, setNotice] = useState('');
+  const [updateNotice, setUpdateNotice] = useState('');
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [expandedReasoningByMessageId, setExpandedReasoningByMessageId] = useState<Record<string, boolean>>({});
   const [queryingTaskByMessageId, setQueryingTaskByMessageId] = useState<Record<string, boolean>>({});
@@ -482,6 +644,22 @@ export default function App() {
         .filter((group) => group.models.length > 0),
     [workspace.providers]
   );
+  const recentConversations = useMemo(
+    () =>
+      workspace.conversations
+        .filter(hasConversationHistory)
+        .sort((a, b) => b.updatedAt - a.updatedAt),
+    [workspace.conversations]
+  );
+  const filteredConversations = useMemo(() => {
+    const query = historySearchQuery.trim().toLowerCase();
+
+    if (!query) {
+      return recentConversations;
+    }
+
+    return recentConversations.filter((conversation) => conversationSearchText(conversation).includes(query));
+  }, [historySearchQuery, recentConversations]);
 
   function updateActiveProvider(patch: Partial<ProviderProfile>) {
     if (!activeProvider) {
@@ -708,13 +886,37 @@ export default function App() {
     }
   }
 
-  function clearMessages() {
+  function startNewConversation() {
+    const conversationId = createId('conversation');
+    const now = Date.now();
+
     setWorkspace((current) => ({
       ...current,
+      activeConversationId: conversationId,
+      conversations: upsertConversation(current.conversations, conversationId, [], now),
       messages: [],
     }));
     setExpandedReasoningByMessageId({});
     setQueryingTaskByMessageId({});
+    setNotice('');
+  }
+
+  function selectConversation(conversationId: string) {
+    setWorkspace((current) => {
+      const conversation = current.conversations.find((item) => item.id === conversationId);
+      if (!conversation) {
+        return current;
+      }
+
+      return {
+        ...current,
+        activeConversationId: conversation.id,
+        messages: conversation.messages,
+      };
+    });
+    setExpandedReasoningByMessageId({});
+    setQueryingTaskByMessageId({});
+    setSidebarOpen(false);
     setNotice('');
   }
 
@@ -735,12 +937,34 @@ export default function App() {
   }
 
   function updateAssistantMessage(messageId: string, patch: Partial<ChatMessage>) {
-    setWorkspace((current) => ({
-      ...current,
-      messages: current.messages.map((message) =>
-        message.id === messageId ? { ...message, ...patch } : message
-      ),
-    }));
+    setWorkspace((current) => {
+      const now = Date.now();
+      const updateMessages = (messages: ChatMessage[]) =>
+        messages.map((message) =>
+          message.id === messageId ? { ...message, ...patch } : message
+        );
+      const messages = updateMessages(current.messages);
+      const conversations = current.conversations.map((conversation) => {
+        if (!conversation.messages.some((message) => message.id === messageId)) {
+          return conversation;
+        }
+
+        const updatedMessages = updateMessages(conversation.messages);
+
+        return {
+          ...conversation,
+          title: conversationTitleFromMessages(updatedMessages),
+          updatedAt: now,
+          messages: updatedMessages,
+        };
+      });
+
+      return {
+        ...current,
+        messages,
+        conversations,
+      };
+    });
   }
 
   function toggleReasoning(messageId: string) {
@@ -748,6 +972,61 @@ export default function App() {
       ...current,
       [messageId]: !current[messageId],
     }));
+  }
+
+  async function copyMessage(message: ChatMessage) {
+    const text = message.content.trim();
+    if (!text) {
+      return;
+    }
+
+    try {
+      if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        setNotice('已复制消息内容。');
+        return;
+      }
+      setNotice('当前环境暂未接入剪贴板。');
+    } catch {
+      setNotice('复制失败，请稍后再试。');
+    }
+  }
+
+  function editMessage(message: ChatMessage) {
+    if (!message.content.trim()) {
+      return;
+    }
+    setInput(message.content);
+    setNotice('已放入输入框，可继续编辑。');
+  }
+
+  function showPendingActionNotice() {
+    setNotice('这个操作入口已保留，后续接入完整行为。');
+  }
+
+  async function checkUpdates() {
+    setCheckingUpdate(true);
+    setUpdateNotice('');
+
+    try {
+      const result = await checkForAppUpdate();
+      setUpdateInfo(result);
+      setUpdateNotice(result.updateAvailable ? `发现新版本 v${result.latestVersion}` : '当前已是最新版本。');
+    } catch (error) {
+      setUpdateInfo(null);
+      setUpdateNotice(error instanceof Error ? error.message : '更新检查失败。');
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }
+
+  function openUpdateTarget(kind: 'release' | 'install') {
+    const target =
+      kind === 'install'
+        ? updateInfo?.installAsset?.downloadUrl ?? updateInfo?.releaseUrl ?? appInfo.releasesUrl
+        : updateInfo?.releaseUrl ?? appInfo.releasesUrl;
+
+    void Linking.openURL(target);
   }
 
   function inferMessageGenerationTask(message: ChatMessage): GenerationTaskInfo | undefined {
@@ -821,6 +1100,7 @@ export default function App() {
       return;
     }
 
+    const conversationId = workspace.activeConversationId || createId('conversation');
     const userMessage: ChatMessage = {
       id: createId('msg'),
       role: 'user',
@@ -835,6 +1115,9 @@ export default function App() {
       content: '',
       createdAt: Date.now(),
       status: 'pending',
+      modelId: activeModelId,
+      providerId: activeProvider.id,
+      providerName: activeProvider.name,
     };
     const transcript = [...workspace.messages.filter((message) => message.id !== 'welcome'), userMessage].slice(-12);
 
@@ -842,10 +1125,20 @@ export default function App() {
     setAttachments([]);
     setBusy(true);
     setNotice('');
-    setWorkspace((current) => ({
-      ...current,
-      messages: [...current.messages.filter((message) => message.id !== 'welcome'), userMessage, assistantMessage],
-    }));
+    setWorkspace((current) => {
+      const messages = [
+        ...current.messages.filter((message) => message.id !== 'welcome'),
+        userMessage,
+        assistantMessage,
+      ];
+
+      return {
+        ...current,
+        activeConversationId: conversationId,
+        messages,
+        conversations: upsertConversation(current.conversations, conversationId, messages, userMessage.createdAt),
+      };
+    });
 
     try {
       const result = await sendOpenAiCompatibleChat({
@@ -928,43 +1221,6 @@ export default function App() {
                 {settingsOpen ? <MessageSquare size={20} color={palette.text} strokeWidth={2} /> : <Settings size={20} color={palette.text} strokeWidth={2} />}
               </AnimatedPressable>
             </View>
-            {activeModelId && activeModelTask === 'chat' ? (
-              <View style={styles.reasoningControl}>
-                <Text style={styles.reasoningLabel}>思考</Text>
-                <ScrollView
-                  horizontal
-                  style={styles.reasoningScroller}
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.reasoningOptions}
-                >
-                  {reasoningEffortOptions.map((option) => {
-                    const active = option.key === activeReasoningEffort;
-
-                    return (
-                      <AnimatedPressable
-                        key={option.key}
-                        accessibilityRole="button"
-                        testID={`reasoning-effort-${option.key}`}
-                        onPress={() => setActiveReasoningEffort(option.key)}
-                        style={[
-                          styles.reasoningOption,
-                          active && styles.reasoningOptionActive,
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.reasoningOptionText,
-                            active && styles.reasoningOptionTextActive,
-                          ]}
-                        >
-                          {option.label}
-                        </Text>
-                      </AnimatedPressable>
-                    );
-                  })}
-                </ScrollView>
-              </View>
-            ) : null}
           </View>
 
           <ModelPickerModal
@@ -1097,7 +1353,7 @@ export default function App() {
                         const active = filter.key === modelCapabilityFilter;
 
                         return (
-                          <Pressable
+                          <AnimatedPressable
                             key={filter.key}
                             accessibilityRole="button"
                             testID={`candidate-model-filter-${filter.key}`}
@@ -1113,7 +1369,7 @@ export default function App() {
                               {filter.label}
                             </Text>
                             <View style={[styles.modelFilterTabLine, active && styles.modelFilterTabLineActive]} />
-                          </Pressable>
+                          </AnimatedPressable>
                         );
                       })}
                     </ScrollView>
@@ -1171,6 +1427,59 @@ export default function App() {
                 </View>
               </View>
 
+              <View style={styles.settingsCard}>
+                <View style={styles.updateHeaderRow}>
+                  <View style={styles.updateTitleBlock}>
+                    <Text style={styles.settingsCardTitle}>版本更新</Text>
+                    <Text style={styles.updateVersionText}>当前 v{appInfo.version}</Text>
+                  </View>
+                  <Text style={styles.updateSourceBadge}>GitHub Releases</Text>
+                </View>
+
+                <View style={styles.updateStatusPanel}>
+                  <Text style={styles.updateStatusTitle}>
+                    {formatUpdateStatusTitle(updateInfo, updateNotice)}
+                  </Text>
+                  {updateInfo?.publishedAt ? (
+                    <Text style={styles.updateStatusMeta}>
+                      发布于 {new Date(updateInfo.publishedAt).toLocaleDateString('zh-CN')}
+                    </Text>
+                  ) : null}
+                  {updateInfo?.installAsset ? (
+                    <Text numberOfLines={1} style={styles.updateStatusMeta}>
+                      安装包 {updateInfo.installAsset.name}
+                    </Text>
+                  ) : null}
+                  {updateNotice ? <Text style={styles.updateNotice}>{updateNotice}</Text> : null}
+                </View>
+
+                <View style={styles.updateActionRow}>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    disabled={checkingUpdate}
+                    onPress={checkUpdates}
+                    style={[styles.secondaryButton, styles.updateActionButton, checkingUpdate && styles.buttonDisabled]}
+                  >
+                    <RefreshCw size={16} color={palette.text} strokeWidth={2} />
+                    <Text style={styles.secondaryButtonText}>{checkingUpdate ? '检查中' : '检查更新'}</Text>
+                  </AnimatedPressable>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    onPress={() => openUpdateTarget(updateInfo?.updateAvailable ? 'install' : 'release')}
+                    style={[styles.primaryButton, styles.updateActionButton]}
+                  >
+                    {updateInfo?.updateAvailable ? (
+                      <Download size={16} color={palette.textOnAccent} strokeWidth={2} />
+                    ) : (
+                      <ExternalLink size={16} color={palette.textOnAccent} strokeWidth={2} />
+                    )}
+                    <Text style={styles.primaryButtonText}>
+                      {updateInfo?.updateAvailable ? '打开更新' : 'Release'}
+                    </Text>
+                  </AnimatedPressable>
+                </View>
+              </View>
+
               </ScrollView>
             </ScreenFade>
           ) : (
@@ -1181,6 +1490,8 @@ export default function App() {
                     message.role === 'assistant'
                       ? message.generationTask ?? inferMessageGenerationTask(message)
                       : undefined;
+                  const messageModelId = message.modelId ?? '模型未记录';
+                  const messageProviderName = message.providerName ?? '未知服务商';
                   const showThinking =
                     message.role === 'assistant' &&
                     message.status === 'pending' &&
@@ -1192,64 +1503,85 @@ export default function App() {
                     key={message.id}
                     style={[
                       styles.messageBubble,
-                      message.role === 'user' ? styles.userBubble : styles.assistantBubble,
+                      message.role === 'user' ? styles.userMessageBlock : styles.assistantBubble,
                       message.status === 'error' && styles.errorBubble,
                     ]}
                   >
-                    <Text
-                      style={[
-                        styles.messageRole,
-                        message.role === 'user' ? styles.userRole : styles.assistantRole,
-                      ]}
-                    >
-                      {message.role === 'user' ? '你' : 'Claude'}
-                    </Text>
-                    {showThinking ? (
-                      <ThinkingDots />
+                    {message.role === 'user' ? (
+                      <>
+                        <View style={styles.userBubble}>
+                          <Text style={[styles.messageText, styles.userMessageText]}>{message.content}</Text>
+                          {message.attachments?.length ? (
+                            <View style={styles.attachmentGrid}>
+                              {message.attachments.map((attachment) => (
+                                <AttachmentPreview key={attachment.id} attachment={attachment} />
+                              ))}
+                            </View>
+                          ) : null}
+                        </View>
+                        <MessageActions
+                          role="user"
+                          onCopy={() => void copyMessage(message)}
+                          onRetry={showPendingActionNotice}
+                          onEdit={() => editMessage(message)}
+                          onMore={showPendingActionNotice}
+                        />
+                      </>
                     ) : (
-                      <Text
-                        style={[
-                          styles.messageText,
-                          message.role === 'user' && styles.userMessageText,
-                        ]}
-                      >
-                        {message.content}
-                      </Text>
-                    )}
-                    {message.role === 'assistant' && message.reasoningContent ? (
-                      <View style={styles.reasoningPanel}>
-                        <Pressable
-                          accessibilityRole="button"
-                          onPress={() => toggleReasoning(message.id)}
-                          style={styles.reasoningPanelHeader}
-                        >
-                          <Text style={styles.reasoningPanelTitle}>思考过程</Text>
-                          <Text style={styles.reasoningPanelAction}>
-                            {expandedReasoningByMessageId[message.id] ? '收起' : '展开'}
-                          </Text>
-                        </Pressable>
-                        {expandedReasoningByMessageId[message.id] ? (
-                          <Text style={styles.reasoningPanelText}>{message.reasoningContent}</Text>
+                      <>
+                        <AssistantMessageHeader
+                          modelId={messageModelId}
+                          providerName={messageProviderName}
+                          createdAt={message.createdAt}
+                        />
+                        {message.reasoningContent ? (
+                          <View style={styles.reasoningPanel}>
+                            <AnimatedPressable
+                              accessibilityRole="button"
+                              onPress={() => toggleReasoning(message.id)}
+                              style={styles.reasoningPanelHeader}
+                            >
+                              <Text style={styles.reasoningPanelTitle}>思考过程</Text>
+                              <Text style={styles.reasoningPanelAction}>
+                                {expandedReasoningByMessageId[message.id] ? '收起' : '展开'}
+                              </Text>
+                            </AnimatedPressable>
+                            {expandedReasoningByMessageId[message.id] ? (
+                              <Text style={styles.reasoningPanelText}>{message.reasoningContent}</Text>
+                            ) : null}
+                          </View>
                         ) : null}
-                      </View>
-                    ) : null}
-                    {message.role === 'assistant' && message.usage ? (
-                      <TokenUsageLine usage={message.usage} />
-                    ) : null}
-                    {message.role === 'assistant' && generationTask ? (
-                      <GenerationTaskPanel
-                        task={generationTask}
-                        busy={Boolean(queryingTaskByMessageId[message.id])}
-                        onRefresh={() => refreshGenerationTask(message, generationTask)}
-                      />
-                    ) : null}
-                    {message.attachments?.length ? (
-                      <View style={styles.attachmentGrid}>
-                        {message.attachments.map((attachment) => (
-                          <AttachmentPreview key={attachment.id} attachment={attachment} />
-                        ))}
-                      </View>
-                    ) : null}
+                        {showThinking ? (
+                          <ThinkingDots />
+                        ) : (
+                          <Text style={styles.messageText}>{message.content}</Text>
+                        )}
+                        {generationTask ? (
+                          <GenerationTaskPanel
+                            task={generationTask}
+                            busy={Boolean(queryingTaskByMessageId[message.id])}
+                            onRefresh={() => refreshGenerationTask(message, generationTask)}
+                          />
+                        ) : null}
+                        {message.attachments?.length ? (
+                          <View style={styles.attachmentGrid}>
+                            {message.attachments.map((attachment) => (
+                              <AttachmentPreview key={attachment.id} attachment={attachment} />
+                            ))}
+                          </View>
+                        ) : null}
+                        <View style={styles.assistantFooterRow}>
+                          <MessageActions
+                            role="assistant"
+                            onCopy={() => void copyMessage(message)}
+                            onRetry={showPendingActionNotice}
+                            onEdit={() => editMessage(message)}
+                            onMore={showPendingActionNotice}
+                          />
+                          {message.usage ? <TokenUsageLine usage={message.usage} /> : null}
+                        </View>
+                      </>
+                    )}
                   </AnimatedMessage>
                   );
                 })}
@@ -1279,10 +1611,40 @@ export default function App() {
                 </ScrollView>
               ) : null}
 
-              {attachMenuOpen ? (
-                <Pressable style={styles.attachMenuBackdrop} onPress={() => setAttachMenuOpen(false)} />
+              {attachMenuOpen || reasoningMenuOpen ? (
+                <Pressable
+                  style={styles.attachMenuBackdrop}
+                  onPress={() => {
+                    setAttachMenuOpen(false);
+                    setReasoningMenuOpen(false);
+                  }}
+                />
               ) : null}
               <View style={styles.composerWrapper}>
+                {reasoningMenuOpen && activeModelId && activeModelTask === 'chat' ? (
+                  <View style={styles.reasoningMenu}>
+                    {reasoningEffortOptions.map((option) => {
+                      const active = option.key === activeReasoningEffort;
+
+                      return (
+                        <AnimatedPressable
+                          key={option.key}
+                          accessibilityRole="button"
+                          testID={`reasoning-effort-${option.key}`}
+                          onPress={() => {
+                            setActiveReasoningEffort(option.key);
+                            setReasoningMenuOpen(false);
+                          }}
+                          style={[styles.reasoningMenuItem, active && styles.reasoningMenuItemActive]}
+                        >
+                          <Text style={[styles.reasoningMenuText, active && styles.reasoningMenuTextActive]}>
+                            {option.label}
+                          </Text>
+                        </AnimatedPressable>
+                      );
+                    })}
+                  </View>
+                ) : null}
                 {attachMenuOpen ? (
                   <View style={styles.attachMenu}>
                     <AnimatedPressable accessibilityRole="button" onPress={() => { addAttachments('image'); setAttachMenuOpen(false); }} style={styles.attachMenuItem}>
@@ -1300,13 +1662,6 @@ export default function App() {
                   </View>
                 ) : null}
                 <View style={styles.composer}>
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    onPress={() => setAttachMenuOpen((v) => !v)}
-                    style={styles.attachButton}
-                  >
-                    <Plus size={16} color={palette.textSecondary} strokeWidth={2.5} />
-                  </AnimatedPressable>
                   <TextInput
                     multiline
                     placeholder="今天如何？"
@@ -1315,14 +1670,47 @@ export default function App() {
                     onChangeText={setInput}
                     style={styles.composerInput}
                   />
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    disabled={busy}
-                    onPress={sendMessage}
-                    style={[styles.sendButton, busy && styles.buttonDisabled]}
-                  >
-                    <Text style={styles.sendButtonText}>{busy ? '···' : '↑'}</Text>
-                  </AnimatedPressable>
+                  <View style={styles.composerFooter}>
+                    <View style={styles.composerLeftTools}>
+                      {activeModelId && activeModelTask === 'chat' ? (
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          onPress={() => {
+                            setAttachMenuOpen(false);
+                            setReasoningMenuOpen((current) => !current);
+                          }}
+                          style={[
+                            styles.composerToolButton,
+                            activeReasoningEffort !== 'default' && styles.composerToolButtonActive,
+                          ]}
+                        >
+                          <Lightbulb
+                            size={15}
+                            color={activeReasoningEffort !== 'default' ? palette.accentText : palette.textSecondary}
+                            strokeWidth={2.2}
+                          />
+                        </AnimatedPressable>
+                      ) : null}
+                      <AnimatedPressable
+                        accessibilityRole="button"
+                        onPress={() => {
+                          setReasoningMenuOpen(false);
+                          setAttachMenuOpen((v) => !v);
+                        }}
+                        style={styles.composerToolButton}
+                      >
+                        <Plus size={15} color={palette.textSecondary} strokeWidth={2.4} />
+                      </AnimatedPressable>
+                    </View>
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      disabled={busy}
+                      onPress={sendMessage}
+                      style={[styles.sendButton, busy && styles.buttonDisabled]}
+                    >
+                      <Text style={styles.sendButtonText}>{busy ? '···' : '↑'}</Text>
+                    </AnimatedPressable>
+                  </View>
                 </View>
               </View>
             </ScreenFade>
@@ -1342,16 +1730,80 @@ export default function App() {
 
               <AnimatedPressable
                 accessibilityRole="button"
-                onPress={() => { clearMessages(); setSidebarOpen(false); }}
+                onPress={() => { startNewConversation(); setSidebarOpen(false); }}
                 style={styles.sidebarNewChat}
               >
                 <PenSquare size={18} color={palette.textOnAccent} strokeWidth={2} />
                 <Text style={styles.sidebarNewChatText}>新对话</Text>
               </AnimatedPressable>
 
+              <View style={styles.sidebarSearchBox}>
+                <Search size={16} color={palette.textSecondary} strokeWidth={2} />
+                <TextInput
+                  value={historySearchQuery}
+                  onChangeText={setHistorySearchQuery}
+                  placeholder="搜索聊天记录"
+                  placeholderTextColor={palette.placeholder}
+                  style={styles.sidebarSearchInput}
+                />
+                {historySearchQuery ? (
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    onPress={() => setHistorySearchQuery('')}
+                    style={styles.sidebarSearchClear}
+                  >
+                    <X size={14} color={palette.textSecondary} strokeWidth={2} />
+                  </AnimatedPressable>
+                ) : null}
+              </View>
+
               <View style={styles.sidebarSection}>
                 <Text style={styles.sidebarSectionTitle}>最近</Text>
-                <Text style={styles.sidebarEmpty}>暂无历史对话</Text>
+                {filteredConversations.length ? (
+                  <ScrollView
+                    style={styles.sidebarConversationList}
+                    showsVerticalScrollIndicator={false}
+                    contentContainerStyle={styles.sidebarConversationListContent}
+                  >
+                    {filteredConversations.map((conversation) => {
+                      const active = conversation.id === workspace.activeConversationId;
+                      const dominantModel = dominantConversationModel(conversation);
+
+                      return (
+                        <AnimatedPressable
+                          key={conversation.id}
+                          accessibilityRole="button"
+                          onPress={() => selectConversation(conversation.id)}
+                          style={[styles.sidebarConversationItem, active && styles.sidebarConversationItemActive]}
+                        >
+                          <Text numberOfLines={1} style={[styles.sidebarConversationTitle, active && styles.sidebarConversationTitleActive]}>
+                            {conversation.title}
+                          </Text>
+                          <View style={styles.sidebarConversationMetaRow}>
+                            {dominantModel ? (
+                              <ModelAvatar
+                                modelId={dominantModel.modelId}
+                                providerName={dominantModel.providerName}
+                                size={18}
+                                containerSize={22}
+                              />
+                            ) : null}
+                            <Text numberOfLines={1} style={styles.sidebarConversationMeta}>
+                              {dominantModel
+                                ? `${dominantModel.modelId}${dominantModel.count > 1 ? ` x${dominantModel.count}` : ''} · `
+                                : ''}
+                              {formatConversationTime(conversation.updatedAt)}
+                            </Text>
+                          </View>
+                        </AnimatedPressable>
+                      );
+                    })}
+                  </ScrollView>
+                ) : (
+                  <Text style={styles.sidebarEmpty}>
+                    {recentConversations.length ? '没有匹配的聊天记录' : '暂无历史对话'}
+                  </Text>
+                )}
               </View>
             </Pressable>
           </Pressable>
@@ -1366,33 +1818,210 @@ function formatTokenCount(value?: number) {
   return typeof value === 'number' ? value.toLocaleString() : '-';
 }
 
+function formatMessageTime(timestamp: number) {
+  return new Intl.DateTimeFormat('zh-CN', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).format(new Date(timestamp));
+}
+
+function displayProviderName(providerName?: string) {
+  const name = providerName?.trim();
+  if (!name) {
+    return 'Provider';
+  }
+
+  const text = name.toLowerCase();
+  if (text.includes('new api')) {
+    return 'New API';
+  }
+  if (text.includes('volc') || text.includes('ark')) {
+    return 'Volcengine Ark';
+  }
+  if (text.includes('bailian') || text.includes('dashscope')) {
+    return 'Bailian';
+  }
+
+  return name;
+}
+
+type ModelIconKey =
+  | 'openai'
+  | 'claude'
+  | 'gemini'
+  | 'qwen'
+  | 'deepseek'
+  | 'doubao'
+  | 'chatglm'
+  | 'kimi'
+  | 'minimax'
+  | 'bailian'
+  | 'volcengine'
+  | 'newapi'
+  | 'unknown';
+
+function modelIconKey(modelId?: string, providerName?: string): ModelIconKey {
+  const modelText = (modelId ?? '').toLowerCase();
+  const providerText = (providerName ?? '').toLowerCase();
+  const text = `${modelText} ${providerText}`;
+
+  if (text.includes('模型未记录') || text.includes('未知服务商')) {
+    return 'unknown';
+  }
+  if (text.includes('gpt') || text.includes('openai') || text.includes('codex')) {
+    return 'openai';
+  }
+  if (text.includes('claude') || text.includes('anthropic')) {
+    return 'claude';
+  }
+  if (text.includes('gemini') || text.includes('google')) {
+    return 'gemini';
+  }
+  if (modelText.includes('qwen') || modelText.includes('qwq') || modelText.includes('qvq') || modelText.includes('tongyi')) {
+    return 'qwen';
+  }
+  if (text.includes('deepseek')) {
+    return 'deepseek';
+  }
+  if (modelText.includes('doubao') || modelText.includes('seed')) {
+    return 'doubao';
+  }
+  if (text.includes('glm') || text.includes('zhipu')) {
+    return 'chatglm';
+  }
+  if (text.includes('kimi') || text.includes('moonshot')) {
+    return 'kimi';
+  }
+  if (text.includes('minimax')) {
+    return 'minimax';
+  }
+  if (providerText.includes('bailian') || providerText.includes('dashscope') || providerText.includes('aliyun')) {
+    return 'bailian';
+  }
+  if (providerText.includes('volc') || providerText.includes('ark') || providerText.includes('huoshan')) {
+    return 'volcengine';
+  }
+  if (providerText.includes('new api') || providerText.includes('new-api') || providerText.includes('newapi')) {
+    return 'newapi';
+  }
+
+  return 'unknown';
+}
+
+function ModelAvatar({
+  modelId,
+  providerName,
+  size = 30,
+  containerSize = 34,
+}: {
+  modelId?: string;
+  providerName?: string;
+  size?: number;
+  containerSize?: number;
+}) {
+  const iconKey = modelIconKey(modelId, providerName);
+
+  return (
+    <View style={[styles.modelAvatar, { width: containerSize, height: containerSize, borderRadius: containerSize / 2 }]}>
+      {iconKey === 'claude' ? <Claude.Color size={size} /> : null}
+      {iconKey === 'gemini' ? <Gemini.Color size={size} /> : null}
+      {iconKey === 'qwen' ? <Qwen.Color size={size} /> : null}
+      {iconKey === 'deepseek' ? <DeepSeek.Color size={size} /> : null}
+      {iconKey === 'doubao' ? <Doubao.Color size={size} /> : null}
+      {iconKey === 'chatglm' ? <ChatGLM.Color size={size} /> : null}
+      {iconKey === 'kimi' ? <Kimi.Color size={size} /> : null}
+      {iconKey === 'minimax' ? <Minimax.Color size={size} /> : null}
+      {iconKey === 'bailian' ? <Bailian.Color size={size} /> : null}
+      {iconKey === 'volcengine' ? <Volcengine.Color size={size} /> : null}
+      {iconKey === 'newapi' ? <NewAPI.Color size={size} /> : null}
+      {iconKey === 'openai' ? <OpenAI size={size} color={palette.text} /> : null}
+      {iconKey === 'unknown' ? <MessageSquare size={Math.max(14, size - 8)} color={palette.textSecondary} strokeWidth={2} /> : null}
+    </View>
+  );
+}
+
+function AssistantMessageHeader({
+  modelId,
+  providerName,
+  createdAt,
+}: {
+  modelId: string;
+  providerName: string;
+  createdAt: number;
+}) {
+  return (
+    <View style={styles.assistantMetaRow}>
+      <ModelAvatar modelId={modelId} providerName={providerName} />
+      <Text numberOfLines={1} style={styles.assistantModelName}>
+        {modelId || '模型'}
+      </Text>
+      <Text style={styles.assistantMetaDivider}>|</Text>
+      <Text numberOfLines={1} style={styles.assistantProviderName}>
+        {displayProviderName(providerName)}
+      </Text>
+      <Text style={styles.assistantTime}>{formatMessageTime(createdAt)}</Text>
+    </View>
+  );
+}
+
+function MessageActions({
+  role,
+  onCopy,
+  onRetry,
+  onEdit,
+  onMore,
+}: {
+  role: MessageRole;
+  onCopy: () => void;
+  onRetry: () => void;
+  onEdit: () => void;
+  onMore: () => void;
+}) {
+  return (
+    <View style={[styles.messageActions, role === 'user' && styles.userMessageActions]}>
+      <AnimatedPressable accessibilityRole="button" onPress={onCopy} style={styles.messageActionButton}>
+        <Copy size={21} color={palette.textSecondary} strokeWidth={2} />
+      </AnimatedPressable>
+      <AnimatedPressable accessibilityRole="button" onPress={onRetry} style={styles.messageActionButton}>
+        <RefreshCw size={22} color={palette.textSecondary} strokeWidth={2} />
+      </AnimatedPressable>
+      {role === 'assistant' ? (
+        <>
+          <AnimatedPressable accessibilityRole="button" onPress={onMore} style={styles.messageActionButton}>
+            <AudioLines size={22} color={palette.textSecondary} strokeWidth={2} />
+          </AnimatedPressable>
+          <AnimatedPressable accessibilityRole="button" onPress={onMore} style={styles.messageActionButton}>
+            <Share2 size={22} color={palette.textSecondary} strokeWidth={2} />
+          </AnimatedPressable>
+        </>
+      ) : (
+        <AnimatedPressable accessibilityRole="button" onPress={onEdit} style={styles.messageActionButton}>
+          <Pencil size={22} color={palette.textSecondary} strokeWidth={2} />
+        </AnimatedPressable>
+      )}
+      <AnimatedPressable accessibilityRole="button" onPress={onMore} style={styles.messageActionButton}>
+        <MoreHorizontal size={23} color={palette.textSecondary} strokeWidth={2} />
+      </AnimatedPressable>
+    </View>
+  );
+}
+
 function TokenUsageLine({ usage }: { usage: ChatTokenUsage }) {
+  const total =
+    usage.totalTokens ??
+    [usage.inputTokens, usage.outputTokens, usage.reasoningTokens]
+      .filter((value): value is number => typeof value === 'number')
+      .reduce((sum, value) => sum + value, 0);
+
   return (
     <View style={styles.tokenUsageRow}>
-      <View style={styles.tokenUsageChip}>
-        <Text style={styles.tokenUsageLabel}>上传</Text>
-        <Text style={styles.tokenUsageValue}>{formatTokenCount(usage.inputTokens)}</Text>
-      </View>
-      <View style={styles.tokenUsageChip}>
-        <Text style={styles.tokenUsageLabel}>下载</Text>
-        <Text style={styles.tokenUsageValue}>{formatTokenCount(usage.outputTokens)}</Text>
-      </View>
+      <Text style={styles.tokenUsageText}>↑ {formatTokenCount(usage.inputTokens)}</Text>
+      <Text style={styles.tokenUsageText}>↓ {formatTokenCount(usage.outputTokens)}</Text>
       {typeof usage.reasoningTokens === 'number' ? (
-        <View style={styles.tokenUsageChip}>
-          <Text style={styles.tokenUsageLabel}>推理</Text>
-          <Text style={styles.tokenUsageValue}>{formatTokenCount(usage.reasoningTokens)}</Text>
-        </View>
+        <Text style={styles.tokenUsageText}>思 {formatTokenCount(usage.reasoningTokens)}</Text>
       ) : null}
-      {typeof usage.cachedInputTokens === 'number' ? (
-        <View style={styles.tokenUsageChip}>
-          <Text style={styles.tokenUsageLabel}>缓存</Text>
-          <Text style={styles.tokenUsageValue}>{formatTokenCount(usage.cachedInputTokens)}</Text>
-        </View>
-      ) : null}
-      <View style={styles.tokenUsageChip}>
-        <Text style={styles.tokenUsageLabel}>合计</Text>
-        <Text style={styles.tokenUsageValue}>{formatTokenCount(usage.totalTokens)}</Text>
-      </View>
+      <Text style={styles.tokenUsageText}>Σ{formatTokenCount(total || undefined)}</Text>
     </View>
   );
 }
@@ -1800,8 +2429,10 @@ const styles = StyleSheet.create({
     borderRadius: radii.pill,
     borderWidth: 1,
     borderColor: palette.borderStrong,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 7,
     backgroundColor: palette.surface,
   },
   secondaryButtonText: {
@@ -1911,6 +2542,64 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
   },
+  updateHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  updateTitleBlock: {
+    flex: 1,
+    minWidth: 0,
+  },
+  updateVersionText: {
+    color: palette.textSecondary,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  updateSourceBadge: {
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    color: palette.textSecondary,
+    fontSize: 11,
+    fontWeight: '700',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+  },
+  updateStatusPanel: {
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.bg,
+    padding: 12,
+    gap: 5,
+  },
+  updateStatusTitle: {
+    color: palette.text,
+    fontSize: 15,
+    lineHeight: 20,
+    fontWeight: '700',
+  },
+  updateStatusMeta: {
+    color: palette.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  updateNotice: {
+    color: palette.warning,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  updateActionRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  updateActionButton: {
+    flex: 1,
+    minWidth: 0,
+  },
   actionRow: {
     flexDirection: 'row',
   },
@@ -1927,8 +2616,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     borderRadius: radii.pill,
     backgroundColor: palette.accent,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 8,
   },
   primaryButtonText: {
     color: palette.textOnAccent,
@@ -2262,10 +2953,15 @@ const styles = StyleSheet.create({
   messageBubble: {
     maxWidth: '100%',
   },
+  userMessageBlock: {
+    alignSelf: 'stretch',
+    alignItems: 'flex-end',
+  },
   userBubble: {
-    alignSelf: 'flex-end',
     maxWidth: '86%',
-    backgroundColor: palette.surfaceAlt,
+    backgroundColor: '#E8F8EF',
+    borderWidth: 1,
+    borderColor: '#BEEBD1',
     borderRadius: radii.lg,
     borderTopRightRadius: radii.sm,
     paddingHorizontal: 16,
@@ -2273,7 +2969,8 @@ const styles = StyleSheet.create({
   },
   assistantBubble: {
     alignSelf: 'stretch',
-    paddingHorizontal: 2,
+    paddingHorizontal: 6,
+    gap: 12,
   },
   errorBubble: {
     alignSelf: 'stretch',
@@ -2297,13 +2994,53 @@ const styles = StyleSheet.create({
   assistantRole: {
     color: palette.accentText,
   },
+  assistantMetaRow: {
+    minHeight: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  modelAvatar: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  assistantModelName: {
+    maxWidth: 180,
+    color: palette.text,
+    fontSize: 20,
+    lineHeight: 24,
+    fontWeight: '500',
+  },
+  assistantMetaDivider: {
+    color: palette.textSecondary,
+    fontSize: 18,
+    lineHeight: 22,
+  },
+  assistantProviderName: {
+    maxWidth: 140,
+    color: palette.textSecondary,
+    fontSize: 18,
+    lineHeight: 22,
+    fontWeight: '400',
+  },
+  assistantTime: {
+    color: palette.textSecondary,
+    fontSize: 16,
+    lineHeight: 20,
+  },
   messageText: {
     color: palette.text,
-    fontSize: 16,
-    lineHeight: 25,
+    fontSize: 18,
+    lineHeight: 29,
   },
   userMessageText: {
     color: palette.text,
+    fontSize: 20,
+    lineHeight: 30,
   },
   thinkingRow: {
     flexDirection: 'row',
@@ -2318,10 +3055,10 @@ const styles = StyleSheet.create({
     backgroundColor: palette.accent,
   },
   reasoningPanel: {
-    marginTop: 12,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: palette.border,
-    paddingTop: 10,
+    borderLeftWidth: 2,
+    borderLeftColor: palette.borderStrong,
+    paddingLeft: 10,
+    paddingVertical: 2,
     gap: 8,
   },
   reasoningPanelHeader: {
@@ -2347,31 +3084,38 @@ const styles = StyleSheet.create({
     lineHeight: 21,
   },
   tokenUsageRow: {
-    marginTop: 12,
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 6,
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 8,
   },
-  tokenUsageChip: {
-    minHeight: 26,
-    borderRadius: radii.pill,
-    borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: palette.surfaceAlt,
+  tokenUsageText: {
+    color: palette.textSecondary,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  assistantFooterRow: {
+    minHeight: 34,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 10,
+    justifyContent: 'space-between',
+    gap: 12,
   },
-  tokenUsageLabel: {
-    color: palette.textSecondary,
-    fontSize: 11,
-    fontWeight: '600',
+  messageActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 18,
   },
-  tokenUsageValue: {
-    color: palette.text,
-    fontSize: 11,
-    fontWeight: '700',
+  userMessageActions: {
+    marginTop: 12,
+    marginRight: 8,
+  },
+  messageActionButton: {
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   generationTaskPanel: {
     marginTop: 12,
@@ -2551,6 +3295,48 @@ const styles = StyleSheet.create({
     elevation: 8,
     minWidth: 180,
   },
+  reasoningMenu: {
+    position: 'absolute',
+    bottom: '100%',
+    left: 0,
+    right: 0,
+    marginBottom: 8,
+    backgroundColor: palette.bg,
+    borderRadius: radii.md,
+    padding: 6,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+  reasoningMenuItem: {
+    height: 30,
+    minWidth: 48,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  reasoningMenuItemActive: {
+    borderColor: palette.accentBorder,
+    backgroundColor: palette.accentSoft,
+  },
+  reasoningMenuText: {
+    color: palette.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  reasoningMenuTextActive: {
+    color: palette.accentText,
+    fontWeight: '700',
+  },
   attachMenuItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2575,7 +3361,7 @@ const styles = StyleSheet.create({
   composerWrapper: {
     marginHorizontal: 8,
     marginBottom: 12,
-    borderRadius: radii.xl,
+    borderRadius: radii.md,
     backgroundColor: palette.surface,
     borderWidth: 1,
     borderColor: palette.border,
@@ -2583,20 +3369,43 @@ const styles = StyleSheet.create({
     zIndex: 20,
   },
   composer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    gap: 8,
+    paddingHorizontal: 10,
+    paddingTop: 8,
+    paddingBottom: 7,
+    gap: 6,
   },
   composerInput: {
-    flex: 1,
-    minHeight: 28,
+    alignSelf: 'stretch',
+    minHeight: 34,
     maxHeight: 120,
     paddingVertical: 0,
+    paddingHorizontal: 2,
     color: palette.text,
     fontSize: 15,
     lineHeight: 28,
+  },
+  composerFooter: {
+    minHeight: 30,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  composerLeftTools: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  composerToolButton: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'transparent',
+  },
+  composerToolButtonActive: {
+    backgroundColor: palette.surfaceAlt,
   },
   sendButton: {
     width: 30,
@@ -2660,6 +3469,34 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
   },
+  sidebarSearchBox: {
+    height: 40,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    marginBottom: 22,
+  },
+  sidebarSearchInput: {
+    flex: 1,
+    minWidth: 0,
+    color: palette.text,
+    fontSize: 14,
+    lineHeight: 20,
+    paddingVertical: 0,
+    outlineStyle: 'none' as never,
+  },
+  sidebarSearchClear: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   sidebarSection: {
     flex: 1,
   },
@@ -2670,6 +3507,44 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
+  },
+  sidebarConversationList: {
+    flex: 1,
+  },
+  sidebarConversationListContent: {
+    gap: 6,
+    paddingBottom: 20,
+  },
+  sidebarConversationItem: {
+    borderRadius: radii.md,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 4,
+  },
+  sidebarConversationItemActive: {
+    backgroundColor: palette.surfaceAlt,
+  },
+  sidebarConversationTitle: {
+    color: palette.text,
+    fontSize: 15,
+    lineHeight: 20,
+    fontWeight: '600',
+  },
+  sidebarConversationTitleActive: {
+    color: palette.accentText,
+  },
+  sidebarConversationMetaRow: {
+    minHeight: 22,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  sidebarConversationMeta: {
+    flex: 1,
+    minWidth: 0,
+    color: palette.textSecondary,
+    fontSize: 12,
+    lineHeight: 16,
   },
   sidebarEmpty: {
     color: palette.placeholder,

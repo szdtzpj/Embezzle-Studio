@@ -972,6 +972,9 @@ export async function sendOpenAiCompatibleChat({
     messages: messages.map(toOpenAiMessage),
     temperature: 0.7,
     stream: true,
+    stream_options: {
+      include_usage: true,
+    },
   };
   applyReasoningOptions(body, provider, modelId, reasoningEffort);
 

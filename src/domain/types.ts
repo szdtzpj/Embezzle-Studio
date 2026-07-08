@@ -82,7 +82,18 @@ export interface ChatMessage {
   reasoningContent?: string;
   usage?: ChatTokenUsage;
   generationTask?: GenerationTaskInfo;
+  modelId?: string;
+  providerId?: string;
+  providerName?: string;
   error?: string;
+}
+
+export interface ChatConversation {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  messages: ChatMessage[];
 }
 
 export interface PluginManifest {
@@ -101,6 +112,8 @@ export interface AppWorkspace {
   activeModelIdByProvider: Record<string, string>;
   reasoningEffortByModel: Record<string, ReasoningEffort>;
   modelCandidatesByProvider: Record<string, ModelInfo[]>;
+  activeConversationId: string;
+  conversations: ChatConversation[];
   messages: ChatMessage[];
   plugins: PluginManifest[];
 }

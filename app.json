@@ -23,6 +23,9 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
+    "experiments": {
+      "baseUrl": "/Embezzle-Studio"
+    },
     "plugins": [
       "expo-secure-store"
     ]
