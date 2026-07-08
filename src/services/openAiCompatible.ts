@@ -45,11 +45,31 @@ interface ArkVideoTaskResponse {
 
 const webDevProxyUrl = 'http://127.0.0.1:8787/proxy';
 
-function normalizeBaseUrl(baseUrl: string): string {
-  return baseUrl
+function shouldAppendOpenAiVersion(baseUrl: string, provider: ProviderProfile): boolean {
+  if (!['custom', 'new-api-relay', 'openai-compatible'].includes(provider.kind)) {
+    return false;
+  }
+
+  try {
+    const url = new URL(baseUrl);
+    const path = url.pathname.replace(/\/+$/, '').toLowerCase();
+    return path === '';
+  } catch {
+    return false;
+  }
+}
+
+function normalizeBaseUrl(baseUrl: string, provider: ProviderProfile): string {
+  const normalized = baseUrl
     .trim()
     .replace(/\/+$/, '')
     .replace(/\/(?:chat\/completions|models)$/i, '');
+
+  if (normalized && shouldAppendOpenAiVersion(normalized, provider)) {
+    return `${normalized}/v1`;
+  }
+
+  return normalized;
 }
 
 function authHeaders(provider: ProviderProfile): HeadersInit {
@@ -59,16 +79,49 @@ function authHeaders(provider: ProviderProfile): HeadersInit {
 
   return {
     Authorization: `Bearer ${provider.apiKey.trim()}`,
+    Accept: 'application/json',
     'Content-Type': 'application/json',
   };
 }
 
 function assertBaseUrl(provider: ProviderProfile): string {
-  const baseUrl = normalizeBaseUrl(provider.baseUrl);
+  const baseUrl = normalizeBaseUrl(provider.baseUrl, provider);
   if (!baseUrl) {
     throw new Error('请先填写当前服务商的 Base URL。');
   }
   return baseUrl;
+}
+
+function compactResponseText(body: string): string {
+  return body.replace(/\s+/g, ' ').trim().slice(0, 260);
+}
+
+function looksLikeHtmlResponse(body: string, contentType: string): boolean {
+  const text = body.trim().toLowerCase();
+  return contentType.includes('text/html') || text.startsWith('<!doctype') || text.startsWith('<html');
+}
+
+async function readJsonResponse<T>(response: Response, requestUrl: string, label: string): Promise<T> {
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+  const body = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`${label}失败：${response.status} ${compactResponseText(body)}`);
+  }
+
+  if (looksLikeHtmlResponse(body, contentType)) {
+    throw new Error(
+      `${label}返回的是 HTML 页面，不是 JSON。当前请求地址：${requestUrl}。请确认 Base URL 是 OpenAI/New API 兼容接口地址，例如 https://new-api.zxzt123.com/v1；如果只填主站域名，服务端通常会返回管理后台页面。`
+    );
+  }
+
+  try {
+    return JSON.parse(body) as T;
+  } catch (error) {
+    throw new Error(
+      `${label}返回内容不是有效 JSON：${error instanceof Error ? error.message : String(error)}。当前请求地址：${requestUrl}。响应片段：${compactResponseText(body)}`
+    );
+  }
 }
 
 function headersToObject(headers: HeadersInit | undefined): Record<string, string> {
@@ -424,17 +477,13 @@ function applyReasoningOptions(
 
 export async function fetchOpenAiCompatibleModels(provider: ProviderProfile): Promise<ModelInfo[]> {
   const baseUrl = assertBaseUrl(provider);
-  const response = await providerFetch(`${baseUrl}/models`, {
+  const requestUrl = `${baseUrl}/models`;
+  const response = await providerFetch(requestUrl, {
     method: 'GET',
     headers: authHeaders(provider),
   });
 
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`模型列表获取失败：${response.status} ${body.slice(0, 240)}`);
-  }
-
-  const payload = (await response.json()) as { data?: RemoteModel[] };
+  const payload = await readJsonResponse<{ data?: RemoteModel[] }>(response, requestUrl, '模型列表获取');
   const remoteModels = Array.isArray(payload.data) ? payload.data : [];
 
   return remoteModels
