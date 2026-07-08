@@ -39,18 +39,18 @@ jobs:
       - name: Prebuild Android project
         run: npx expo prebuild --platform android --clean --non-interactive
 
-      - name: Build debug APK
-        run: cd android && ./gradlew assembleDebug --no-daemon
+      - name: Build release APK
+        run: cd android && ./gradlew assembleRelease --no-daemon
 
       - name: Rename APK
         run: |
           mkdir -p release
-          cp android/app/build/outputs/apk/debug/app-debug.apk "release/Embezzle-Studio-${{ inputs.release_tag }}-debug.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk "release/Embezzle-Studio-${{ inputs.release_tag }}-release.apk"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Embezzle-Studio-${{ inputs.release_tag }}-debug-apk
+          name: Embezzle-Studio-${{ inputs.release_tag }}-release-apk
           path: release/*.apk
 
       - name: Attach APK to Release
