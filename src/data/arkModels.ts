@@ -131,6 +131,16 @@ export const arkPresetModels: ModelInfo[] = [
   },
 ];
 
+const arkPresetModelIds = new Set(arkPresetModels.map((model) => model.id));
+
+export function isArkPresetModelId(modelId: string): boolean {
+  return arkPresetModelIds.has(modelId);
+}
+
+export function isArkStaticDoubaoModelId(modelId: string): boolean {
+  return isArkPresetModelId(modelId) || modelId.toLowerCase().startsWith('doubao-');
+}
+
 export function isVolcengineArkProvider(provider: ProviderProfile): boolean {
   const host = provider.baseUrl.toLowerCase();
   const name = provider.name.toLowerCase();

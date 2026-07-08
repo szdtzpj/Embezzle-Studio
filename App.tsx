@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
+import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/arkModels';
 import { createDefaultWorkspace } from './src/data/providerCatalog';
 import type { AppWorkspace, ChatMessage, MediaAttachment, ModelInfo, ProviderProfile } from './src/domain/types';
 import { pickFiles, pickImages, pickVideos } from './src/services/mediaPicker';
@@ -79,17 +80,33 @@ export default function App() {
     [workspace.activeProviderId, workspace.providers]
   );
 
+  const addedModels = useMemo(() => {
+    if (!activeProvider) {
+      return [];
+    }
+
+    return activeProvider.models.filter(
+      (model) =>
+        !(isVolcengineArkProvider(activeProvider) && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
+    );
+  }, [activeProvider]);
+  const savedActiveModelId = activeProvider ? workspace.activeModelIdByProvider[activeProvider.id] : '';
   const activeModelId = activeProvider
-    ? workspace.activeModelIdByProvider[activeProvider.id] || activeProvider.models[0]?.id || ''
+    ? addedModels.some((model) => model.id === savedActiveModelId)
+      ? savedActiveModelId
+      : addedModels[0]?.id ?? ''
     : '';
 
-  const activeModel = activeProvider?.models.find((model) => model.id === activeModelId);
+  const activeModel = addedModels.find((model) => model.id === activeModelId);
   const modelCandidates = activeProvider
-    ? workspace.modelCandidatesByProvider[activeProvider.id] ?? []
+    ? (workspace.modelCandidatesByProvider[activeProvider.id] ?? []).filter(
+        (model) =>
+          !(isVolcengineArkProvider(activeProvider) && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
+      )
     : [];
   const addedModelIds = useMemo(
-    () => new Set(activeProvider?.models.map((model) => model.id) ?? []),
-    [activeProvider?.models]
+    () => new Set(addedModels.map((model) => model.id)),
+    [addedModels]
   );
 
   function updateActiveProvider(patch: Partial<ProviderProfile>) {
@@ -266,10 +283,25 @@ export default function App() {
       }));
       setNotice(result.notice);
     } catch (error) {
+      setWorkspace((current) => ({
+        ...current,
+        modelCandidatesByProvider: {
+          ...current.modelCandidatesByProvider,
+          [activeProvider.id]: [],
+        },
+      }));
       setNotice(error instanceof Error ? error.message : '模型列表获取失败。');
     } finally {
       setBusy(false);
     }
+  }
+
+  function clearMessages() {
+    setWorkspace((current) => ({
+      ...current,
+      messages: [],
+    }));
+    setNotice('已清空会话。');
   }
 
   async function addAttachments(kind: 'image' | 'video' | 'file') {
@@ -308,7 +340,7 @@ export default function App() {
       return;
     }
 
-    if (!activeModelId) {
+    if (!activeModel) {
       setNotice('请先添加并选择模型。');
       return;
     }
@@ -388,13 +420,18 @@ export default function App() {
                 {activeProvider.name} / {(activeModel?.name ?? activeModelId) || '未选择模型'}
               </Text>
             </View>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => setSettingsOpen((current) => !current)}
-              style={styles.secondaryButton}
-            >
-              <Text style={styles.secondaryButtonText}>{settingsOpen ? '聊天' : '配置'}</Text>
-            </Pressable>
+            <View style={styles.topActions}>
+              <Pressable accessibilityRole="button" onPress={clearMessages} style={styles.secondaryButton}>
+                <Text style={styles.secondaryButtonText}>清空</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => setSettingsOpen((current) => !current)}
+                style={styles.secondaryButton}
+              >
+                <Text style={styles.secondaryButtonText}>{settingsOpen ? '聊天' : '配置'}</Text>
+              </Pressable>
+            </View>
           </View>
 
           {settingsOpen ? (
@@ -510,7 +547,7 @@ export default function App() {
                 </Pressable>
               </View>
               <View style={styles.modelList}>
-                {activeProvider.models.map((model) => (
+                {addedModels.map((model) => (
                   <ModelButton
                     key={model.id}
                     model={model}
@@ -562,13 +599,13 @@ export default function App() {
 
               {notice ? <Text style={styles.notice}>{notice}</Text> : null}
 
-              {activeProvider.models.length ? (
+              {addedModels.length ? (
                 <ScrollView
                   horizontal
                   showsHorizontalScrollIndicator={false}
                   contentContainerStyle={styles.modelSwitchRow}
                 >
-                  {activeProvider.models.map((model) => (
+                  {addedModels.map((model) => (
                     <Pressable
                       key={model.id}
                       accessibilityRole="button"
@@ -761,6 +798,11 @@ const styles = StyleSheet.create({
     marginTop: 4,
     color: '#596779',
     fontSize: 12,
+  },
+  topActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   secondaryButton: {
     height: 40,

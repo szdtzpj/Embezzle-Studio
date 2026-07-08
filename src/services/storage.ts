@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 
+import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from '../data/arkModels';
 import type { AppWorkspace, ModelInfo, ProviderProfile } from '../domain/types';
 
 const WORKSPACE_KEY = '@embezzle-studio/workspace-v1';
@@ -70,16 +71,25 @@ function stripSecret(provider: ProviderProfile): PersistedProvider {
 function normalizeWorkspace(snapshot: PersistedWorkspace, providers: ProviderProfile[]): AppWorkspace {
   const modelCandidatesByProvider = { ...(snapshot.modelCandidatesByProvider ?? {}) };
   const normalizedProviders = providers.map((provider) => {
+    const isArkProvider = isVolcengineArkProvider(provider);
     const presetModels = provider.models.filter((model) => model.source === 'preset');
-    const addedModels = provider.models.filter((model) => model.source !== 'preset');
+    const addedModels = provider.models.filter(
+      (model) => model.source !== 'preset' && !(isArkProvider && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
+    );
 
-    if (presetModels.length) {
-      const existingCandidates = modelCandidatesByProvider[provider.id] ?? [];
+    const existingCandidates = modelCandidatesByProvider[provider.id] ?? [];
+    const retainedCandidates = existingCandidates.filter(
+      (model) => !(isArkProvider && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
+    );
+
+    if (presetModels.length && !isArkProvider) {
       const existingIds = new Set(existingCandidates.map((model) => model.id));
       modelCandidatesByProvider[provider.id] = [
-        ...existingCandidates,
+        ...retainedCandidates,
         ...presetModels.filter((model) => !existingIds.has(model.id)),
       ];
+    } else {
+      modelCandidatesByProvider[provider.id] = retainedCandidates;
     }
 
     return {
