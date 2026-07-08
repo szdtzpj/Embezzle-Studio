@@ -159,6 +159,11 @@ export async function sendOpenAiCompatibleChat({
 
   if (!response.ok) {
     const body = await response.text();
+    if (response.status === 404 && body.includes('InvalidEndpointOrModel.NotFound')) {
+      throw new Error(
+        `对话请求失败：当前模型 ID「${modelId}」不存在或当前 API Key 无权调用。请在配置页点击“获取模型”，选择接口返回的可用模型；如果火山控制台显示的是专属 Endpoint ID，请手动添加那个 ID。`
+      );
+    }
     throw new Error(`对话请求失败：${response.status} ${body.slice(0, 320)}`);
   }
 
