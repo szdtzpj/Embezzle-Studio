@@ -1,6 +1,7 @@
 import type {
   ChatCompletionResult,
   ChatMessage,
+  ChatTokenUsage,
   MediaAttachment,
   ModelInfo,
   ProviderProfile,
@@ -152,6 +153,91 @@ function readAssistantText(payload: any): string {
   }
 
   return '模型返回了空内容。';
+}
+
+function nonEmptyText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function readTextParts(value: unknown): string[] {
+  if (typeof value === 'string') {
+    return value.trim() ? [value.trim()] : [];
+  }
+
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((part) => {
+      if (typeof part === 'string') {
+        return part;
+      }
+
+      return (
+        part?.text ??
+        part?.content ??
+        part?.reasoning_content ??
+        part?.reasoningContent ??
+        ''
+      );
+    })
+    .filter((text) => typeof text === 'string' && text.trim())
+    .map((text) => text.trim());
+}
+
+function readReasoningText(payload: any): string | undefined {
+  const message = payload?.choices?.[0]?.message;
+  const direct =
+    nonEmptyText(message?.reasoning_content) ??
+    nonEmptyText(message?.reasoningContent) ??
+    nonEmptyText(message?.reasoning);
+
+  if (direct) {
+    return direct;
+  }
+
+  const contentParts = readTextParts(message?.reasoning_details ?? message?.thinking ?? message?.thoughts);
+  if (contentParts.length) {
+    return contentParts.join('\n\n');
+  }
+
+  const responseReasoning = Array.isArray(payload?.output)
+    ? payload.output
+        .filter((item: any) => item?.type === 'reasoning')
+        .flatMap((item: any) => readTextParts(item?.summary ?? item?.content ?? item?.text))
+    : [];
+
+  if (responseReasoning.length) {
+    return responseReasoning.join('\n\n');
+  }
+
+  return undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function readTokenUsage(payload: any): ChatTokenUsage | undefined {
+  const usage = payload?.usage;
+  if (!usage || typeof usage !== 'object') {
+    return undefined;
+  }
+
+  const tokenUsage: ChatTokenUsage = {
+    inputTokens: optionalNumber(usage.prompt_tokens) ?? optionalNumber(usage.input_tokens),
+    outputTokens: optionalNumber(usage.completion_tokens) ?? optionalNumber(usage.output_tokens),
+    reasoningTokens:
+      optionalNumber(usage.completion_tokens_details?.reasoning_tokens) ??
+      optionalNumber(usage.output_tokens_details?.reasoning_tokens),
+    cachedInputTokens:
+      optionalNumber(usage.prompt_tokens_details?.cached_tokens) ??
+      optionalNumber(usage.input_tokens_details?.cached_tokens),
+    totalTokens: optionalNumber(usage.total_tokens),
+  };
+
+  return Object.values(tokenUsage).some((value) => typeof value === 'number') ? tokenUsage : undefined;
 }
 
 function modelText(modelId: string): string {
@@ -358,6 +444,8 @@ export async function sendOpenAiCompatibleChat({
 
   return {
     content: readAssistantText(payload),
+    reasoningContent: readReasoningText(payload),
+    usage: readTokenUsage(payload),
     raw: payload,
   };
 }

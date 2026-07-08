@@ -19,6 +19,7 @@ import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/ar
 import { createDefaultWorkspace } from './src/data/providerCatalog';
 import type {
   AppWorkspace,
+  ChatTokenUsage,
   Capability,
   ChatMessage,
   MediaAttachment,
@@ -139,6 +140,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [expandedReasoningByMessageId, setExpandedReasoningByMessageId] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     let mounted = true;
@@ -459,6 +461,7 @@ export default function App() {
       ...current,
       messages: [],
     }));
+    setExpandedReasoningByMessageId({});
     setNotice('已清空会话。');
   }
 
@@ -484,6 +487,13 @@ export default function App() {
       messages: current.messages.map((message) =>
         message.id === messageId ? { ...message, ...patch } : message
       ),
+    }));
+  }
+
+  function toggleReasoning(messageId: string) {
+    setExpandedReasoningByMessageId((current) => ({
+      ...current,
+      [messageId]: !current[messageId],
     }));
   }
 
@@ -539,6 +549,8 @@ export default function App() {
 
       updateAssistantMessage(assistantMessage.id, {
         content: result.content,
+        reasoningContent: result.reasoningContent,
+        usage: result.usage,
         status: 'ready',
       });
     } catch (error) {
@@ -869,6 +881,26 @@ export default function App() {
                     >
                       {message.content}
                     </Text>
+                    {message.role === 'assistant' && message.reasoningContent ? (
+                      <View style={styles.reasoningPanel}>
+                        <Pressable
+                          accessibilityRole="button"
+                          onPress={() => toggleReasoning(message.id)}
+                          style={styles.reasoningPanelHeader}
+                        >
+                          <Text style={styles.reasoningPanelTitle}>思考过程</Text>
+                          <Text style={styles.reasoningPanelAction}>
+                            {expandedReasoningByMessageId[message.id] ? '收起' : '展开'}
+                          </Text>
+                        </Pressable>
+                        {expandedReasoningByMessageId[message.id] ? (
+                          <Text style={styles.reasoningPanelText}>{message.reasoningContent}</Text>
+                        ) : null}
+                      </View>
+                    ) : null}
+                    {message.role === 'assistant' && message.usage ? (
+                      <TokenUsageLine usage={message.usage} />
+                    ) : null}
                     {message.attachments?.length ? (
                       <View style={styles.attachmentGrid}>
                         {message.attachments.map((attachment) => (
@@ -939,6 +971,41 @@ export default function App() {
         </KeyboardAvoidingView>
       </SafeAreaView>
     </SafeAreaProvider>
+  );
+}
+
+function formatTokenCount(value?: number) {
+  return typeof value === 'number' ? value.toLocaleString() : '-';
+}
+
+function TokenUsageLine({ usage }: { usage: ChatTokenUsage }) {
+  return (
+    <View style={styles.tokenUsageRow}>
+      <View style={styles.tokenUsageChip}>
+        <Text style={styles.tokenUsageLabel}>上传</Text>
+        <Text style={styles.tokenUsageValue}>{formatTokenCount(usage.inputTokens)}</Text>
+      </View>
+      <View style={styles.tokenUsageChip}>
+        <Text style={styles.tokenUsageLabel}>下载</Text>
+        <Text style={styles.tokenUsageValue}>{formatTokenCount(usage.outputTokens)}</Text>
+      </View>
+      {typeof usage.reasoningTokens === 'number' ? (
+        <View style={styles.tokenUsageChip}>
+          <Text style={styles.tokenUsageLabel}>推理</Text>
+          <Text style={styles.tokenUsageValue}>{formatTokenCount(usage.reasoningTokens)}</Text>
+        </View>
+      ) : null}
+      {typeof usage.cachedInputTokens === 'number' ? (
+        <View style={styles.tokenUsageChip}>
+          <Text style={styles.tokenUsageLabel}>缓存</Text>
+          <Text style={styles.tokenUsageValue}>{formatTokenCount(usage.cachedInputTokens)}</Text>
+        </View>
+      ) : null}
+      <View style={styles.tokenUsageChip}>
+        <Text style={styles.tokenUsageLabel}>合计</Text>
+        <Text style={styles.tokenUsageValue}>{formatTokenCount(usage.totalTokens)}</Text>
+      </View>
+    </View>
   );
 }
 
@@ -1681,6 +1748,62 @@ const styles = StyleSheet.create({
   },
   userMessageText: {
     color: '#ffffff',
+  },
+  reasoningPanel: {
+    marginTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#d8e2ef',
+    paddingTop: 8,
+    gap: 8,
+  },
+  reasoningPanelHeader: {
+    minHeight: 28,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  reasoningPanelTitle: {
+    color: '#40516a',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  reasoningPanelAction: {
+    color: '#1f5fbf',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  reasoningPanelText: {
+    color: '#314158',
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  tokenUsageRow: {
+    marginTop: 10,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  tokenUsageChip: {
+    minHeight: 26,
+    borderRadius: 7,
+    borderWidth: 1,
+    borderColor: '#d8e2ef',
+    backgroundColor: '#f8fbff',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 8,
+  },
+  tokenUsageLabel: {
+    color: '#64748b',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  tokenUsageValue: {
+    color: '#25364d',
+    fontSize: 11,
+    fontWeight: '900',
   },
   attachmentGrid: {
     marginTop: 10,

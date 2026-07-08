@@ -53,6 +53,14 @@ export interface MediaAttachment {
   base64?: string | null;
 }
 
+export interface ChatTokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  cachedInputTokens?: number;
+  totalTokens?: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: MessageRole;
@@ -60,6 +68,8 @@ export interface ChatMessage {
   createdAt: number;
   status: MessageStatus;
   attachments?: MediaAttachment[];
+  reasoningContent?: string;
+  usage?: ChatTokenUsage;
   error?: string;
 }
 
@@ -85,5 +95,7 @@ export interface AppWorkspace {
 
 export interface ChatCompletionResult {
   content: string;
+  reasoningContent?: string;
+  usage?: ChatTokenUsage;
   raw: unknown;
 }
