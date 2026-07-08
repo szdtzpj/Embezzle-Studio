@@ -17,7 +17,7 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/arkModels';
 import { createDefaultWorkspace } from './src/data/providerCatalog';
-import type { AppWorkspace, ChatMessage, MediaAttachment, ModelInfo, ProviderProfile } from './src/domain/types';
+import type { AppWorkspace, Capability, ChatMessage, MediaAttachment, ModelInfo, ProviderProfile } from './src/domain/types';
 import { pickFiles, pickImages, pickVideos } from './src/services/mediaPicker';
 import { sendOpenAiCompatibleChat } from './src/services/openAiCompatible';
 import { refreshProviderModels } from './src/services/modelDiscovery';
@@ -33,11 +33,80 @@ const capabilityLabel: Record<string, string> = {
   mcp: 'MCP',
 };
 
+type CandidateModelFilter = 'all' | 'reasoning' | 'vision' | 'web' | 'free' | 'embedding' | 'rerank' | 'tool';
+
+const candidateModelFilters: Array<{ key: CandidateModelFilter; label: string }> = [
+  { key: 'all', label: '全部' },
+  { key: 'reasoning', label: '推理' },
+  { key: 'vision', label: '视觉' },
+  { key: 'web', label: '联网' },
+  { key: 'free', label: '免费' },
+  { key: 'embedding', label: '嵌入' },
+  { key: 'rerank', label: '重排' },
+  { key: 'tool', label: '工具' },
+];
+
+const modelFilterKeywords = {
+  reasoning: ['reason', 'thinking', 'think', 'deepseek-r1', '-r1', 'r1-', 'qwq', 'qvq', 'o1', 'o3', 'o4', 'z1'],
+  vision: ['vision', 'visual', 'vl', 'image', 'img', 'omni', '4v', 'multimodal', 'multi-modal', 'qwen-vl', 'glm-4v', 'gpt-4o'],
+  web: ['web', 'search', 'browsing', 'browser', 'online', 'internet'],
+  free: ['free', 'gratis', 'trial'],
+  embedding: ['embedding', 'embeddings', 'embed', 'bge', 'm3e', 'jina-embeddings'],
+  rerank: ['rerank', 'reranker', 're-rank', 'bge-reranker'],
+  tool: ['functioncall', 'function-call', 'function', 'tool', 'tools', 'mcp'],
+};
+
 function getSelectableModels(provider: ProviderProfile) {
   return provider.models.filter(
     (model) =>
       !(isVolcengineArkProvider(provider) && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
   );
+}
+
+function modelIndexText(model: ModelInfo) {
+  return `${model.name ?? ''} ${model.id}`.toLowerCase();
+}
+
+function includesAny(value: string, keywords: string[]) {
+  return keywords.some((keyword) => value.includes(keyword));
+}
+
+function hasExplicitCapability(model: ModelInfo, capability: Capability) {
+  return model.source !== 'remote' && model.capabilities.includes(capability);
+}
+
+function matchesCandidateModelFilter(model: ModelInfo, filter: CandidateModelFilter) {
+  if (filter === 'all') {
+    return true;
+  }
+
+  const text = modelIndexText(model);
+
+  if (filter === 'reasoning') {
+    return includesAny(text, modelFilterKeywords.reasoning);
+  }
+
+  if (filter === 'vision') {
+    return hasExplicitCapability(model, 'image-input') || includesAny(text, modelFilterKeywords.vision);
+  }
+
+  if (filter === 'web') {
+    return includesAny(text, modelFilterKeywords.web);
+  }
+
+  if (filter === 'free') {
+    return includesAny(text, modelFilterKeywords.free);
+  }
+
+  if (filter === 'embedding') {
+    return includesAny(text, modelFilterKeywords.embedding);
+  }
+
+  if (filter === 'rerank') {
+    return includesAny(text, modelFilterKeywords.rerank);
+  }
+
+  return hasExplicitCapability(model, 'tool-calling') || includesAny(text, modelFilterKeywords.tool);
 }
 
 export default function App() {
@@ -47,6 +116,7 @@ export default function App() {
   const [input, setInput] = useState('');
   const [manualModelId, setManualModelId] = useState('');
   const [modelSearchQuery, setModelSearchQuery] = useState('');
+  const [modelCapabilityFilter, setModelCapabilityFilter] = useState<CandidateModelFilter>('all');
   const [attachments, setAttachments] = useState<MediaAttachment[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -118,17 +188,13 @@ export default function App() {
   const filteredModelCandidates = useMemo(() => {
     const query = modelSearchQuery.trim().toLowerCase();
 
-    if (!query) {
-      return modelCandidates;
-    }
-
     return modelCandidates.filter((model) => {
-      const name = model.name?.toLowerCase() ?? '';
-      const id = model.id.toLowerCase();
+      const text = modelIndexText(model);
+      const matchesQuery = !query || text.includes(query);
 
-      return name.includes(query) || id.includes(query);
+      return matchesQuery && matchesCandidateModelFilter(model, modelCapabilityFilter);
     });
-  }, [modelCandidates, modelSearchQuery]);
+  }, [modelCandidates, modelCapabilityFilter, modelSearchQuery]);
   const providerModelGroups = useMemo(
     () =>
       workspace.providers
@@ -159,6 +225,7 @@ export default function App() {
       activeProviderId: providerId,
     }));
     setModelSearchQuery('');
+    setModelCapabilityFilter('all');
   }
 
   function selectModel(modelId: string) {
@@ -213,6 +280,7 @@ export default function App() {
     }));
     setManualModelId('');
     setModelSearchQuery('');
+    setModelCapabilityFilter('all');
   }
 
   function addManualModel() {
@@ -326,6 +394,8 @@ export default function App() {
           [activeProvider.id]: result.models,
         },
       }));
+      setModelSearchQuery('');
+      setModelCapabilityFilter('all');
       setNotice(result.notice);
     } catch (error) {
       setWorkspace((current) => ({
@@ -610,6 +680,35 @@ export default function App() {
                       </Pressable>
                     ) : null}
                   </View>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.modelFilterTabs}
+                  >
+                    {candidateModelFilters.map((filter) => {
+                      const active = filter.key === modelCapabilityFilter;
+
+                      return (
+                        <Pressable
+                          key={filter.key}
+                          accessibilityRole="button"
+                          testID={`candidate-model-filter-${filter.key}`}
+                          onPress={() => setModelCapabilityFilter(filter.key)}
+                          style={styles.modelFilterTab}
+                        >
+                          <Text
+                            style={[
+                              styles.modelFilterTabText,
+                              active && styles.modelFilterTabTextActive,
+                            ]}
+                          >
+                            {filter.label}
+                          </Text>
+                          <View style={[styles.modelFilterTabLine, active && styles.modelFilterTabLineActive]} />
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
                   <Text testID="candidate-model-search-count" style={styles.modelSearchMeta}>
                     显示 {filteredModelCandidates.length} / {modelCandidates.length}
                   </Text>
@@ -1136,6 +1235,33 @@ const styles = StyleSheet.create({
   },
   modelSearchInput: {
     flex: 1,
+  },
+  modelFilterTabs: {
+    paddingRight: 18,
+    gap: 24,
+  },
+  modelFilterTab: {
+    height: 34,
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  modelFilterTabText: {
+    color: '#26384d',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  modelFilterTabTextActive: {
+    color: '#00a76f',
+    fontWeight: '900',
+  },
+  modelFilterTabLine: {
+    width: '100%',
+    height: 2,
+    borderRadius: 2,
+    backgroundColor: 'transparent',
+  },
+  modelFilterTabLineActive: {
+    backgroundColor: '#00a76f',
   },
   modelSearchMeta: {
     marginTop: -8,
