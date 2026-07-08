@@ -1886,8 +1886,8 @@ function modelIconKey(modelId?: string, providerName?: string): ModelIconKey {
 function ModelAvatar({
   modelId,
   providerName,
-  size = 30,
-  containerSize = 34,
+  size = 18,
+  containerSize = 24,
 }: {
   modelId?: string;
   providerName?: string;
@@ -1956,27 +1956,27 @@ function MessageActions({
   return (
     <View style={[styles.messageActions, role === 'user' && styles.userMessageActions]}>
       <AnimatedPressable accessibilityRole="button" onPress={onCopy} style={styles.messageActionButton}>
-        <Copy size={21} color={palette.textSecondary} strokeWidth={2} />
+        <Copy size={16} color={palette.textSecondary} strokeWidth={2} />
       </AnimatedPressable>
       <AnimatedPressable accessibilityRole="button" onPress={onRetry} style={styles.messageActionButton}>
-        <RefreshCw size={22} color={palette.textSecondary} strokeWidth={2} />
+        <RefreshCw size={16} color={palette.textSecondary} strokeWidth={2} />
       </AnimatedPressable>
       {role === 'assistant' ? (
         <>
           <AnimatedPressable accessibilityRole="button" onPress={onMore} style={styles.messageActionButton}>
-            <AudioLines size={22} color={palette.textSecondary} strokeWidth={2} />
+            <AudioLines size={16} color={palette.textSecondary} strokeWidth={2} />
           </AnimatedPressable>
           <AnimatedPressable accessibilityRole="button" onPress={onMore} style={styles.messageActionButton}>
-            <Share2 size={22} color={palette.textSecondary} strokeWidth={2} />
+            <Share2 size={16} color={palette.textSecondary} strokeWidth={2} />
           </AnimatedPressable>
         </>
       ) : (
         <AnimatedPressable accessibilityRole="button" onPress={onEdit} style={styles.messageActionButton}>
-          <Pencil size={22} color={palette.textSecondary} strokeWidth={2} />
+          <Pencil size={16} color={palette.textSecondary} strokeWidth={2} />
         </AnimatedPressable>
       )}
       <AnimatedPressable accessibilityRole="button" onPress={onMore} style={styles.messageActionButton}>
-        <MoreHorizontal size={23} color={palette.textSecondary} strokeWidth={2} />
+        <MoreHorizontal size={16} color={palette.textSecondary} strokeWidth={2} />
       </AnimatedPressable>
     </View>
   );
@@ -2173,15 +2173,6 @@ function ModelPickerModal({
           </View>
 
           <ScrollView contentContainerStyle={styles.modelPickerList}>
-            {activeModelTask === 'chat' ? (
-              <View style={styles.modelPickerReasoningSection}>
-                <View style={styles.reasoningSliderEndpoints}>
-                  <Text style={styles.reasoningSliderEndpointText}>快速</Text>
-                  <Text style={styles.reasoningSliderEndpointText}>深思</Text>
-                </View>
-                <ReasoningSlider value={activeReasoningEffort} onChange={onReasoningEffortChange} />
-              </View>
-            ) : null}
             {groups.length ? (
               groups.map((group) => (
                 <View key={group.provider.id} style={styles.modelPickerGroup}>
@@ -2629,6 +2620,7 @@ const styles = StyleSheet.create({
   updateActionButton: {
     flex: 1,
     minWidth: 0,
+    height: 40,
   },
   actionRow: {
     flexDirection: 'row',
@@ -3083,52 +3075,52 @@ const styles = StyleSheet.create({
     color: palette.accentText,
   },
   assistantMetaRow: {
-    minHeight: 34,
+    minHeight: 26,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 7,
   },
   modelAvatar: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
     backgroundColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
   },
   assistantModelName: {
-    maxWidth: 180,
+    maxWidth: 140,
     color: palette.text,
-    fontSize: 20,
-    lineHeight: 24,
-    fontWeight: '500',
+    fontSize: 14,
+    lineHeight: 18,
+    fontWeight: '600',
   },
   assistantMetaDivider: {
     color: palette.textSecondary,
-    fontSize: 18,
-    lineHeight: 22,
+    fontSize: 12,
+    lineHeight: 16,
   },
   assistantProviderName: {
-    maxWidth: 140,
+    maxWidth: 100,
     color: palette.textSecondary,
-    fontSize: 18,
-    lineHeight: 22,
+    fontSize: 12,
+    lineHeight: 16,
     fontWeight: '400',
   },
   assistantTime: {
     color: palette.textSecondary,
-    fontSize: 16,
-    lineHeight: 20,
+    fontSize: 11,
+    lineHeight: 16,
   },
   messageText: {
     color: palette.text,
-    fontSize: 18,
-    lineHeight: 29,
+    fontSize: 15,
+    lineHeight: 24,
   },
   userMessageText: {
     color: palette.text,
-    fontSize: 20,
-    lineHeight: 30,
+    fontSize: 15,
+    lineHeight: 24,
   },
   thinkingRow: {
     flexDirection: 'row',
@@ -3180,11 +3172,11 @@ const styles = StyleSheet.create({
   },
   tokenUsageText: {
     color: palette.textSecondary,
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: 11,
+    lineHeight: 16,
   },
   assistantFooterRow: {
-    minHeight: 34,
+    minHeight: 26,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -3193,15 +3185,15 @@ const styles = StyleSheet.create({
   messageActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 18,
+    gap: 12,
   },
   userMessageActions: {
-    marginTop: 12,
+    marginTop: 8,
     marginRight: 8,
   },
   messageActionButton: {
-    width: 28,
-    height: 28,
+    width: 24,
+    height: 24,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -3459,23 +3451,23 @@ const styles = StyleSheet.create({
   composer: {
     paddingHorizontal: 10,
     paddingTop: 8,
-    paddingBottom: 7,
-    gap: 6,
+    paddingBottom: 6,
+    gap: 4,
   },
   composerInput: {
     alignSelf: 'stretch',
-    minHeight: 34,
+    height: 32,
     maxHeight: 120,
-    paddingVertical: 0,
+    paddingVertical: 6,
     paddingHorizontal: 2,
     color: palette.text,
-    fontSize: 15,
-    lineHeight: 30,
+    fontSize: 14,
+    lineHeight: 20,
     textAlignVertical: 'center',
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
   composerFooter: {
-    minHeight: 30,
+    minHeight: 24,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
