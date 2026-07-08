@@ -19,6 +19,7 @@ import {
 } from 'react-native';
 import type { PressableProps, StyleProp, ViewStyle } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { Camera, ChevronDown, Image as ImageIcon, Menu, MessageSquare, Paperclip, PenSquare, Plus, Settings, X } from 'lucide-react-native';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/arkModels';
 import { createDefaultWorkspace } from './src/data/providerCatalog';
@@ -45,28 +46,28 @@ import { loadWorkspace, saveWorkspace } from './src/services/storage';
  * 暖色纸张底、粘土色强调、柔和圆角。仅影响外观，不改动任何业务逻辑。
  */
 const palette = {
-  bg: '#F5F4EE', // 暖象牙白背景
-  surface: '#FFFFFF', // 卡片 / 面板
-  surfaceAlt: '#F1EFE7', // 次级面板 / 用户气泡
-  surfaceSunken: '#ECEAE1', // 输入框底色
-  border: '#E6E3D8', // 暖色分隔线
-  borderStrong: '#DAD6C8',
-  accent: '#C96442', // Claude 粘土 / 珊瑚主色
-  accentPressed: '#B5563A',
-  accentSoft: '#F3E3DA', // 强调色浅底（选中态）
-  accentBorder: '#E7C9BB',
-  accentText: '#9C4A2E',
-  text: '#20201D', // 暖近黑正文
-  textSecondary: '#6E6C62', // 暖灰次要文字
-  textMuted: '#96938655',
-  textMutedSolid: '#969386',
+  bg: '#F4F4F4',
+  surface: '#EAEAEA',
+  surfaceAlt: '#E2E2E2',
+  surfaceSunken: '#DCDCDC',
+  border: '#D9D9D9',
+  borderStrong: '#C4C4C4',
+  accent: '#0D0D0D',
+  accentPressed: '#333333',
+  accentSoft: '#EAEAEA',
+  accentBorder: '#C4C4C4',
+  accentText: '#0D0D0D',
+  text: '#0D0D0D',
+  textSecondary: '#6E6E6E',
+  textMuted: '#9A9A9A55',
+  textMutedSolid: '#9A9A9A',
   textOnAccent: '#FFFFFF',
-  danger: '#B4402A',
-  dangerBg: '#FBEDE7',
-  dangerBorder: '#EAC5B6',
-  warning: '#8A5A2B',
-  placeholder: '#A6A292',
-  scrim: 'rgba(32, 32, 29, 0.32)',
+  danger: '#DC2626',
+  dangerBg: '#FEF2F2',
+  dangerBorder: '#FECACA',
+  warning: '#D97706',
+  placeholder: '#9CA3AF',
+  scrim: 'rgba(0, 0, 0, 0.4)',
 } as const;
 
 const radii = {
@@ -379,6 +380,8 @@ export default function App() {
   const [workspace, setWorkspace] = useState<AppWorkspace>(() => createDefaultWorkspace());
   const [booting, setBooting] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [input, setInput] = useState('');
   const [manualModelId, setManualModelId] = useState('');
   const [modelSearchQuery, setModelSearchQuery] = useState('');
@@ -712,7 +715,7 @@ export default function App() {
     }));
     setExpandedReasoningByMessageId({});
     setQueryingTaskByMessageId({});
-    setNotice('已清空会话。');
+    setNotice('');
   }
 
   async function addAttachments(kind: 'image' | 'video' | 'file') {
@@ -901,44 +904,30 @@ export default function App() {
         >
           <View style={styles.topBar}>
             <View style={styles.topHeaderRow}>
-              <View style={styles.brandRow}>
-                <View style={styles.brandMark}>
-                  <Text style={styles.brandMarkGlyph}>✳</Text>
-                </View>
-                <Text style={styles.appName}>Embezzle Studio</Text>
-              </View>
-              <View style={styles.topActions}>
-                <AnimatedPressable accessibilityRole="button" onPress={clearMessages} style={styles.secondaryButton}>
-                  <Text style={styles.secondaryButtonText}>清空</Text>
+              <View style={styles.topLeft}>
+                <AnimatedPressable accessibilityRole="button" onPress={() => setSidebarOpen(true)} style={styles.iconButton}>
+                  <Menu size={20} color={palette.text} strokeWidth={2} />
                 </AnimatedPressable>
                 <AnimatedPressable
                   accessibilityRole="button"
-                  onPress={() => setSettingsOpen((current) => !current)}
-                  style={styles.secondaryButton}
+                  testID="model-picker-trigger"
+                  onPress={() => setModelPickerOpen(true)}
+                  style={styles.modelPickerPill}
                 >
-                  <Text style={styles.secondaryButtonText}>{settingsOpen ? '聊天' : '配置'}</Text>
+                  <Text numberOfLines={1} style={styles.modelPickerPillText}>
+                    {(activeModel?.name ?? activeModelId) || '选择模型'}
+                  </Text>
+                  <ChevronDown size={16} color={palette.textSecondary} strokeWidth={2} />
                 </AnimatedPressable>
               </View>
+              <AnimatedPressable
+                accessibilityRole="button"
+                onPress={() => setSettingsOpen((current) => !current)}
+                style={styles.iconButton}
+              >
+                {settingsOpen ? <MessageSquare size={20} color={palette.text} strokeWidth={2} /> : <Settings size={20} color={palette.text} strokeWidth={2} />}
+              </AnimatedPressable>
             </View>
-            <AnimatedPressable
-              accessibilityRole="button"
-              testID="model-picker-trigger"
-              onPress={() => setModelPickerOpen(true)}
-              style={styles.modelPickerTrigger}
-            >
-              <View style={styles.modelPickerLabelBadge}>
-                <Text style={styles.modelPickerLabelText}>模型</Text>
-              </View>
-              <View style={styles.modelPickerCurrent}>
-                <Text numberOfLines={1} style={styles.modelPickerProviderText}>
-                  {activeProvider.name}
-                </Text>
-                <Text numberOfLines={1} style={styles.modelPickerModelText}>
-                  {(activeModel?.name ?? activeModelId) || '未选择模型'}
-                </Text>
-              </View>
-              <Text style={styles.modelPickerChevron}>⌄</Text>
-            </AnimatedPressable>
             {activeModelId && activeModelTask === 'chat' ? (
               <View style={styles.reasoningControl}>
                 <Text style={styles.reasoningLabel}>思考</Text>
@@ -990,189 +979,198 @@ export default function App() {
           {settingsOpen ? (
             <ScreenFade>
               <ScrollView style={styles.content} contentContainerStyle={styles.settingsContent}>
-              <Text style={styles.sectionTitle}>服务商</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRow}>
-                {workspace.providers.map((provider) => (
-                  <AnimatedPressable
-                    key={provider.id}
-                    accessibilityRole="button"
-                    onPress={() => selectProvider(provider.id)}
-                    style={[
-                      styles.providerChip,
-                      provider.id === activeProvider.id && styles.providerChipActive,
-                    ]}
-                  >
-                    <Text
+
+              <View style={styles.settingsCard}>
+                <Text style={styles.settingsCardTitle}>服务商</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRow}>
+                  {workspace.providers.map((provider) => (
+                    <AnimatedPressable
+                      key={provider.id}
+                      accessibilityRole="button"
+                      onPress={() => selectProvider(provider.id)}
                       style={[
-                        styles.providerChipText,
-                        provider.id === activeProvider.id && styles.providerChipTextActive,
+                        styles.providerChip,
+                        provider.id === activeProvider.id && styles.providerChipActive,
                       ]}
                     >
-                      {provider.name}
-                    </Text>
+                      <Text
+                        style={[
+                          styles.providerChipText,
+                          provider.id === activeProvider.id && styles.providerChipTextActive,
+                        ]}
+                      >
+                        {provider.name}
+                      </Text>
+                    </AnimatedPressable>
+                  ))}
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    onPress={addCustomProvider}
+                    style={styles.providerChip}
+                  >
+                    <Text style={styles.providerChipText}>+ 新增</Text>
                   </AnimatedPressable>
-                ))}
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  onPress={addCustomProvider}
-                  style={styles.providerChip}
-                >
-                  <Text style={styles.providerChipText}>新增</Text>
-                </AnimatedPressable>
-              </ScrollView>
-
-              <View style={styles.fieldGroup}>
-                <Text style={styles.fieldLabel}>名称</Text>
-                <TextInput
-                  value={activeProvider.name}
-                  onChangeText={(name) => updateActiveProvider({ name })}
-                  style={styles.input}
-                />
-              </View>
-              <View style={styles.fieldGroup}>
-                <Text style={styles.fieldLabel}>Base URL</Text>
-                <TextInput
-                  autoCapitalize="none"
-                  value={activeProvider.baseUrl}
-                  onChangeText={(baseUrl) => updateActiveProvider({ baseUrl })}
-                  style={styles.input}
-                />
-              </View>
-              <View style={styles.fieldGroup}>
-                <Text style={styles.fieldLabel}>API Key</Text>
-                <TextInput
-                  autoCapitalize="none"
-                  secureTextEntry
-                  value={activeProvider.apiKey ?? ''}
-                  onChangeText={(apiKey) => updateActiveProvider({ apiKey })}
-                  style={styles.input}
-                />
+                </ScrollView>
               </View>
 
-              <View style={styles.capabilityRow}>
-                {activeProvider.capabilities.map((capability) => (
-                  <View key={capability} style={styles.capabilityChip}>
-                    <Text style={styles.capabilityText}>{capabilityLabel[capability] ?? capability}</Text>
-                  </View>
-                ))}
-              </View>
+              <View style={styles.settingsCard}>
+                <Text style={styles.settingsCardTitle}>连接配置</Text>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>名称</Text>
+                  <TextInput
+                    value={activeProvider.name}
+                    onChangeText={(name) => updateActiveProvider({ name })}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>Base URL</Text>
+                  <TextInput
+                    autoCapitalize="none"
+                    value={activeProvider.baseUrl}
+                    onChangeText={(baseUrl) => updateActiveProvider({ baseUrl })}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>API Key</Text>
+                  <TextInput
+                    autoCapitalize="none"
+                    secureTextEntry
+                    value={activeProvider.apiKey ?? ''}
+                    onChangeText={(apiKey) => updateActiveProvider({ apiKey })}
+                    style={styles.input}
+                  />
+                </View>
 
-              <View style={styles.actionRow}>
+                <View style={styles.capabilityRow}>
+                  {activeProvider.capabilities.map((capability) => (
+                    <View key={capability} style={styles.capabilityChip}>
+                      <Text style={styles.capabilityText}>{capabilityLabel[capability] ?? capability}</Text>
+                    </View>
+                  ))}
+                </View>
+
                 <AnimatedPressable
                   accessibilityRole="button"
                   disabled={busy}
                   onPress={refreshModels}
                   style={[styles.primaryButton, busy && styles.buttonDisabled]}
                 >
-                  <Text style={styles.primaryButtonText}>{busy ? '请求中' : '获取模型'}</Text>
+                  <Text style={styles.primaryButtonText}>{busy ? '请求中...' : '获取模型'}</Text>
                 </AnimatedPressable>
               </View>
 
               {notice ? <Text style={styles.settingsNotice}>{notice}</Text> : null}
 
-              <Text style={styles.sectionTitle}>可添加模型</Text>
-              {modelCandidates.length ? (
-                <>
-                  <View style={styles.modelSearchRow}>
-                    <TextInput
-                      testID="candidate-model-search"
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      placeholder="搜索模型名称或 ID"
-                      placeholderTextColor={palette.placeholder}
-                      value={modelSearchQuery}
-                      onChangeText={setModelSearchQuery}
-                      style={[styles.input, styles.modelSearchInput]}
-                    />
-                    {modelSearchQuery ? (
-                      <AnimatedPressable
-                        accessibilityRole="button"
-                        onPress={() => setModelSearchQuery('')}
-                        style={styles.secondaryButton}
-                      >
-                        <Text style={styles.secondaryButtonText}>清除</Text>
-                      </AnimatedPressable>
-                    ) : null}
-                  </View>
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    contentContainerStyle={styles.modelFilterTabs}
-                  >
-                    {candidateModelFilters.map((filter) => {
-                      const active = filter.key === modelCapabilityFilter;
-
-                      return (
-                        <Pressable
-                          key={filter.key}
+              <View style={styles.settingsCard}>
+                <Text style={styles.settingsCardTitle}>可添加模型</Text>
+                {modelCandidates.length ? (
+                  <>
+                    <View style={styles.modelSearchRow}>
+                      <TextInput
+                        testID="candidate-model-search"
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        placeholder="搜索模型名称或 ID"
+                        placeholderTextColor={palette.placeholder}
+                        value={modelSearchQuery}
+                        onChangeText={setModelSearchQuery}
+                        style={[styles.input, styles.modelSearchInput]}
+                      />
+                      {modelSearchQuery ? (
+                        <AnimatedPressable
                           accessibilityRole="button"
-                          testID={`candidate-model-filter-${filter.key}`}
-                          onPress={() => setModelCapabilityFilter(filter.key)}
-                          style={styles.modelFilterTab}
+                          onPress={() => setModelSearchQuery('')}
+                          style={styles.secondaryButton}
                         >
-                          <Text
-                            style={[
-                              styles.modelFilterTabText,
-                              active && styles.modelFilterTabTextActive,
-                            ]}
+                          <Text style={styles.secondaryButtonText}>清除</Text>
+                        </AnimatedPressable>
+                      ) : null}
+                    </View>
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={styles.modelFilterTabs}
+                    >
+                      {candidateModelFilters.map((filter) => {
+                        const active = filter.key === modelCapabilityFilter;
+
+                        return (
+                          <Pressable
+                            key={filter.key}
+                            accessibilityRole="button"
+                            testID={`candidate-model-filter-${filter.key}`}
+                            onPress={() => setModelCapabilityFilter(filter.key)}
+                            style={styles.modelFilterTab}
                           >
-                            {filter.label}
-                          </Text>
-                          <View style={[styles.modelFilterTabLine, active && styles.modelFilterTabLineActive]} />
-                        </Pressable>
-                      );
-                    })}
-                  </ScrollView>
-                  <Text testID="candidate-model-search-count" style={styles.modelSearchMeta}>
-                    显示 {filteredModelCandidates.length} / {modelCandidates.length}
-                  </Text>
-                </>
-              ) : null}
-              <View style={styles.modelList}>
-                {filteredModelCandidates.map((model) => (
-                  <CandidateModelRow
-                    key={model.id}
-                    model={model}
-                    added={addedModelIds.has(model.id)}
-                    onAdd={() => addCandidateModel(model)}
-                  />
-                ))}
-                {modelCandidates.length && !filteredModelCandidates.length ? (
-                  <View style={styles.modelSearchEmpty}>
-                    <Text style={styles.modelSearchEmptyText}>没有匹配的模型</Text>
-                  </View>
+                            <Text
+                              style={[
+                                styles.modelFilterTabText,
+                                active && styles.modelFilterTabTextActive,
+                              ]}
+                            >
+                              {filter.label}
+                            </Text>
+                            <View style={[styles.modelFilterTabLine, active && styles.modelFilterTabLineActive]} />
+                          </Pressable>
+                        );
+                      })}
+                    </ScrollView>
+                    <Text testID="candidate-model-search-count" style={styles.modelSearchMeta}>
+                      显示 {filteredModelCandidates.length} / {modelCandidates.length}
+                    </Text>
+                  </>
                 ) : null}
+                <View style={styles.modelList}>
+                  {filteredModelCandidates.map((model) => (
+                    <CandidateModelRow
+                      key={model.id}
+                      model={model}
+                      added={addedModelIds.has(model.id)}
+                      onAdd={() => addCandidateModel(model)}
+                    />
+                  ))}
+                  {modelCandidates.length && !filteredModelCandidates.length ? (
+                    <View style={styles.modelSearchEmpty}>
+                      <Text style={styles.modelSearchEmptyText}>没有匹配的模型</Text>
+                    </View>
+                  ) : null}
+                </View>
               </View>
 
-              <Text style={styles.sectionTitle}>已添加模型</Text>
-              <View style={styles.inlineField}>
-                <TextInput
-                  autoCapitalize="none"
-                  placeholder="手动模型 ID"
-                  placeholderTextColor={palette.placeholder}
-                  value={manualModelId}
-                  onChangeText={setManualModelId}
-                  style={[styles.input, styles.inlineInput]}
-                />
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  onPress={addManualModel}
-                  style={styles.secondaryButton}
-                >
-                  <Text style={styles.secondaryButtonText}>添加</Text>
-                </AnimatedPressable>
-              </View>
-              <View style={styles.modelList}>
-                {addedModels.map((model) => (
-                  <ModelButton
-                    key={model.id}
-                    model={model}
-                    active={model.id === activeModelId}
-                    onPress={() => selectModel(model.id)}
-                    onRemove={() => removeModel(model.id)}
+              <View style={styles.settingsCard}>
+                <Text style={styles.settingsCardTitle}>已添加模型</Text>
+                <View style={styles.inlineField}>
+                  <TextInput
+                    autoCapitalize="none"
+                    placeholder="手动模型 ID"
+                    placeholderTextColor={palette.placeholder}
+                    value={manualModelId}
+                    onChangeText={setManualModelId}
+                    style={[styles.input, styles.inlineInput]}
                   />
-                ))}
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    onPress={addManualModel}
+                    style={styles.secondaryButton}
+                  >
+                    <Text style={styles.secondaryButtonText}>添加</Text>
+                  </AnimatedPressable>
+                </View>
+                <View style={styles.modelList}>
+                  {addedModels.map((model) => (
+                    <ModelButton
+                      key={model.id}
+                      model={model}
+                      active={model.id === activeModelId}
+                      onPress={() => selectModel(model.id)}
+                      onRemove={() => removeModel(model.id)}
+                    />
+                  ))}
+                </View>
               </View>
+
               </ScrollView>
             </ScreenFade>
           ) : (
@@ -1281,39 +1279,84 @@ export default function App() {
                 </ScrollView>
               ) : null}
 
-              <View style={styles.composerTools}>
-                <AnimatedPressable accessibilityRole="button" onPress={() => addAttachments('image')} style={styles.toolButton}>
-                  <Text style={styles.toolButtonText}>图片</Text>
-                </AnimatedPressable>
-                <AnimatedPressable accessibilityRole="button" onPress={() => addAttachments('video')} style={styles.toolButton}>
-                  <Text style={styles.toolButtonText}>视频</Text>
-                </AnimatedPressable>
-                <AnimatedPressable accessibilityRole="button" onPress={() => addAttachments('file')} style={styles.toolButton}>
-                  <Text style={styles.toolButtonText}>文件</Text>
-                </AnimatedPressable>
-              </View>
-
-              <View style={styles.composer}>
-                <TextInput
-                  multiline
-                  placeholder="给 Claude 发送消息"
-                  placeholderTextColor={palette.placeholder}
-                  value={input}
-                  onChangeText={setInput}
-                  style={styles.composerInput}
-                />
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  disabled={busy}
-                  onPress={sendMessage}
-                  style={[styles.sendButton, busy && styles.buttonDisabled]}
-                >
-                  <Text style={styles.sendButtonText}>{busy ? '···' : '↑'}</Text>
-                </AnimatedPressable>
+              {attachMenuOpen ? (
+                <Pressable style={styles.attachMenuBackdrop} onPress={() => setAttachMenuOpen(false)} />
+              ) : null}
+              <View style={styles.composerWrapper}>
+                {attachMenuOpen ? (
+                  <View style={styles.attachMenu}>
+                    <AnimatedPressable accessibilityRole="button" onPress={() => { addAttachments('image'); setAttachMenuOpen(false); }} style={styles.attachMenuItem}>
+                      <View style={styles.attachMenuIcon}><ImageIcon size={18} color={palette.text} strokeWidth={2} /></View>
+                      <Text style={styles.attachMenuText}>照片</Text>
+                    </AnimatedPressable>
+                    <AnimatedPressable accessibilityRole="button" onPress={() => { addAttachments('video'); setAttachMenuOpen(false); }} style={styles.attachMenuItem}>
+                      <View style={styles.attachMenuIcon}><Camera size={18} color={palette.text} strokeWidth={2} /></View>
+                      <Text style={styles.attachMenuText}>视频</Text>
+                    </AnimatedPressable>
+                    <AnimatedPressable accessibilityRole="button" onPress={() => { addAttachments('file'); setAttachMenuOpen(false); }} style={styles.attachMenuItem}>
+                      <View style={styles.attachMenuIcon}><Paperclip size={18} color={palette.text} strokeWidth={2} /></View>
+                      <Text style={styles.attachMenuText}>文件</Text>
+                    </AnimatedPressable>
+                  </View>
+                ) : null}
+                <View style={styles.composer}>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    onPress={() => setAttachMenuOpen((v) => !v)}
+                    style={styles.attachButton}
+                  >
+                    <Plus size={16} color={palette.textSecondary} strokeWidth={2.5} />
+                  </AnimatedPressable>
+                  <TextInput
+                    multiline
+                    placeholder="今天如何？"
+                    placeholderTextColor={palette.placeholder}
+                    value={input}
+                    onChangeText={setInput}
+                    style={styles.composerInput}
+                  />
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    disabled={busy}
+                    onPress={sendMessage}
+                    style={[styles.sendButton, busy && styles.buttonDisabled]}
+                  >
+                    <Text style={styles.sendButtonText}>{busy ? '···' : '↑'}</Text>
+                  </AnimatedPressable>
+                </View>
               </View>
             </ScreenFade>
           )}
         </KeyboardAvoidingView>
+
+        {/* Sidebar drawer */}
+        <Modal visible={sidebarOpen} transparent animationType="none" onRequestClose={() => setSidebarOpen(false)}>
+          <Pressable style={styles.sidebarScrim} onPress={() => setSidebarOpen(false)}>
+            <Pressable style={styles.sidebarPanel} onPress={(e) => e.stopPropagation()}>
+              <View style={styles.sidebarHeader}>
+                <Text style={styles.sidebarBrand}>Embezzle Studio</Text>
+                <AnimatedPressable accessibilityRole="button" onPress={() => setSidebarOpen(false)} style={styles.sidebarClose}>
+                  <X size={20} color={palette.text} strokeWidth={2} />
+                </AnimatedPressable>
+              </View>
+
+              <AnimatedPressable
+                accessibilityRole="button"
+                onPress={() => { clearMessages(); setSidebarOpen(false); }}
+                style={styles.sidebarNewChat}
+              >
+                <PenSquare size={18} color={palette.textOnAccent} strokeWidth={2} />
+                <Text style={styles.sidebarNewChatText}>新对话</Text>
+              </AnimatedPressable>
+
+              <View style={styles.sidebarSection}>
+                <Text style={styles.sidebarSectionTitle}>最近</Text>
+                <Text style={styles.sidebarEmpty}>暂无历史对话</Text>
+              </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
+
       </SafeAreaView>
     </SafeAreaProvider>
   );
@@ -1637,69 +1680,37 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   topBar: {
-    paddingHorizontal: 18,
+    paddingHorizontal: 16,
     paddingTop: 12,
-    paddingBottom: 14,
+    paddingBottom: 12,
     backgroundColor: palette.bg,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: palette.border,
-    gap: 12,
   },
   topHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 12,
   },
-  brandRow: {
+  topLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    flexShrink: 1,
-    minWidth: 0,
   },
-  brandMark: {
-    width: 30,
-    height: 30,
+  modelPickerPill: {
+    height: 40,
     borderRadius: radii.pill,
-    backgroundColor: palette.accent,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  brandMarkGlyph: {
-    color: palette.textOnAccent,
-    fontSize: 15,
-    fontWeight: '700',
-    lineHeight: 18,
-  },
-  appName: {
-    color: palette.text,
-    fontSize: 21,
-    fontWeight: '600',
-    fontFamily: serifFont,
-    letterSpacing: 0.2,
-    flexShrink: 1,
-  },
-  topActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  modelPickerTrigger: {
-    minHeight: 50,
-    borderRadius: radii.md,
+    backgroundColor: palette.surface,
     borderWidth: 1,
     borderColor: palette.border,
-    backgroundColor: palette.surface,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    paddingHorizontal: 12,
-    shadowColor: '#4A3B2A',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 3,
-    elevation: 1,
+    paddingHorizontal: 14,
+    gap: 6,
+  },
+  modelPickerPillText: {
+    color: palette.text,
+    fontSize: 15,
+    fontWeight: '600',
+    maxWidth: 160,
   },
   modelPickerLabelBadge: {
     height: 27,
@@ -1798,12 +1809,22 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     fontSize: 14,
   },
+  iconButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: palette.borderStrong,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: palette.surface,
+  },
   content: {
     flex: 1,
   },
   settingsContent: {
-    padding: 18,
-    gap: 18,
+    padding: 16,
+    gap: 16,
   },
   chatContent: {
     padding: 16,
@@ -1815,20 +1836,32 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     fontFamily: serifFont,
   },
+  settingsCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: radii.lg,
+    padding: 16,
+    gap: 14,
+  },
+  settingsCardTitle: {
+    color: palette.text,
+    fontSize: 15,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
   providerRow: {
     gap: 10,
     paddingRight: 18,
     paddingVertical: 2,
   },
   providerChip: {
-    height: 40,
-    paddingHorizontal: 16,
+    height: 36,
+    paddingHorizontal: 14,
     borderRadius: radii.pill,
     borderWidth: 1,
-    borderColor: palette.borderStrong,
+    borderColor: palette.border,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: palette.surface,
+    backgroundColor: palette.bg,
   },
   providerChipActive: {
     backgroundColor: palette.accent,
@@ -1836,7 +1869,8 @@ const styles = StyleSheet.create({
   },
   providerChipText: {
     color: palette.text,
-    fontWeight: '600',
+    fontWeight: '500',
+    fontSize: 14,
   },
   providerChipTextActive: {
     color: palette.textOnAccent,
@@ -1850,11 +1884,11 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   input: {
-    minHeight: 48,
-    borderRadius: radii.md,
+    minHeight: 44,
+    borderRadius: radii.sm,
     borderWidth: 1,
     borderColor: palette.border,
-    backgroundColor: palette.surface,
+    backgroundColor: palette.bg,
     paddingHorizontal: 14,
     color: palette.text,
     fontSize: 15,
@@ -2485,56 +2519,89 @@ const styles = StyleSheet.create({
     color: palette.textSecondary,
     fontSize: 12,
   },
-  composerTools: {
-    flexDirection: 'row',
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingBottom: 8,
-  },
-  toolButton: {
-    minWidth: 60,
-    height: 36,
-    borderRadius: radii.pill,
+  attachButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     backgroundColor: palette.surfaceAlt,
-    borderWidth: 1,
-    borderColor: palette.border,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 14,
   },
-  toolButtonText: {
-    color: palette.textSecondary,
-    fontWeight: '600',
-    fontSize: 12,
+  attachMenuBackdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 10,
   },
-  composer: {
-    paddingHorizontal: 16,
-    paddingTop: 10,
-    paddingBottom: 16,
+  attachMenu: {
+    position: 'absolute',
+    bottom: '100%',
+    left: 0,
+    marginBottom: 8,
     backgroundColor: palette.bg,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: palette.border,
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: 10,
-  },
-  composerInput: {
-    flex: 1,
-    minHeight: 48,
-    maxHeight: 128,
     borderRadius: radii.lg,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 16,
+    elevation: 8,
+    minWidth: 180,
+  },
+  attachMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    height: 44,
+    borderRadius: radii.sm,
+    paddingHorizontal: 12,
+  },
+  attachMenuIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: palette.surfaceAlt,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachMenuText: {
+    color: palette.text,
+    fontWeight: '500',
+    fontSize: 15,
+  },
+  composerWrapper: {
+    marginHorizontal: 8,
+    marginBottom: 12,
+    borderRadius: radii.xl,
     backgroundColor: palette.surface,
     borderWidth: 1,
     borderColor: palette.border,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    overflow: 'visible',
+    zIndex: 20,
+  },
+  composer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    gap: 8,
+  },
+  composerInput: {
+    flex: 1,
+    minHeight: 28,
+    maxHeight: 120,
+    paddingVertical: 0,
     color: palette.text,
-    fontSize: 16,
+    fontSize: 15,
+    lineHeight: 28,
   },
   sendButton: {
-    width: 48,
-    height: 48,
-    borderRadius: radii.pill,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
     backgroundColor: palette.accent,
     alignItems: 'center',
     justifyContent: 'center',
@@ -2542,7 +2609,70 @@ const styles = StyleSheet.create({
   sendButtonText: {
     color: palette.textOnAccent,
     fontWeight: '700',
-    fontSize: 20,
-    lineHeight: 22,
+    fontSize: 16,
+    lineHeight: 18,
+  },
+  sidebarScrim: {
+    flex: 1,
+    flexDirection: 'row',
+    backgroundColor: palette.scrim,
+  },
+  sidebarPanel: {
+    width: '80%',
+    maxWidth: 320,
+    backgroundColor: palette.bg,
+    paddingTop: 20,
+    paddingHorizontal: 20,
+    paddingBottom: 32,
+  },
+  sidebarHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 24,
+  },
+  sidebarBrand: {
+    color: palette.text,
+    fontSize: 22,
+    fontWeight: '700',
+    fontFamily: serifFont,
+  },
+  sidebarClose: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sidebarNewChat: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    height: 44,
+    borderRadius: radii.pill,
+    backgroundColor: palette.accent,
+    paddingHorizontal: 18,
+    alignSelf: 'flex-start',
+    marginBottom: 28,
+  },
+  sidebarNewChatText: {
+    color: palette.textOnAccent,
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  sidebarSection: {
+    flex: 1,
+  },
+  sidebarSectionTitle: {
+    color: palette.textSecondary,
+    fontSize: 13,
+    fontWeight: '600',
+    marginBottom: 12,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  sidebarEmpty: {
+    color: palette.placeholder,
+    fontSize: 14,
   },
 });
