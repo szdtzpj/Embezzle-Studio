@@ -46,6 +46,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [input, setInput] = useState('');
   const [manualModelId, setManualModelId] = useState('');
+  const [modelSearchQuery, setModelSearchQuery] = useState('');
   const [attachments, setAttachments] = useState<MediaAttachment[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -114,6 +115,20 @@ export default function App() {
     () => new Set(addedModels.map((model) => model.id)),
     [addedModels]
   );
+  const filteredModelCandidates = useMemo(() => {
+    const query = modelSearchQuery.trim().toLowerCase();
+
+    if (!query) {
+      return modelCandidates;
+    }
+
+    return modelCandidates.filter((model) => {
+      const name = model.name?.toLowerCase() ?? '';
+      const id = model.id.toLowerCase();
+
+      return name.includes(query) || id.includes(query);
+    });
+  }, [modelCandidates, modelSearchQuery]);
   const providerModelGroups = useMemo(
     () =>
       workspace.providers
@@ -143,6 +158,7 @@ export default function App() {
       ...current,
       activeProviderId: providerId,
     }));
+    setModelSearchQuery('');
   }
 
   function selectModel(modelId: string) {
@@ -196,6 +212,7 @@ export default function App() {
       },
     }));
     setManualModelId('');
+    setModelSearchQuery('');
   }
 
   function addManualModel() {
@@ -570,8 +587,36 @@ export default function App() {
               {notice ? <Text style={styles.settingsNotice}>{notice}</Text> : null}
 
               <Text style={styles.sectionTitle}>可添加模型</Text>
+              {modelCandidates.length ? (
+                <>
+                  <View style={styles.modelSearchRow}>
+                    <TextInput
+                      testID="candidate-model-search"
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      placeholder="搜索模型名称或 ID"
+                      placeholderTextColor="#8a94a6"
+                      value={modelSearchQuery}
+                      onChangeText={setModelSearchQuery}
+                      style={[styles.input, styles.modelSearchInput]}
+                    />
+                    {modelSearchQuery ? (
+                      <Pressable
+                        accessibilityRole="button"
+                        onPress={() => setModelSearchQuery('')}
+                        style={styles.secondaryButton}
+                      >
+                        <Text style={styles.secondaryButtonText}>清除</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                  <Text testID="candidate-model-search-count" style={styles.modelSearchMeta}>
+                    显示 {filteredModelCandidates.length} / {modelCandidates.length}
+                  </Text>
+                </>
+              ) : null}
               <View style={styles.modelList}>
-                {modelCandidates.map((model) => (
+                {filteredModelCandidates.map((model) => (
                   <CandidateModelRow
                     key={model.id}
                     model={model}
@@ -579,6 +624,11 @@ export default function App() {
                     onAdd={() => addCandidateModel(model)}
                   />
                 ))}
+                {modelCandidates.length && !filteredModelCandidates.length ? (
+                  <View style={styles.modelSearchEmpty}>
+                    <Text style={styles.modelSearchEmptyText}>没有匹配的模型</Text>
+                  </View>
+                ) : null}
               </View>
 
               <Text style={styles.sectionTitle}>已添加模型</Text>
@@ -1078,6 +1128,34 @@ const styles = StyleSheet.create({
   },
   modelList: {
     gap: 10,
+  },
+  modelSearchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  modelSearchInput: {
+    flex: 1,
+  },
+  modelSearchMeta: {
+    marginTop: -8,
+    color: '#66758a',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  modelSearchEmpty: {
+    minHeight: 70,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e2ef',
+    backgroundColor: '#f8fbff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modelSearchEmptyText: {
+    color: '#607086',
+    fontSize: 13,
+    fontWeight: '800',
   },
   modelButton: {
     borderRadius: 8,
