@@ -15,7 +15,6 @@ import {
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { createDefaultWorkspace } from './src/data/providerCatalog';
-import { isVolcengineArkProvider } from './src/data/arkModels';
 import type { AppWorkspace, ChatMessage, MediaAttachment, ModelInfo, ProviderProfile } from './src/domain/types';
 import { pickFiles, pickImages, pickVideos } from './src/services/mediaPicker';
 import { sendOpenAiCompatibleChat } from './src/services/openAiCompatible';
@@ -85,7 +84,6 @@ export default function App() {
     : '';
 
   const activeModel = activeProvider?.models.find((model) => model.id === activeModelId);
-  const modelRefreshLabel = isVolcengineArkProvider(activeProvider) ? '加载预置模型' : '获取模型';
 
   function updateActiveProvider(patch: Partial<ProviderProfile>) {
     if (!activeProvider) {
@@ -420,7 +418,7 @@ export default function App() {
                   onPress={refreshModels}
                   style={[styles.primaryButton, busy && styles.buttonDisabled]}
                 >
-                  <Text style={styles.primaryButtonText}>{busy ? '请求中' : modelRefreshLabel}</Text>
+                  <Text style={styles.primaryButtonText}>{busy ? '请求中' : '获取模型'}</Text>
                 </Pressable>
               </View>
 

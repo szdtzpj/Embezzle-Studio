@@ -17,19 +17,33 @@ function mergeModels(existingModels: ModelInfo[], discoveredModels: ModelInfo[])
   return Array.from(byId.values());
 }
 
-function discoverArkModels(provider: ProviderProfile): ModelDiscoveryResult {
+function formatDiscoveryError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function discoverArkModels(provider: ProviderProfile, error?: unknown): ModelDiscoveryResult {
   const models = mergeModels(arkPresetModels, provider.models);
+  const reason = error ? `远程 /models 请求失败：${formatDiscoveryError(error)} ` : '';
 
   return {
     models,
-    notice:
-      `火山方舟不能用普通 API Key 枚举模型。已加载 ${models.length} 个预置 Doubao 模型；控制台里的专属 Endpoint 或新 Model ID 请手动添加。`,
+    notice: `${reason}已临时加载 ${models.length} 个预置 Doubao 模型；控制台里的专属 Endpoint 或新 Model ID 也可以手动添加。`,
   };
 }
 
 export async function refreshProviderModels(provider: ProviderProfile): Promise<ModelDiscoveryResult> {
   if (isVolcengineArkProvider(provider)) {
-    return discoverArkModels(provider);
+    try {
+      const remoteModels = await fetchOpenAiCompatibleModels(provider);
+      const models = mergeModels(provider.models, remoteModels);
+
+      return {
+        models,
+        notice: `已从火山方舟获取 ${remoteModels.length} 个模型。`,
+      };
+    } catch (error) {
+      return discoverArkModels(provider, error);
+    }
   }
 
   const models = await fetchOpenAiCompatibleModels(provider);
