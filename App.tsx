@@ -17,7 +17,8 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { createDefaultWorkspace } from './src/data/providerCatalog';
 import type { AppWorkspace, ChatMessage, MediaAttachment, ModelInfo, ProviderProfile } from './src/domain/types';
 import { pickFiles, pickImages, pickVideos } from './src/services/mediaPicker';
-import { fetchOpenAiCompatibleModels, sendOpenAiCompatibleChat } from './src/services/openAiCompatible';
+import { sendOpenAiCompatibleChat } from './src/services/openAiCompatible';
+import { refreshProviderModels } from './src/services/modelDiscovery';
 import { createId } from './src/services/id';
 import { loadWorkspace, saveWorkspace } from './src/services/storage';
 
@@ -197,7 +198,8 @@ export default function App() {
     setNotice('');
 
     try {
-      const models = await fetchOpenAiCompatibleModels(activeProvider);
+      const result = await refreshProviderModels(activeProvider);
+      const models = result.models.length ? result.models : activeProvider.models;
       setWorkspace((current) => ({
         ...current,
         providers: current.providers.map((provider) =>
@@ -208,7 +210,7 @@ export default function App() {
           [activeProvider.id]: models[0]?.id ?? '',
         },
       }));
-      setNotice(`已获取 ${models.length} 个模型。`);
+      setNotice(result.notice);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '模型列表获取失败。');
     } finally {
