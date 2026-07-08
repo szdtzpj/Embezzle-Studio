@@ -1,9 +1,11 @@
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useMemo, useState } from 'react';
+import { createElement, useEffect, useMemo, useState } from 'react';
+import type { CSSProperties } from 'react';
 import {
   ActivityIndicator,
   Image,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -21,6 +23,7 @@ import type {
   AppWorkspace,
   ChatTokenUsage,
   Capability,
+  GenerationTaskInfo,
   ChatMessage,
   MediaAttachment,
   ModelInfo,
@@ -29,7 +32,7 @@ import type {
   ReasoningEffort,
 } from './src/domain/types';
 import { pickFiles, pickImages, pickVideos } from './src/services/mediaPicker';
-import { sendOpenAiCompatibleChat } from './src/services/openAiCompatible';
+import { queryGenerationTask, sendOpenAiCompatibleChat } from './src/services/openAiCompatible';
 import { refreshProviderModels } from './src/services/modelDiscovery';
 import { createId } from './src/services/id';
 import { loadWorkspace, saveWorkspace } from './src/services/storage';
@@ -81,6 +84,13 @@ const modelTaskLabel: Record<ModelTask, string> = {
   'video-generation': '视频生成',
   embedding: '嵌入',
   rerank: '重排',
+};
+
+const webVideoPreviewStyle: CSSProperties = {
+  width: '100%',
+  height: 128,
+  display: 'block',
+  backgroundColor: '#dbe5f2',
 };
 
 function getSelectableModels(provider: ProviderProfile) {
@@ -176,6 +186,7 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [expandedReasoningByMessageId, setExpandedReasoningByMessageId] = useState<Record<string, boolean>>({});
+  const [queryingTaskByMessageId, setQueryingTaskByMessageId] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     let mounted = true;
@@ -498,6 +509,7 @@ export default function App() {
       messages: [],
     }));
     setExpandedReasoningByMessageId({});
+    setQueryingTaskByMessageId({});
     setNotice('已清空会话。');
   }
 
@@ -531,6 +543,61 @@ export default function App() {
       ...current,
       [messageId]: !current[messageId],
     }));
+  }
+
+  function inferMessageGenerationTask(message: ChatMessage): GenerationTaskInfo | undefined {
+    const match = message.content.match(/cgt-[A-Za-z0-9-]+/);
+    if (!match || !activeProvider || !activeModelId || activeModelTask !== 'video-generation') {
+      return undefined;
+    }
+
+    const statusMatch = message.content.match(/当前状态[:：]\s*([A-Za-z_-]+)/);
+
+    return {
+      providerId: activeProvider.id,
+      modelId: activeModelId,
+      taskId: match[0],
+      kind: 'video',
+      status: statusMatch?.[1],
+    };
+  }
+
+  async function refreshGenerationTask(message: ChatMessage, task: GenerationTaskInfo) {
+    const provider = workspace.providers.find((item) => item.id === task.providerId);
+    if (!provider) {
+      setNotice('找不到这个生成任务对应的服务商。');
+      return;
+    }
+
+    setQueryingTaskByMessageId((current) => ({
+      ...current,
+      [message.id]: true,
+    }));
+    setNotice('');
+
+    try {
+      const result = await queryGenerationTask(provider, task);
+      updateAssistantMessage(message.id, {
+        content: result.content,
+        attachments: result.attachments ?? message.attachments,
+        generationTask: result.generationTask,
+        usage: result.usage ?? message.usage,
+        status: 'ready',
+        error: undefined,
+      });
+    } catch (error) {
+      const content = error instanceof Error ? error.message : '生成任务查询失败。';
+      updateAssistantMessage(message.id, {
+        content,
+        status: 'error',
+        error: content,
+      });
+    } finally {
+      setQueryingTaskByMessageId((current) => ({
+        ...current,
+        [message.id]: false,
+      }));
+    }
   }
 
   async function sendMessage() {
@@ -588,6 +655,7 @@ export default function App() {
         reasoningContent: result.reasoningContent,
         usage: result.usage,
         attachments: result.attachments,
+        generationTask: result.generationTask,
         status: 'ready',
       });
     } catch (error) {
@@ -893,7 +961,13 @@ export default function App() {
           ) : (
             <>
               <ScrollView style={styles.content} contentContainerStyle={styles.chatContent}>
-                {workspace.messages.map((message) => (
+                {workspace.messages.map((message) => {
+                  const generationTask =
+                    message.role === 'assistant'
+                      ? message.generationTask ?? inferMessageGenerationTask(message)
+                      : undefined;
+
+                  return (
                   <View
                     key={message.id}
                     style={[
@@ -938,6 +1012,13 @@ export default function App() {
                     {message.role === 'assistant' && message.usage ? (
                       <TokenUsageLine usage={message.usage} />
                     ) : null}
+                    {message.role === 'assistant' && generationTask ? (
+                      <GenerationTaskPanel
+                        task={generationTask}
+                        busy={Boolean(queryingTaskByMessageId[message.id])}
+                        onRefresh={() => refreshGenerationTask(message, generationTask)}
+                      />
+                    ) : null}
                     {message.attachments?.length ? (
                       <View style={styles.attachmentGrid}>
                         {message.attachments.map((attachment) => (
@@ -946,7 +1027,8 @@ export default function App() {
                       </View>
                     ) : null}
                   </View>
-                ))}
+                  );
+                })}
               </ScrollView>
 
               {notice ? <Text style={styles.notice}>{notice}</Text> : null}
@@ -1042,6 +1124,36 @@ function TokenUsageLine({ usage }: { usage: ChatTokenUsage }) {
         <Text style={styles.tokenUsageLabel}>合计</Text>
         <Text style={styles.tokenUsageValue}>{formatTokenCount(usage.totalTokens)}</Text>
       </View>
+    </View>
+  );
+}
+
+function GenerationTaskPanel({
+  task,
+  busy,
+  onRefresh,
+}: {
+  task: GenerationTaskInfo;
+  busy: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <View style={styles.generationTaskPanel}>
+      <View style={styles.generationTaskInfo}>
+        <Text style={styles.generationTaskTitle}>视频生成任务</Text>
+        <Text numberOfLines={1} style={styles.generationTaskMeta}>
+          {task.taskId}
+        </Text>
+        <Text style={styles.generationTaskStatus}>状态：{task.status ?? 'submitted'}</Text>
+      </View>
+      <Pressable
+        accessibilityRole="button"
+        disabled={busy}
+        onPress={onRefresh}
+        style={[styles.generationTaskButton, busy && styles.buttonDisabled]}
+      >
+        <Text style={styles.generationTaskButtonText}>{busy ? '查询中' : '查询结果'}</Text>
+      </Pressable>
     </View>
   );
 }
@@ -1206,6 +1318,38 @@ function CandidateModelRow({ model, added, onAdd }: CandidateModelRowProps) {
 function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
   if (attachment.kind === 'image') {
     return <Image source={{ uri: attachment.uri }} style={styles.attachmentImage} />;
+  }
+
+  if (attachment.kind === 'video') {
+    return (
+      <View style={styles.attachmentVideoCard}>
+        {Platform.OS === 'web' ? (
+          createElement('video', {
+            controls: true,
+            src: attachment.uri,
+            style: webVideoPreviewStyle,
+          })
+        ) : (
+          <View style={styles.attachmentVideoPlaceholder}>
+            <Text style={styles.attachmentKind}>VIDEO</Text>
+          </View>
+        )}
+        <View style={styles.attachmentVideoFooter}>
+          <Text numberOfLines={1} style={styles.attachmentFileName}>
+            {attachment.name}
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => {
+              void Linking.openURL(attachment.uri);
+            }}
+            style={styles.attachmentOpenButton}
+          >
+            <Text style={styles.attachmentOpenButtonText}>打开</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
   }
 
   return (
@@ -1870,6 +2014,50 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '900',
   },
+  generationTaskPanel: {
+    marginTop: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e2ef',
+    backgroundColor: '#f8fbff',
+    padding: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  generationTaskInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  generationTaskTitle: {
+    color: '#25364d',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  generationTaskMeta: {
+    marginTop: 4,
+    color: '#607086',
+    fontSize: 12,
+  },
+  generationTaskStatus: {
+    marginTop: 4,
+    color: '#40516a',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  generationTaskButton: {
+    height: 34,
+    borderRadius: 8,
+    backgroundColor: '#1f5fbf',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  generationTaskButtonText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '900',
+  },
   attachmentGrid: {
     marginTop: 10,
     flexDirection: 'row',
@@ -1898,6 +2086,42 @@ const styles = StyleSheet.create({
   attachmentFileName: {
     color: '#142033',
     fontSize: 12,
+  },
+  attachmentVideoCard: {
+    width: 220,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d4deeb',
+    backgroundColor: '#e8eef7',
+    overflow: 'hidden',
+  },
+  attachmentVideoPlaceholder: {
+    height: 128,
+    backgroundColor: '#dbe5f2',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachmentVideoFooter: {
+    minHeight: 44,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  attachmentOpenButton: {
+    height: 28,
+    borderRadius: 7,
+    backgroundColor: '#1f5fbf',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  attachmentOpenButtonText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '900',
   },
   notice: {
     marginHorizontal: 14,

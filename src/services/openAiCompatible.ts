@@ -2,6 +2,7 @@ import type {
   ChatCompletionResult,
   ChatMessage,
   ChatTokenUsage,
+  GenerationTaskInfo,
   MediaAttachment,
   ModelInfo,
   ModelTask,
@@ -494,6 +495,55 @@ async function retrieveArkVideoTask(provider: ProviderProfile, taskId: string): 
   return (await response.json()) as ArkVideoTaskResponse;
 }
 
+function videoTaskAttachment(taskId: string, modelId: string, videoUrl: string): MediaAttachment {
+  return {
+    id: `generated-video-${taskId}`,
+    kind: 'video',
+    uri: videoUrl,
+    name: `${modelId}.mp4`,
+  };
+}
+
+export async function queryGenerationTask(
+  provider: ProviderProfile,
+  task: GenerationTaskInfo
+): Promise<ChatCompletionResult> {
+  if (task.kind !== 'video') {
+    throw new Error('当前只支持查询视频生成任务。');
+  }
+
+  if (provider.kind !== 'volcengine-ark') {
+    throw new Error('当前只适配了火山 Ark 的视频生成任务查询。');
+  }
+
+  const payload = await retrieveArkVideoTask(provider, task.taskId);
+  const status = videoTaskStatus(payload) ?? task.status ?? 'submitted';
+  const videoUrl = videoTaskUrl(payload);
+  const generationTask: GenerationTaskInfo = {
+    ...task,
+    status,
+  };
+
+  if (status === 'failed') {
+    throw new Error(`视频生成任务失败：${payload.error?.message ?? task.taskId}`);
+  }
+
+  if (videoUrl) {
+    return {
+      content: `视频生成完成。任务 ID：${task.taskId}`,
+      attachments: [videoTaskAttachment(task.taskId, task.modelId, videoUrl)],
+      generationTask,
+      raw: payload,
+    };
+  }
+
+  return {
+    content: `视频生成任务尚未完成，任务 ID：${task.taskId}，当前状态：${status}。`,
+    generationTask,
+    raw: payload,
+  };
+}
+
 async function sendImageGenerationRequest(
   provider: ProviderProfile,
   modelId: string,
@@ -579,6 +629,14 @@ async function sendArkVideoGenerationRequest(
     };
   }
 
+  const generationTask: GenerationTaskInfo = {
+    providerId: provider.id,
+    modelId,
+    taskId,
+    kind: 'video',
+    status: 'submitted',
+  };
+
   let task = payload;
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const status = videoTaskStatus(task);
@@ -592,6 +650,10 @@ async function sendArkVideoGenerationRequest(
 
   const status = videoTaskStatus(task) ?? 'submitted';
   const videoUrl = videoTaskUrl(task);
+  const updatedTask: GenerationTaskInfo = {
+    ...generationTask,
+    status,
+  };
 
   if (status === 'failed') {
     throw new Error(`视频生成任务失败：${task.error?.message ?? taskId}`);
@@ -600,20 +662,15 @@ async function sendArkVideoGenerationRequest(
   if (videoUrl) {
     return {
       content: `视频生成完成。任务 ID：${taskId}`,
-      attachments: [
-        {
-          id: `generated-video-${taskId}`,
-          kind: 'video',
-          uri: videoUrl,
-          name: `${modelId}.mp4`,
-        },
-      ],
+      attachments: [videoTaskAttachment(taskId, modelId, videoUrl)],
+      generationTask: updatedTask,
       raw: task,
     };
   }
 
   return {
     content: `视频生成任务已提交，任务 ID：${taskId}，当前状态：${status}。生成时间较长时需要稍后查询任务结果。`,
+    generationTask: updatedTask,
     raw: task,
   };
 }

@@ -64,6 +64,14 @@ export interface ChatTokenUsage {
   totalTokens?: number;
 }
 
+export interface GenerationTaskInfo {
+  providerId: string;
+  modelId: string;
+  taskId: string;
+  kind: 'video';
+  status?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: MessageRole;
@@ -73,6 +81,7 @@ export interface ChatMessage {
   attachments?: MediaAttachment[];
   reasoningContent?: string;
   usage?: ChatTokenUsage;
+  generationTask?: GenerationTaskInfo;
   error?: string;
 }
 
@@ -101,5 +110,6 @@ export interface ChatCompletionResult {
   reasoningContent?: string;
   usage?: ChatTokenUsage;
   attachments?: MediaAttachment[];
+  generationTask?: GenerationTaskInfo;
   raw: unknown;
 }
