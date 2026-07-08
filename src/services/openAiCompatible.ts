@@ -4,6 +4,7 @@ import type {
   MediaAttachment,
   ModelInfo,
   ProviderProfile,
+  ReasoningEffort,
 } from '../domain/types';
 import { Platform } from 'react-native';
 
@@ -11,6 +12,7 @@ interface ChatCompletionArgs {
   provider: ProviderProfile;
   modelId: string;
   messages: ChatMessage[];
+  reasoningEffort: ReasoningEffort;
 }
 
 interface RemoteModel {
@@ -152,6 +154,141 @@ function readAssistantText(payload: any): string {
   return '模型返回了空内容。';
 }
 
+function modelText(modelId: string): string {
+  return modelId.toLowerCase();
+}
+
+function isOpenAiBaseUrl(provider: ProviderProfile): boolean {
+  return provider.baseUrl.toLowerCase().includes('api.openai.com');
+}
+
+function isQwenLikeModel(modelId: string): boolean {
+  const text = modelText(modelId);
+  return text.includes('qwen') || text.includes('qwq') || text.includes('qvq');
+}
+
+function isBailianReasoningEffortModel(modelId: string): boolean {
+  const text = modelText(modelId);
+  return text.includes('deepseek-v4') || text.includes('glm-5');
+}
+
+function qwenThinkingBudget(effort: ReasoningEffort): number | undefined {
+  if (effort === 'low') {
+    return 1024;
+  }
+
+  if (effort === 'medium') {
+    return 4096;
+  }
+
+  if (effort === 'high') {
+    return 8192;
+  }
+
+  if (effort === 'max') {
+    return 16384;
+  }
+
+  return undefined;
+}
+
+function arkReasoningEffort(effort: ReasoningEffort): string | undefined {
+  if (effort === 'default') {
+    return undefined;
+  }
+
+  if (effort === 'off') {
+    return 'minimal';
+  }
+
+  return effort;
+}
+
+function openAiReasoningEffort(effort: ReasoningEffort): string | undefined {
+  if (effort === 'default') {
+    return undefined;
+  }
+
+  if (effort === 'off') {
+    return 'none';
+  }
+
+  if (effort === 'max') {
+    return 'xhigh';
+  }
+
+  return effort;
+}
+
+function compatibleReasoningEffort(effort: ReasoningEffort): string | undefined {
+  if (effort === 'default') {
+    return undefined;
+  }
+
+  if (effort === 'off') {
+    return 'minimal';
+  }
+
+  return effort === 'max' ? 'xhigh' : effort;
+}
+
+function applyReasoningOptions(
+  body: Record<string, unknown>,
+  provider: ProviderProfile,
+  modelId: string,
+  effort: ReasoningEffort
+) {
+  if (effort === 'default') {
+    return;
+  }
+
+  if (provider.kind === 'volcengine-ark') {
+    const value = arkReasoningEffort(effort);
+    if (value) {
+      body.reasoning_effort = value;
+    }
+    if (effort === 'off') {
+      body.thinking = { type: 'disabled' };
+    }
+    return;
+  }
+
+  if (provider.kind === 'bailian-compatible') {
+    if (effort === 'off') {
+      body.enable_thinking = false;
+      return;
+    }
+
+    body.enable_thinking = true;
+
+    if (isBailianReasoningEffortModel(modelId)) {
+      body.reasoning_effort = effort === 'max' ? 'max' : 'high';
+      return;
+    }
+
+    if (isQwenLikeModel(modelId)) {
+      const budget = qwenThinkingBudget(effort);
+      if (budget) {
+        body.thinking_budget = budget;
+      }
+    }
+    return;
+  }
+
+  if (isOpenAiBaseUrl(provider)) {
+    const value = openAiReasoningEffort(effort);
+    if (value) {
+      body.reasoning = { effort: value };
+    }
+    return;
+  }
+
+  const value = compatibleReasoningEffort(effort);
+  if (value) {
+    body.reasoning_effort = value;
+  }
+}
+
 export async function fetchOpenAiCompatibleModels(provider: ProviderProfile): Promise<ModelInfo[]> {
   const baseUrl = assertBaseUrl(provider);
   const response = await providerFetch(`${baseUrl}/models`, {
@@ -181,6 +318,7 @@ export async function sendOpenAiCompatibleChat({
   provider,
   modelId,
   messages,
+  reasoningEffort,
 }: ChatCompletionArgs): Promise<ChatCompletionResult> {
   const baseUrl = assertBaseUrl(provider);
 
@@ -188,15 +326,18 @@ export async function sendOpenAiCompatibleChat({
     throw new Error('请先选择一个模型。');
   }
 
+  const body: Record<string, unknown> = {
+    model: modelId,
+    messages: messages.map(toOpenAiMessage),
+    temperature: 0.7,
+    stream: false,
+  };
+  applyReasoningOptions(body, provider, modelId, reasoningEffort);
+
   const response = await providerFetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: authHeaders(provider),
-    body: JSON.stringify({
-      model: modelId,
-      messages: messages.map(toOpenAiMessage),
-      temperature: 0.7,
-      stream: false,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {

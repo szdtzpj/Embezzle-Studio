@@ -19,6 +19,8 @@ export type MessageStatus = 'ready' | 'pending' | 'error';
 
 export type AttachmentKind = 'image' | 'video' | 'file';
 
+export type ReasoningEffort = 'default' | 'off' | 'low' | 'medium' | 'high' | 'max';
+
 export interface ModelInfo {
   id: string;
   name?: string;
@@ -75,6 +77,7 @@ export interface AppWorkspace {
   providers: ProviderProfile[];
   activeProviderId: string;
   activeModelIdByProvider: Record<string, string>;
+  reasoningEffortByModel: Record<string, ReasoningEffort>;
   modelCandidatesByProvider: Record<string, ModelInfo[]>;
   messages: ChatMessage[];
   plugins: PluginManifest[];

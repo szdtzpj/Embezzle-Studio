@@ -55,6 +55,7 @@ export function createDefaultWorkspace(): AppWorkspace {
     activeModelIdByProvider: Object.fromEntries(
       providers.map((provider) => [provider.id, provider.models[0]?.id ?? ''])
     ),
+    reasoningEffortByModel: {},
     modelCandidatesByProvider: {},
     messages: [
       {

@@ -2,16 +2,17 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from '../data/arkModels';
-import type { AppWorkspace, ModelInfo, ProviderProfile } from '../domain/types';
+import type { AppWorkspace, ModelInfo, ProviderProfile, ReasoningEffort } from '../domain/types';
 
 const WORKSPACE_KEY = '@embezzle-studio/workspace-v1';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
 
 type PersistedProvider = Omit<ProviderProfile, 'apiKey'>;
 
-interface PersistedWorkspace extends Omit<AppWorkspace, 'providers' | 'modelCandidatesByProvider'> {
+interface PersistedWorkspace extends Omit<AppWorkspace, 'providers' | 'modelCandidatesByProvider' | 'reasoningEffortByModel'> {
   providers: PersistedProvider[];
   modelCandidatesByProvider?: Record<string, ModelInfo[]>;
+  reasoningEffortByModel?: Record<string, ReasoningEffort>;
 }
 
 let secureStoreAvailability: boolean | null = null;
@@ -101,6 +102,7 @@ function normalizeWorkspace(snapshot: PersistedWorkspace, providers: ProviderPro
     ...snapshot,
     providers: normalizedProviders,
     activeModelIdByProvider,
+    reasoningEffortByModel: snapshot.reasoningEffortByModel ?? {},
     modelCandidatesByProvider,
   };
 }

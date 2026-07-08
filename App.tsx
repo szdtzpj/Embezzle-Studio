@@ -17,7 +17,15 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/arkModels';
 import { createDefaultWorkspace } from './src/data/providerCatalog';
-import type { AppWorkspace, Capability, ChatMessage, MediaAttachment, ModelInfo, ProviderProfile } from './src/domain/types';
+import type {
+  AppWorkspace,
+  Capability,
+  ChatMessage,
+  MediaAttachment,
+  ModelInfo,
+  ProviderProfile,
+  ReasoningEffort,
+} from './src/domain/types';
 import { pickFiles, pickImages, pickVideos } from './src/services/mediaPicker';
 import { sendOpenAiCompatibleChat } from './src/services/openAiCompatible';
 import { refreshProviderModels } from './src/services/modelDiscovery';
@@ -44,6 +52,15 @@ const candidateModelFilters: Array<{ key: CandidateModelFilter; label: string }>
   { key: 'embedding', label: '嵌入' },
   { key: 'rerank', label: '重排' },
   { key: 'tool', label: '工具' },
+];
+
+const reasoningEffortOptions: Array<{ key: ReasoningEffort; label: string }> = [
+  { key: 'default', label: '默认' },
+  { key: 'off', label: '关闭' },
+  { key: 'low', label: '低' },
+  { key: 'medium', label: '中' },
+  { key: 'high', label: '高' },
+  { key: 'max', label: '极高' },
 ];
 
 const modelFilterKeywords = {
@@ -176,6 +193,10 @@ export default function App() {
     : '';
 
   const activeModel = addedModels.find((model) => model.id === activeModelId);
+  const activeModelKey = activeProvider && activeModelId ? `${activeProvider.id}:${activeModelId}` : '';
+  const activeReasoningEffort: ReasoningEffort = activeModelKey
+    ? workspace.reasoningEffortByModel[activeModelKey] ?? 'default'
+    : 'default';
   const modelCandidates = activeProvider
     ? (workspace.modelCandidatesByProvider[activeProvider.id] ?? []).filter(
         (model) =>
@@ -254,6 +275,26 @@ export default function App() {
       },
     }));
     setModelPickerOpen(false);
+  }
+
+  function setActiveReasoningEffort(effort: ReasoningEffort) {
+    if (!activeModelKey) {
+      return;
+    }
+
+    setWorkspace((current) => {
+      const next = { ...current.reasoningEffortByModel };
+      if (effort === 'default') {
+        delete next[activeModelKey];
+      } else {
+        next[activeModelKey] = effort;
+      }
+
+      return {
+        ...current,
+        reasoningEffortByModel: next,
+      };
+    });
   }
 
   function addCustomProvider() {
@@ -493,6 +534,7 @@ export default function App() {
         provider: activeProvider,
         modelId: activeModelId,
         messages: transcript,
+        reasoningEffort: activeReasoningEffort,
       });
 
       updateAssistantMessage(assistantMessage.id, {
@@ -565,6 +607,43 @@ export default function App() {
               </View>
               <Text style={styles.modelPickerChevron}>v</Text>
             </Pressable>
+            {activeModelId ? (
+              <View style={styles.reasoningControl}>
+                <Text style={styles.reasoningLabel}>思考</Text>
+                <ScrollView
+                  horizontal
+                  style={styles.reasoningScroller}
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.reasoningOptions}
+                >
+                  {reasoningEffortOptions.map((option) => {
+                    const active = option.key === activeReasoningEffort;
+
+                    return (
+                      <Pressable
+                        key={option.key}
+                        accessibilityRole="button"
+                        testID={`reasoning-effort-${option.key}`}
+                        onPress={() => setActiveReasoningEffort(option.key)}
+                        style={[
+                          styles.reasoningOption,
+                          active && styles.reasoningOptionActive,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.reasoningOptionText,
+                            active && styles.reasoningOptionTextActive,
+                          ]}
+                        >
+                          {option.label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+            ) : null}
           </View>
 
           <ModelPickerModal
@@ -1110,6 +1189,52 @@ const styles = StyleSheet.create({
     color: '#526070',
     fontSize: 13,
     fontWeight: '900',
+  },
+  reasoningControl: {
+    minHeight: 38,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d8e2ef',
+    backgroundColor: '#ffffff',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingLeft: 10,
+  },
+  reasoningLabel: {
+    color: '#425166',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  reasoningScroller: {
+    flex: 1,
+  },
+  reasoningOptions: {
+    gap: 7,
+    paddingRight: 8,
+  },
+  reasoningOption: {
+    height: 28,
+    minWidth: 42,
+    borderRadius: 7,
+    borderWidth: 1,
+    borderColor: '#d7e1ee',
+    backgroundColor: '#f8fbff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  reasoningOptionActive: {
+    borderColor: '#1f5fbf',
+    backgroundColor: '#e8f1ff',
+  },
+  reasoningOptionText: {
+    color: '#50627b',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  reasoningOptionTextActive: {
+    color: '#174ea6',
   },
   secondaryButton: {
     height: 40,
