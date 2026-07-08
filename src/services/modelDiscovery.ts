@@ -17,21 +17,12 @@ function mergeModels(existingModels: ModelInfo[], discoveredModels: ModelInfo[])
   return Array.from(byId.values());
 }
 
-function remoteModelsWithManualAdditions(remoteModels: ModelInfo[], existingModels: ModelInfo[]): ModelInfo[] {
-  const remoteModelIds = new Set(remoteModels.map((model) => model.id));
-  const manualModels = existingModels.filter(
-    (model) => model.source === 'manual' && !remoteModelIds.has(model.id)
-  );
-
-  return [...remoteModels, ...manualModels];
-}
-
 function formatDiscoveryError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
 function discoverArkModels(provider: ProviderProfile, error?: unknown): ModelDiscoveryResult {
-  const models = mergeModels(arkPresetModels, provider.models);
+  const models = mergeModels([], arkPresetModels);
   const reason = error ? `远程 /models 请求失败：${formatDiscoveryError(error)} ` : '';
 
   return {
@@ -44,11 +35,10 @@ export async function refreshProviderModels(provider: ProviderProfile): Promise<
   if (isVolcengineArkProvider(provider)) {
     try {
       const remoteModels = await fetchOpenAiCompatibleModels(provider);
-      const models = remoteModelsWithManualAdditions(remoteModels, provider.models);
 
       return {
-        models,
-        notice: `已从火山方舟获取 ${remoteModels.length} 个可用模型；已隐藏预置模型，避免误选当前 API Key 无权调用的 ID。`,
+        models: remoteModels,
+        notice: `已从火山方舟获取 ${remoteModels.length} 个可添加模型。`,
       };
     } catch (error) {
       return discoverArkModels(provider, error);
@@ -59,6 +49,6 @@ export async function refreshProviderModels(provider: ProviderProfile): Promise<
 
   return {
     models,
-    notice: `已获取 ${models.length} 个模型。`,
+    notice: `已获取 ${models.length} 个可添加模型。`,
   };
 }

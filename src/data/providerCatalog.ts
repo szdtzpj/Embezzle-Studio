@@ -1,5 +1,4 @@
 import type { AppWorkspace, Capability, ProviderProfile } from '../domain/types';
-import { arkPresetModels } from './arkModels';
 
 const textOnly: Capability[] = ['text', 'streaming'];
 const vision: Capability[] = ['text', 'image-input', 'streaming'];
@@ -12,7 +11,7 @@ export const defaultProviders: ProviderProfile[] = [
     kind: 'volcengine-ark',
     baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
     capabilities: video,
-    models: arkPresetModels,
+    models: [],
     notes: 'Use Ark-compatible endpoints first; add a dedicated video adapter for Doubao media flows.',
   },
   {
@@ -21,20 +20,7 @@ export const defaultProviders: ProviderProfile[] = [
     kind: 'bailian-compatible',
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     capabilities: vision,
-    models: [
-      {
-        id: 'qwen-plus',
-        name: 'Qwen Plus',
-        capabilities: vision,
-        source: 'preset',
-      },
-      {
-        id: 'qwen-max',
-        name: 'Qwen Max',
-        capabilities: vision,
-        source: 'preset',
-      },
-    ],
+    models: [],
     notes: 'Targets Bailian compatible mode before provider-specific extensions.',
   },
   {
@@ -43,14 +29,7 @@ export const defaultProviders: ProviderProfile[] = [
     kind: 'new-api-relay',
     baseUrl: 'https://your-relay.example.com/v1',
     capabilities: ['text', 'image-input', 'tool-calling', 'streaming'],
-    models: [
-      {
-        id: 'gpt-4o-mini',
-        name: 'Relay default',
-        capabilities: vision,
-        source: 'preset',
-      },
-    ],
+    models: [],
     notes: 'Replace the base URL with your New API or One API relay.',
   },
   {
@@ -59,14 +38,7 @@ export const defaultProviders: ProviderProfile[] = [
     kind: 'custom',
     baseUrl: 'https://api.openai.com/v1',
     capabilities: textOnly,
-    models: [
-      {
-        id: 'gpt-4.1-mini',
-        name: 'Custom default',
-        capabilities: textOnly,
-        source: 'preset',
-      },
-    ],
+    models: [],
   },
 ];
 
@@ -83,6 +55,7 @@ export function createDefaultWorkspace(): AppWorkspace {
     activeModelIdByProvider: Object.fromEntries(
       providers.map((provider) => [provider.id, provider.models[0]?.id ?? ''])
     ),
+    modelCandidatesByProvider: {},
     messages: [
       {
         id: 'welcome',

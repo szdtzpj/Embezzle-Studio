@@ -1,15 +1,16 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 
-import type { AppWorkspace, ProviderProfile } from '../domain/types';
+import type { AppWorkspace, ModelInfo, ProviderProfile } from '../domain/types';
 
 const WORKSPACE_KEY = '@embezzle-studio/workspace-v1';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
 
 type PersistedProvider = Omit<ProviderProfile, 'apiKey'>;
 
-interface PersistedWorkspace extends Omit<AppWorkspace, 'providers'> {
+interface PersistedWorkspace extends Omit<AppWorkspace, 'providers' | 'modelCandidatesByProvider'> {
   providers: PersistedProvider[];
+  modelCandidatesByProvider?: Record<string, ModelInfo[]>;
 }
 
 let secureStoreAvailability: boolean | null = null;
@@ -66,6 +67,43 @@ function stripSecret(provider: ProviderProfile): PersistedProvider {
   return persistedProvider;
 }
 
+function normalizeWorkspace(snapshot: PersistedWorkspace, providers: ProviderProfile[]): AppWorkspace {
+  const modelCandidatesByProvider = { ...(snapshot.modelCandidatesByProvider ?? {}) };
+  const normalizedProviders = providers.map((provider) => {
+    const presetModels = provider.models.filter((model) => model.source === 'preset');
+    const addedModels = provider.models.filter((model) => model.source !== 'preset');
+
+    if (presetModels.length) {
+      const existingCandidates = modelCandidatesByProvider[provider.id] ?? [];
+      const existingIds = new Set(existingCandidates.map((model) => model.id));
+      modelCandidatesByProvider[provider.id] = [
+        ...existingCandidates,
+        ...presetModels.filter((model) => !existingIds.has(model.id)),
+      ];
+    }
+
+    return {
+      ...provider,
+      models: addedModels,
+    };
+  });
+
+  const activeModelIdByProvider = { ...snapshot.activeModelIdByProvider };
+  for (const provider of normalizedProviders) {
+    const currentModelId = activeModelIdByProvider[provider.id];
+    activeModelIdByProvider[provider.id] = provider.models.some((model) => model.id === currentModelId)
+      ? currentModelId
+      : provider.models[0]?.id ?? '';
+  }
+
+  return {
+    ...snapshot,
+    providers: normalizedProviders,
+    activeModelIdByProvider,
+    modelCandidatesByProvider,
+  };
+}
+
 export async function loadWorkspace(): Promise<AppWorkspace | null> {
   const raw = await AsyncStorage.getItem(WORKSPACE_KEY);
   if (!raw) {
@@ -80,10 +118,7 @@ export async function loadWorkspace(): Promise<AppWorkspace | null> {
     }))
   );
 
-  return {
-    ...snapshot,
-    providers,
-  };
+  return normalizeWorkspace(snapshot, providers);
 }
 
 export async function saveWorkspace(workspace: AppWorkspace): Promise<void> {

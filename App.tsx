@@ -84,6 +84,13 @@ export default function App() {
     : '';
 
   const activeModel = activeProvider?.models.find((model) => model.id === activeModelId);
+  const modelCandidates = activeProvider
+    ? workspace.modelCandidatesByProvider[activeProvider.id] ?? []
+    : [];
+  const addedModelIds = useMemo(
+    () => new Set(activeProvider?.models.map((model) => model.id) ?? []),
+    [activeProvider?.models]
+  );
 
   function updateActiveProvider(patch: Partial<ProviderProfile>) {
     if (!activeProvider) {
@@ -121,21 +128,13 @@ export default function App() {
 
   function addCustomProvider() {
     const providerId = createId('provider');
-    const modelId = 'model-id';
     const provider: ProviderProfile = {
       id: providerId,
       name: 'Custom Provider',
       kind: 'custom',
       baseUrl: 'https://your-provider.example.com/v1',
       capabilities: ['text', 'image-input', 'streaming'],
-      models: [
-        {
-          id: modelId,
-          name: modelId,
-          capabilities: ['text', 'image-input', 'streaming'],
-          source: 'manual',
-        },
-      ],
+      models: [],
     };
 
     setWorkspace((current) => ({
@@ -144,7 +143,11 @@ export default function App() {
       activeProviderId: providerId,
       activeModelIdByProvider: {
         ...current.activeModelIdByProvider,
-        [providerId]: modelId,
+        [providerId]: '',
+      },
+      modelCandidatesByProvider: {
+        ...current.modelCandidatesByProvider,
+        [providerId]: [],
       },
     }));
     setManualModelId('');
@@ -189,6 +192,61 @@ export default function App() {
     setManualModelId('');
   }
 
+  function addCandidateModel(model: ModelInfo) {
+    if (!activeProvider) {
+      return;
+    }
+
+    setWorkspace((current) => ({
+      ...current,
+      providers: current.providers.map((provider) =>
+        provider.id === activeProvider.id
+          ? {
+              ...provider,
+              models: [
+                ...provider.models.filter((existing) => existing.id !== model.id),
+                {
+                  ...model,
+                  capabilities: model.capabilities.length ? model.capabilities : activeProvider.capabilities,
+                  source: model.source === 'preset' ? 'manual' : model.source,
+                },
+              ],
+            }
+          : provider
+      ),
+      activeModelIdByProvider: {
+        ...current.activeModelIdByProvider,
+        [activeProvider.id]: model.id,
+      },
+    }));
+    setNotice(`已添加并启用 ${model.name ?? model.id}。`);
+  }
+
+  function removeModel(modelId: string) {
+    if (!activeProvider) {
+      return;
+    }
+
+    setWorkspace((current) => {
+      const provider = current.providers.find((item) => item.id === activeProvider.id);
+      const nextModels = provider?.models.filter((model) => model.id !== modelId) ?? [];
+      const currentActiveModelId = current.activeModelIdByProvider[activeProvider.id];
+
+      return {
+        ...current,
+        providers: current.providers.map((item) =>
+          item.id === activeProvider.id ? { ...item, models: nextModels } : item
+        ),
+        activeModelIdByProvider: {
+          ...current.activeModelIdByProvider,
+          [activeProvider.id]:
+            currentActiveModelId === modelId ? nextModels[0]?.id ?? '' : currentActiveModelId,
+        },
+      };
+    });
+    setNotice('已移除模型。');
+  }
+
   async function refreshModels() {
     if (!activeProvider) {
       return;
@@ -199,19 +257,11 @@ export default function App() {
 
     try {
       const result = await refreshProviderModels(activeProvider);
-      const models = result.models.length ? result.models : activeProvider.models;
       setWorkspace((current) => ({
         ...current,
-        providers: current.providers.map((provider) =>
-          provider.id === activeProvider.id ? { ...provider, models } : provider
-        ),
-        activeModelIdByProvider: {
-          ...current.activeModelIdByProvider,
-          [activeProvider.id]: models.some(
-            (model) => model.id === current.activeModelIdByProvider[activeProvider.id]
-          )
-            ? current.activeModelIdByProvider[activeProvider.id]
-            : models[0]?.id ?? '',
+        modelCandidatesByProvider: {
+          ...current.modelCandidatesByProvider,
+          [activeProvider.id]: result.models,
         },
       }));
       setNotice(result.notice);
@@ -255,6 +305,11 @@ export default function App() {
 
     if (!activeProvider) {
       setNotice('请先选择服务商。');
+      return;
+    }
+
+    if (!activeModelId) {
+      setNotice('请先添加并选择模型。');
       return;
     }
 
@@ -330,7 +385,7 @@ export default function App() {
             <View>
               <Text style={styles.appName}>Embezzle Studio</Text>
               <Text style={styles.activeLine}>
-                {activeProvider.name} / {activeModelId || '未选择模型'}
+                {activeProvider.name} / {(activeModel?.name ?? activeModelId) || '未选择模型'}
               </Text>
             </View>
             <Pressable
@@ -422,7 +477,21 @@ export default function App() {
                 </Pressable>
               </View>
 
-              <Text style={styles.sectionTitle}>模型</Text>
+              {notice ? <Text style={styles.settingsNotice}>{notice}</Text> : null}
+
+              <Text style={styles.sectionTitle}>可添加模型</Text>
+              <View style={styles.modelList}>
+                {modelCandidates.map((model) => (
+                  <CandidateModelRow
+                    key={model.id}
+                    model={model}
+                    added={addedModelIds.has(model.id)}
+                    onAdd={() => addCandidateModel(model)}
+                  />
+                ))}
+              </View>
+
+              <Text style={styles.sectionTitle}>已添加模型</Text>
               <View style={styles.inlineField}>
                 <TextInput
                   autoCapitalize="none"
@@ -447,6 +516,7 @@ export default function App() {
                     model={model}
                     active={model.id === activeModelId}
                     onPress={() => selectModel(model.id)}
+                    onRemove={() => removeModel(model.id)}
                   />
                 ))}
               </View>
@@ -491,6 +561,36 @@ export default function App() {
               </ScrollView>
 
               {notice ? <Text style={styles.notice}>{notice}</Text> : null}
+
+              {activeProvider.models.length ? (
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.modelSwitchRow}
+                >
+                  {activeProvider.models.map((model) => (
+                    <Pressable
+                      key={model.id}
+                      accessibilityRole="button"
+                      onPress={() => selectModel(model.id)}
+                      style={[
+                        styles.modelSwitchChip,
+                        model.id === activeModelId && styles.modelSwitchChipActive,
+                      ]}
+                    >
+                      <Text
+                        numberOfLines={1}
+                        style={[
+                          styles.modelSwitchText,
+                          model.id === activeModelId && styles.modelSwitchTextActive,
+                        ]}
+                      >
+                        {model.name ?? model.id}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              ) : null}
 
               {attachments.length ? (
                 <ScrollView
@@ -556,18 +656,53 @@ interface ModelButtonProps {
   model: ModelInfo;
   active: boolean;
   onPress: () => void;
+  onRemove: () => void;
 }
 
-function ModelButton({ model, active, onPress }: ModelButtonProps) {
+function ModelButton({ model, active, onPress, onRemove }: ModelButtonProps) {
   return (
-    <Pressable
-      accessibilityRole="button"
-      onPress={onPress}
-      style={[styles.modelButton, active && styles.modelButtonActive]}
-    >
-      <Text style={[styles.modelName, active && styles.modelNameActive]}>{model.name ?? model.id}</Text>
-      <Text style={styles.modelMeta}>{model.id}</Text>
-    </Pressable>
+    <View style={[styles.modelButton, active && styles.modelButtonActive]}>
+      <Pressable accessibilityRole="button" onPress={onPress} style={styles.modelSelectArea}>
+        <Text numberOfLines={1} style={[styles.modelName, active && styles.modelNameActive]}>
+          {model.name ?? model.id}
+        </Text>
+        <Text numberOfLines={1} style={styles.modelMeta}>
+          {model.id}
+        </Text>
+      </Pressable>
+      <Pressable accessibilityRole="button" onPress={onRemove} style={styles.compactButton}>
+        <Text style={styles.compactButtonText}>删除</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+interface CandidateModelRowProps {
+  model: ModelInfo;
+  added: boolean;
+  onAdd: () => void;
+}
+
+function CandidateModelRow({ model, added, onAdd }: CandidateModelRowProps) {
+  return (
+    <View style={styles.candidateRow}>
+      <View style={styles.modelTextBlock}>
+        <Text numberOfLines={1} style={styles.modelName}>
+          {model.name ?? model.id}
+        </Text>
+        <Text numberOfLines={1} style={styles.modelMeta}>
+          {model.id}
+        </Text>
+      </View>
+      <Pressable
+        accessibilityRole="button"
+        disabled={added}
+        onPress={onAdd}
+        style={[styles.addModelButton, added && styles.buttonDisabled]}
+      >
+        <Text style={styles.addModelButtonText}>{added ? '已添加' : '+'}</Text>
+      </Pressable>
+    </View>
   );
 }
 
@@ -751,11 +886,22 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#d4deeb',
     backgroundColor: '#ffffff',
-    padding: 12,
+    padding: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
   },
   modelButtonActive: {
     borderColor: '#1f5fbf',
     backgroundColor: '#edf5ff',
+  },
+  modelSelectArea: {
+    flex: 1,
+    minWidth: 0,
+  },
+  modelTextBlock: {
+    flex: 1,
+    minWidth: 0,
   },
   modelName: {
     color: '#142033',
@@ -769,6 +915,75 @@ const styles = StyleSheet.create({
     marginTop: 4,
     color: '#6a778a',
     fontSize: 12,
+  },
+  candidateRow: {
+    minHeight: 58,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d4deeb',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  addModelButton: {
+    minWidth: 48,
+    height: 34,
+    borderRadius: 8,
+    backgroundColor: '#1f5fbf',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  addModelButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  compactButton: {
+    height: 34,
+    minWidth: 52,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#c8d4e3',
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+  },
+  compactButtonText: {
+    color: '#39516d',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  modelSwitchRow: {
+    paddingHorizontal: 14,
+    paddingBottom: 8,
+    gap: 8,
+  },
+  modelSwitchChip: {
+    maxWidth: 180,
+    height: 34,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#cbd6e5',
+    backgroundColor: '#ffffff',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  modelSwitchChipActive: {
+    borderColor: '#1f5fbf',
+    backgroundColor: '#e8f1ff',
+  },
+  modelSwitchText: {
+    color: '#35465f',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  modelSwitchTextActive: {
+    color: '#174ea6',
   },
   messageBubble: {
     maxWidth: '92%',
@@ -843,6 +1058,11 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     color: '#9a4d12',
     fontSize: 12,
+  },
+  settingsNotice: {
+    color: '#9a4d12',
+    fontSize: 12,
+    lineHeight: 18,
   },
   pendingAttachments: {
     paddingHorizontal: 14,

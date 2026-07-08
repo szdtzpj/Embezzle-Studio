@@ -9,7 +9,7 @@ Embezzle Studio is a personal Android AI client for people who already own multi
 - Provider first: every model belongs to a provider profile with its own base URL, API key, and adapter type.
 - Capability aware: text, image input, video input, tool calling, streaming, and MCP are tracked explicitly instead of guessed from model names.
 - OpenAI-compatible by default: Volcengine Ark, Bailian compatible mode, New API, One API, and self-hosted relays can share one adapter when they expose `/models` and `/chat/completions`.
-- Discovery is provider-specific: OpenAI-compatible providers use `GET /models` first, including Volcengine Ark/Doubao. Ark treats a successful remote list as authoritative and keeps Doubao presets only as a fallback when the remote model-list request fails.
+- Discovery is provider-specific: OpenAI-compatible providers use `GET /models` first, including Volcengine Ark/Doubao. Remote discovery populates provider-scoped model candidates; users explicitly add candidates to the local model list before using them in chat. Ark keeps Doubao presets only as fallback candidates when the remote model-list request fails.
 - Provider-specific when needed: Doubao video input and other non-standard media flows should be adapter modules, not conditionals scattered across the UI.
 - Secrets stay local: API keys are stored through SecureStore when available and never committed.
 - Mobile constraints are real: remote MCP transports are first-class; local stdio MCP is not part of the first mobile milestone because Android process and binary management would make the first version brittle.
@@ -20,8 +20,10 @@ Embezzle Studio is a personal Android AI client for people who already own multi
    - Built-in presets for Volcengine Ark, Alibaba Bailian compatible mode, New API relay, and custom OpenAI-compatible services.
    - User-editable provider name, base URL, API key, and active model.
    - Remote model discovery through `GET /models`.
+   - Candidate model list with explicit add-to-provider action.
    - Manual provider and model entry for relays that disable model-list APIs.
-   - Volcengine Ark `/models` discovery with common Doubao preset fallback.
+   - Chat-time model switching among added models.
+   - Volcengine Ark `/models` discovery with common Doubao preset fallback candidates.
 
 2. Chat
    - Single-session chat surface.

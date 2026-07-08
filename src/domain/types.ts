@@ -75,6 +75,7 @@ export interface AppWorkspace {
   providers: ProviderProfile[];
   activeProviderId: string;
   activeModelIdByProvider: Record<string, string>;
+  modelCandidatesByProvider: Record<string, ModelInfo[]>;
   messages: ChatMessage[];
   plugins: PluginManifest[];
 }
