@@ -1,8 +1,10 @@
 import { StatusBar } from 'expo-status-bar';
-import { createElement, useEffect, useMemo, useState } from 'react';
-import type { CSSProperties } from 'react';
+import { createElement, useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import {
   ActivityIndicator,
+  Animated,
+  Easing,
   Image,
   KeyboardAvoidingView,
   Linking,
@@ -15,6 +17,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import type { PressableProps, StyleProp, ViewStyle } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/arkModels';
@@ -36,6 +39,205 @@ import { queryGenerationTask, sendOpenAiCompatibleChat } from './src/services/op
 import { refreshProviderModels } from './src/services/modelDiscovery';
 import { createId } from './src/services/id';
 import { loadWorkspace, saveWorkspace } from './src/services/storage';
+
+/**
+ * Anthropic / Claude 风格视觉令牌。
+ * 暖色纸张底、粘土色强调、柔和圆角。仅影响外观，不改动任何业务逻辑。
+ */
+const palette = {
+  bg: '#F5F4EE', // 暖象牙白背景
+  surface: '#FFFFFF', // 卡片 / 面板
+  surfaceAlt: '#F1EFE7', // 次级面板 / 用户气泡
+  surfaceSunken: '#ECEAE1', // 输入框底色
+  border: '#E6E3D8', // 暖色分隔线
+  borderStrong: '#DAD6C8',
+  accent: '#C96442', // Claude 粘土 / 珊瑚主色
+  accentPressed: '#B5563A',
+  accentSoft: '#F3E3DA', // 强调色浅底（选中态）
+  accentBorder: '#E7C9BB',
+  accentText: '#9C4A2E',
+  text: '#20201D', // 暖近黑正文
+  textSecondary: '#6E6C62', // 暖灰次要文字
+  textMuted: '#96938655',
+  textMutedSolid: '#969386',
+  textOnAccent: '#FFFFFF',
+  danger: '#B4402A',
+  dangerBg: '#FBEDE7',
+  dangerBorder: '#EAC5B6',
+  warning: '#8A5A2B',
+  placeholder: '#A6A292',
+  scrim: 'rgba(32, 32, 29, 0.32)',
+} as const;
+
+const radii = {
+  sm: 10,
+  md: 14,
+  lg: 18,
+  xl: 24,
+  pill: 999,
+} as const;
+
+// 用衬线体呈现品牌标题，呼应 Anthropic 的展示字体气质
+const serifFont = Platform.select({
+  ios: 'Georgia',
+  android: 'serif',
+  default: 'Georgia, "Times New Roman", serif',
+});
+
+const useNativeDriver = Platform.OS !== 'web';
+
+type AnimatedPressableProps = PressableProps & {
+  style?: StyleProp<ViewStyle>;
+  children?: ReactNode;
+};
+
+const PressableAnimated = Animated.createAnimatedComponent(Pressable);
+
+/**
+ * 带按压缩放反馈的 Pressable，行为与原生 Pressable 完全一致，只是多了触感动画。
+ */
+function AnimatedPressable({
+  style,
+  children,
+  onPressIn,
+  onPressOut,
+  disabled,
+  ...rest
+}: AnimatedPressableProps) {
+  const scale = useRef(new Animated.Value(1)).current;
+
+  const animateTo = (toValue: number) => {
+    Animated.spring(scale, {
+      toValue,
+      useNativeDriver,
+      speed: 50,
+      bounciness: 0,
+    }).start();
+  };
+
+  return (
+    <PressableAnimated
+      {...rest}
+      disabled={disabled}
+      onPressIn={(event) => {
+        if (!disabled) {
+          animateTo(0.96);
+        }
+        onPressIn?.(event);
+      }}
+      onPressOut={(event) => {
+        animateTo(1);
+        onPressOut?.(event);
+      }}
+      style={[style, { transform: [{ scale }] }]}
+    >
+      {children}
+    </PressableAnimated>
+  );
+}
+
+/**
+ * 消息气泡入场动画：淡入 + 轻微上移。仅在首次挂载时播放一次。
+ */
+function AnimatedMessage({
+  style,
+  children,
+}: {
+  style?: StyleProp<ViewStyle>;
+  children?: ReactNode;
+}) {
+  const anim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(anim, {
+      toValue: 1,
+      duration: 280,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver,
+    }).start();
+  }, [anim]);
+
+  const translateY = anim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [10, 0],
+  });
+
+  return (
+    <Animated.View style={[style, { opacity: anim, transform: [{ translateY }] }]}>
+      {children}
+    </Animated.View>
+  );
+}
+
+/**
+ * 切换聊天 / 配置时的柔和淡入过渡。
+ */
+function ScreenFade({ children }: { children?: ReactNode }) {
+  const anim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(anim, {
+      toValue: 1,
+      duration: 220,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver,
+    }).start();
+  }, [anim]);
+
+  return <Animated.View style={[styles.screenFade, { opacity: anim }]}>{children}</Animated.View>;
+}
+
+/**
+ * “正在思考”指示器：三个交错脉动的圆点。
+ */
+function ThinkingDots() {
+  const dotA = useRef(new Animated.Value(0)).current;
+  const dotB = useRef(new Animated.Value(0)).current;
+  const dotC = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const pulse = (value: Animated.Value, delay: number) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.delay(delay),
+          Animated.timing(value, {
+            toValue: 1,
+            duration: 360,
+            easing: Easing.inOut(Easing.quad),
+            useNativeDriver,
+          }),
+          Animated.timing(value, {
+            toValue: 0,
+            duration: 360,
+            easing: Easing.inOut(Easing.quad),
+            useNativeDriver,
+          }),
+        ])
+      );
+
+    const animation = Animated.parallel([pulse(dotA, 0), pulse(dotB, 160), pulse(dotC, 320)]);
+    animation.start();
+
+    return () => animation.stop();
+  }, [dotA, dotB, dotC]);
+
+  const dotStyle = (value: Animated.Value) => ({
+    opacity: value.interpolate({ inputRange: [0, 1], outputRange: [0.32, 1] }),
+    transform: [
+      {
+        translateY: value.interpolate({ inputRange: [0, 1], outputRange: [0, -4] }),
+      },
+    ],
+  });
+
+  return (
+    <View style={styles.thinkingRow} accessibilityRole="text" accessibilityLabel="正在思考">
+      <Animated.View style={[styles.thinkingDot, dotStyle(dotA)]} />
+      <Animated.View style={[styles.thinkingDot, dotStyle(dotB)]} />
+      <Animated.View style={[styles.thinkingDot, dotStyle(dotC)]} />
+    </View>
+  );
+}
 
 const capabilityLabel: Record<string, string> = {
   text: '文本',
@@ -90,7 +292,7 @@ const webVideoPreviewStyle: CSSProperties = {
   width: '100%',
   height: 128,
   display: 'block',
-  backgroundColor: '#dbe5f2',
+  backgroundColor: '#E4E0D3',
 };
 
 function getSelectableModels(provider: ProviderProfile) {
@@ -674,7 +876,7 @@ export default function App() {
     return (
       <SafeAreaProvider>
         <SafeAreaView style={styles.loadingShell}>
-          <ActivityIndicator color="#2563eb" />
+          <ActivityIndicator color={palette.accent} />
           <Text style={styles.loadingText}>正在加载工作区</Text>
         </SafeAreaView>
       </SafeAreaProvider>
@@ -691,21 +893,26 @@ export default function App() {
         >
           <View style={styles.topBar}>
             <View style={styles.topHeaderRow}>
-              <Text style={styles.appName}>Embezzle Studio</Text>
+              <View style={styles.brandRow}>
+                <View style={styles.brandMark}>
+                  <Text style={styles.brandMarkGlyph}>✳</Text>
+                </View>
+                <Text style={styles.appName}>Embezzle Studio</Text>
+              </View>
               <View style={styles.topActions}>
-                <Pressable accessibilityRole="button" onPress={clearMessages} style={styles.secondaryButton}>
+                <AnimatedPressable accessibilityRole="button" onPress={clearMessages} style={styles.secondaryButton}>
                   <Text style={styles.secondaryButtonText}>清空</Text>
-                </Pressable>
-                <Pressable
+                </AnimatedPressable>
+                <AnimatedPressable
                   accessibilityRole="button"
                   onPress={() => setSettingsOpen((current) => !current)}
                   style={styles.secondaryButton}
                 >
                   <Text style={styles.secondaryButtonText}>{settingsOpen ? '聊天' : '配置'}</Text>
-                </Pressable>
+                </AnimatedPressable>
               </View>
             </View>
-            <Pressable
+            <AnimatedPressable
               accessibilityRole="button"
               testID="model-picker-trigger"
               onPress={() => setModelPickerOpen(true)}
@@ -722,8 +929,8 @@ export default function App() {
                   {(activeModel?.name ?? activeModelId) || '未选择模型'}
                 </Text>
               </View>
-              <Text style={styles.modelPickerChevron}>v</Text>
-            </Pressable>
+              <Text style={styles.modelPickerChevron}>⌄</Text>
+            </AnimatedPressable>
             {activeModelId && activeModelTask === 'chat' ? (
               <View style={styles.reasoningControl}>
                 <Text style={styles.reasoningLabel}>思考</Text>
@@ -737,7 +944,7 @@ export default function App() {
                     const active = option.key === activeReasoningEffort;
 
                     return (
-                      <Pressable
+                      <AnimatedPressable
                         key={option.key}
                         accessibilityRole="button"
                         testID={`reasoning-effort-${option.key}`}
@@ -755,7 +962,7 @@ export default function App() {
                         >
                           {option.label}
                         </Text>
-                      </Pressable>
+                      </AnimatedPressable>
                     );
                   })}
                 </ScrollView>
@@ -773,11 +980,12 @@ export default function App() {
           />
 
           {settingsOpen ? (
-            <ScrollView style={styles.content} contentContainerStyle={styles.settingsContent}>
+            <ScreenFade>
+              <ScrollView style={styles.content} contentContainerStyle={styles.settingsContent}>
               <Text style={styles.sectionTitle}>服务商</Text>
               <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRow}>
                 {workspace.providers.map((provider) => (
-                  <Pressable
+                  <AnimatedPressable
                     key={provider.id}
                     accessibilityRole="button"
                     onPress={() => selectProvider(provider.id)}
@@ -794,15 +1002,15 @@ export default function App() {
                     >
                       {provider.name}
                     </Text>
-                  </Pressable>
+                  </AnimatedPressable>
                 ))}
-                <Pressable
+                <AnimatedPressable
                   accessibilityRole="button"
                   onPress={addCustomProvider}
                   style={styles.providerChip}
                 >
                   <Text style={styles.providerChipText}>新增</Text>
-                </Pressable>
+                </AnimatedPressable>
               </ScrollView>
 
               <View style={styles.fieldGroup}>
@@ -842,14 +1050,14 @@ export default function App() {
               </View>
 
               <View style={styles.actionRow}>
-                <Pressable
+                <AnimatedPressable
                   accessibilityRole="button"
                   disabled={busy}
                   onPress={refreshModels}
                   style={[styles.primaryButton, busy && styles.buttonDisabled]}
                 >
                   <Text style={styles.primaryButtonText}>{busy ? '请求中' : '获取模型'}</Text>
-                </Pressable>
+                </AnimatedPressable>
               </View>
 
               {notice ? <Text style={styles.settingsNotice}>{notice}</Text> : null}
@@ -863,19 +1071,19 @@ export default function App() {
                       autoCapitalize="none"
                       autoCorrect={false}
                       placeholder="搜索模型名称或 ID"
-                      placeholderTextColor="#8a94a6"
+                      placeholderTextColor={palette.placeholder}
                       value={modelSearchQuery}
                       onChangeText={setModelSearchQuery}
                       style={[styles.input, styles.modelSearchInput]}
                     />
                     {modelSearchQuery ? (
-                      <Pressable
+                      <AnimatedPressable
                         accessibilityRole="button"
                         onPress={() => setModelSearchQuery('')}
                         style={styles.secondaryButton}
                       >
                         <Text style={styles.secondaryButtonText}>清除</Text>
-                      </Pressable>
+                      </AnimatedPressable>
                     ) : null}
                   </View>
                   <ScrollView
@@ -933,18 +1141,18 @@ export default function App() {
                 <TextInput
                   autoCapitalize="none"
                   placeholder="手动模型 ID"
-                  placeholderTextColor="#8a94a6"
+                  placeholderTextColor={palette.placeholder}
                   value={manualModelId}
                   onChangeText={setManualModelId}
                   style={[styles.input, styles.inlineInput]}
                 />
-                <Pressable
+                <AnimatedPressable
                   accessibilityRole="button"
                   onPress={addManualModel}
                   style={styles.secondaryButton}
                 >
                   <Text style={styles.secondaryButtonText}>添加</Text>
-                </Pressable>
+                </AnimatedPressable>
               </View>
               <View style={styles.modelList}>
                 {addedModels.map((model) => (
@@ -957,18 +1165,20 @@ export default function App() {
                   />
                 ))}
               </View>
-            </ScrollView>
+              </ScrollView>
+            </ScreenFade>
           ) : (
-            <>
+            <ScreenFade>
               <ScrollView style={styles.content} contentContainerStyle={styles.chatContent}>
                 {workspace.messages.map((message) => {
                   const generationTask =
                     message.role === 'assistant'
                       ? message.generationTask ?? inferMessageGenerationTask(message)
                       : undefined;
+                  const showThinking = message.role === 'assistant' && message.status === 'pending';
 
                   return (
-                  <View
+                  <AnimatedMessage
                     key={message.id}
                     style={[
                       styles.messageBubble,
@@ -982,16 +1192,20 @@ export default function App() {
                         message.role === 'user' ? styles.userRole : styles.assistantRole,
                       ]}
                     >
-                      {message.role === 'user' ? '你' : '模型'}
+                      {message.role === 'user' ? '你' : 'Claude'}
                     </Text>
-                    <Text
-                      style={[
-                        styles.messageText,
-                        message.role === 'user' && styles.userMessageText,
-                      ]}
-                    >
-                      {message.content}
-                    </Text>
+                    {showThinking ? (
+                      <ThinkingDots />
+                    ) : (
+                      <Text
+                        style={[
+                          styles.messageText,
+                          message.role === 'user' && styles.userMessageText,
+                        ]}
+                      >
+                        {message.content}
+                      </Text>
+                    )}
                     {message.role === 'assistant' && message.reasoningContent ? (
                       <View style={styles.reasoningPanel}>
                         <Pressable
@@ -1026,7 +1240,7 @@ export default function App() {
                         ))}
                       </View>
                     ) : null}
-                  </View>
+                  </AnimatedMessage>
                   );
                 })}
               </ScrollView>
@@ -1040,7 +1254,7 @@ export default function App() {
                   contentContainerStyle={styles.pendingAttachments}
                 >
                   {attachments.map((attachment) => (
-                    <Pressable
+                    <AnimatedPressable
                       key={attachment.id}
                       accessibilityRole="button"
                       onPress={() => removeAttachment(attachment.id)}
@@ -1050,42 +1264,42 @@ export default function App() {
                       <Text numberOfLines={1} style={styles.pendingAttachmentName}>
                         {attachment.name}
                       </Text>
-                    </Pressable>
+                    </AnimatedPressable>
                   ))}
                 </ScrollView>
               ) : null}
 
               <View style={styles.composerTools}>
-                <Pressable accessibilityRole="button" onPress={() => addAttachments('image')} style={styles.toolButton}>
+                <AnimatedPressable accessibilityRole="button" onPress={() => addAttachments('image')} style={styles.toolButton}>
                   <Text style={styles.toolButtonText}>图片</Text>
-                </Pressable>
-                <Pressable accessibilityRole="button" onPress={() => addAttachments('video')} style={styles.toolButton}>
+                </AnimatedPressable>
+                <AnimatedPressable accessibilityRole="button" onPress={() => addAttachments('video')} style={styles.toolButton}>
                   <Text style={styles.toolButtonText}>视频</Text>
-                </Pressable>
-                <Pressable accessibilityRole="button" onPress={() => addAttachments('file')} style={styles.toolButton}>
+                </AnimatedPressable>
+                <AnimatedPressable accessibilityRole="button" onPress={() => addAttachments('file')} style={styles.toolButton}>
                   <Text style={styles.toolButtonText}>文件</Text>
-                </Pressable>
+                </AnimatedPressable>
               </View>
 
               <View style={styles.composer}>
                 <TextInput
                   multiline
-                  placeholder="输入消息"
-                  placeholderTextColor="#8a94a6"
+                  placeholder="给 Claude 发送消息"
+                  placeholderTextColor={palette.placeholder}
                   value={input}
                   onChangeText={setInput}
                   style={styles.composerInput}
                 />
-                <Pressable
+                <AnimatedPressable
                   accessibilityRole="button"
                   disabled={busy}
                   onPress={sendMessage}
                   style={[styles.sendButton, busy && styles.buttonDisabled]}
                 >
-                  <Text style={styles.sendButtonText}>{busy ? '...' : '发送'}</Text>
-                </Pressable>
+                  <Text style={styles.sendButtonText}>{busy ? '···' : '↑'}</Text>
+                </AnimatedPressable>
               </View>
-            </>
+            </ScreenFade>
           )}
         </KeyboardAvoidingView>
       </SafeAreaView>
@@ -1146,14 +1360,14 @@ function GenerationTaskPanel({
         </Text>
         <Text style={styles.generationTaskStatus}>状态：{task.status ?? 'submitted'}</Text>
       </View>
-      <Pressable
+      <AnimatedPressable
         accessibilityRole="button"
         disabled={busy}
         onPress={onRefresh}
         style={[styles.generationTaskButton, busy && styles.buttonDisabled]}
       >
         <Text style={styles.generationTaskButtonText}>{busy ? '查询中' : '查询结果'}</Text>
-      </Pressable>
+      </AnimatedPressable>
     </View>
   );
 }
@@ -1178,19 +1392,43 @@ function ModelPickerModal({
   onClose,
   onSelect,
 }: ModelPickerModalProps) {
+  const anim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (visible) {
+      Animated.timing(anim, {
+        toValue: 1,
+        duration: 260,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver,
+      }).start();
+    } else {
+      anim.setValue(0);
+    }
+  }, [anim, visible]);
+
+  const translateY = anim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [40, 0],
+  });
+
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <View style={styles.modelPickerModalRoot}>
         <Pressable accessibilityRole="button" onPress={onClose} style={styles.modelPickerBackdrop} />
-        <View testID="model-picker-sheet" style={styles.modelPickerSheet}>
+        <Animated.View
+          testID="model-picker-sheet"
+          style={[styles.modelPickerSheet, { opacity: anim, transform: [{ translateY }] }]}
+        >
+          <View style={styles.modelPickerHandle} />
           <View style={styles.modelPickerSheetHeader}>
             <View style={styles.modelPickerTitleBlock}>
               <Text style={styles.modelPickerTitle}>选择模型</Text>
               <Text style={styles.modelPickerSubtitle}>已添加模型</Text>
             </View>
-            <Pressable accessibilityRole="button" onPress={onClose} style={styles.modelPickerCloseButton}>
+            <AnimatedPressable accessibilityRole="button" onPress={onClose} style={styles.modelPickerCloseButton}>
               <Text style={styles.modelPickerCloseText}>×</Text>
-            </Pressable>
+            </AnimatedPressable>
           </View>
 
           <ScrollView contentContainerStyle={styles.modelPickerList}>
@@ -1207,7 +1445,7 @@ function ModelPickerModal({
                     const selected = group.provider.id === activeProviderId && model.id === activeModelId;
 
                     return (
-                      <Pressable
+                      <AnimatedPressable
                         key={`${group.provider.id}:${model.id}`}
                         accessibilityRole="button"
                         onPress={() => onSelect(group.provider.id, model.id)}
@@ -1232,7 +1470,7 @@ function ModelPickerModal({
                         </View>
                         <ModelTaskBadge model={model} />
                         {selected ? <Text style={styles.modelPickerSelectedText}>当前</Text> : null}
-                      </Pressable>
+                      </AnimatedPressable>
                     );
                   })}
                 </View>
@@ -1243,7 +1481,7 @@ function ModelPickerModal({
               </View>
             )}
           </ScrollView>
-        </View>
+        </Animated.View>
       </View>
     </Modal>
   );
@@ -1269,7 +1507,7 @@ function ModelTaskBadge({ model }: { model: ModelInfo }) {
 function ModelButton({ model, active, onPress, onRemove }: ModelButtonProps) {
   return (
     <View style={[styles.modelButton, active && styles.modelButtonActive]}>
-      <Pressable accessibilityRole="button" onPress={onPress} style={styles.modelSelectArea}>
+      <AnimatedPressable accessibilityRole="button" onPress={onPress} style={styles.modelSelectArea}>
         <Text numberOfLines={1} style={[styles.modelName, active && styles.modelNameActive]}>
           {model.name ?? model.id}
         </Text>
@@ -1277,10 +1515,10 @@ function ModelButton({ model, active, onPress, onRemove }: ModelButtonProps) {
           {model.id}
         </Text>
         <ModelTaskBadge model={model} />
-      </Pressable>
-      <Pressable accessibilityRole="button" onPress={onRemove} style={styles.compactButton}>
+      </AnimatedPressable>
+      <AnimatedPressable accessibilityRole="button" onPress={onRemove} style={styles.compactButton}>
         <Text style={styles.compactButtonText}>删除</Text>
-      </Pressable>
+      </AnimatedPressable>
     </View>
   );
 }
@@ -1303,14 +1541,16 @@ function CandidateModelRow({ model, added, onAdd }: CandidateModelRowProps) {
         </Text>
         <ModelTaskBadge model={model} />
       </View>
-      <Pressable
+      <AnimatedPressable
         accessibilityRole="button"
         disabled={added}
         onPress={onAdd}
-        style={[styles.addModelButton, added && styles.buttonDisabled]}
+        style={[styles.addModelButton, added && styles.addModelButtonAdded]}
       >
-        <Text style={styles.addModelButtonText}>{added ? '已添加' : '+'}</Text>
-      </Pressable>
+        <Text style={[styles.addModelButtonText, added && styles.addModelButtonTextAdded]}>
+          {added ? '已添加' : '+'}
+        </Text>
+      </AnimatedPressable>
     </View>
   );
 }
@@ -1338,7 +1578,7 @@ function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
           <Text numberOfLines={1} style={styles.attachmentFileName}>
             {attachment.name}
           </Text>
-          <Pressable
+          <AnimatedPressable
             accessibilityRole="button"
             onPress={() => {
               void Linking.openURL(attachment.uri);
@@ -1346,7 +1586,7 @@ function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
             style={styles.attachmentOpenButton}
           >
             <Text style={styles.attachmentOpenButtonText}>打开</Text>
-          </Pressable>
+          </AnimatedPressable>
         </View>
       </View>
     );
@@ -1365,29 +1605,33 @@ function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
 const styles = StyleSheet.create({
   shell: {
     flex: 1,
-    backgroundColor: '#f4f7fb',
+    backgroundColor: palette.bg,
   },
   keyboard: {
     flex: 1,
   },
+  screenFade: {
+    flex: 1,
+  },
   loadingShell: {
     flex: 1,
-    backgroundColor: '#f4f7fb',
+    backgroundColor: palette.bg,
     alignItems: 'center',
     justifyContent: 'center',
   },
   loadingText: {
     marginTop: 12,
-    color: '#526070',
+    color: palette.textSecondary,
     fontSize: 14,
   },
   topBar: {
     paddingHorizontal: 18,
-    paddingVertical: 12,
-    backgroundColor: '#ffffff',
+    paddingTop: 12,
+    paddingBottom: 14,
+    backgroundColor: palette.bg,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#d9e1ec',
-    gap: 10,
+    borderBottomColor: palette.border,
+    gap: 12,
   },
   topHeaderRow: {
     flexDirection: 'row',
@@ -1395,10 +1639,34 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 12,
   },
-  appName: {
-    color: '#142033',
-    fontSize: 20,
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  brandMark: {
+    width: 30,
+    height: 30,
+    borderRadius: radii.pill,
+    backgroundColor: palette.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  brandMarkGlyph: {
+    color: palette.textOnAccent,
+    fontSize: 15,
     fontWeight: '700',
+    lineHeight: 18,
+  },
+  appName: {
+    color: palette.text,
+    fontSize: 21,
+    fontWeight: '600',
+    fontFamily: serifFont,
+    letterSpacing: 0.2,
+    flexShrink: 1,
   },
   topActions: {
     flexDirection: 'row',
@@ -1406,66 +1674,69 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   modelPickerTrigger: {
-    minHeight: 46,
-    borderRadius: 8,
+    minHeight: 50,
+    borderRadius: radii.md,
     borderWidth: 1,
-    borderColor: '#cbd8ea',
-    backgroundColor: '#f7faff',
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
+    shadowColor: '#4A3B2A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 1,
   },
   modelPickerLabelBadge: {
-    height: 26,
-    borderRadius: 7,
-    backgroundColor: '#e8f1ff',
-    borderWidth: 1,
-    borderColor: '#c7dcfb',
+    height: 27,
+    borderRadius: radii.sm,
+    backgroundColor: palette.accentSoft,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 9,
+    paddingHorizontal: 10,
   },
   modelPickerLabelText: {
-    color: '#174ea6',
+    color: palette.accentText,
     fontSize: 12,
-    fontWeight: '900',
+    fontWeight: '700',
   },
   modelPickerCurrent: {
     flex: 1,
     minWidth: 0,
   },
   modelPickerProviderText: {
-    color: '#5c6a7d',
+    color: palette.textSecondary,
     fontSize: 11,
-    fontWeight: '700',
+    fontWeight: '600',
   },
   modelPickerModelText: {
     marginTop: 2,
-    color: '#142033',
-    fontSize: 14,
-    fontWeight: '800',
+    color: palette.text,
+    fontSize: 15,
+    fontWeight: '600',
   },
   modelPickerChevron: {
-    color: '#526070',
-    fontSize: 13,
-    fontWeight: '900',
+    color: palette.textSecondary,
+    fontSize: 16,
+    fontWeight: '700',
   },
   reasoningControl: {
-    minHeight: 38,
-    borderRadius: 8,
+    minHeight: 40,
+    borderRadius: radii.md,
     borderWidth: 1,
-    borderColor: '#d8e2ef',
-    backgroundColor: '#ffffff',
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingLeft: 10,
+    paddingLeft: 12,
   },
   reasoningLabel: {
-    color: '#425166',
+    color: palette.textSecondary,
     fontSize: 12,
-    fontWeight: '900',
+    fontWeight: '700',
   },
   reasoningScroller: {
     flex: 1,
@@ -1473,102 +1744,107 @@ const styles = StyleSheet.create({
   reasoningOptions: {
     gap: 7,
     paddingRight: 8,
+    paddingVertical: 6,
   },
   reasoningOption: {
     height: 28,
     minWidth: 42,
-    borderRadius: 7,
+    borderRadius: radii.pill,
     borderWidth: 1,
-    borderColor: '#d7e1ee',
-    backgroundColor: '#f8fbff',
+    borderColor: palette.borderStrong,
+    backgroundColor: palette.surface,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
   },
   reasoningOptionActive: {
-    borderColor: '#1f5fbf',
-    backgroundColor: '#e8f1ff',
+    borderColor: palette.accentBorder,
+    backgroundColor: palette.accentSoft,
   },
   reasoningOptionText: {
-    color: '#50627b',
+    color: palette.textSecondary,
     fontSize: 12,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   reasoningOptionTextActive: {
-    color: '#174ea6',
+    color: palette.accentText,
+    fontWeight: '700',
   },
   secondaryButton: {
     height: 40,
-    minWidth: 64,
-    paddingHorizontal: 14,
-    borderRadius: 8,
+    minWidth: 60,
+    paddingHorizontal: 16,
+    borderRadius: radii.pill,
     borderWidth: 1,
-    borderColor: '#c8d4e3',
+    borderColor: palette.borderStrong,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#ffffff',
+    backgroundColor: palette.surface,
   },
   secondaryButtonText: {
-    color: '#1f3b64',
-    fontWeight: '700',
+    color: palette.text,
+    fontWeight: '600',
+    fontSize: 14,
   },
   content: {
     flex: 1,
   },
   settingsContent: {
     padding: 18,
-    gap: 16,
+    gap: 18,
   },
   chatContent: {
-    padding: 14,
-    gap: 12,
+    padding: 16,
+    gap: 18,
   },
   sectionTitle: {
-    color: '#142033',
-    fontSize: 15,
-    fontWeight: '700',
+    color: palette.text,
+    fontSize: 17,
+    fontWeight: '600',
+    fontFamily: serifFont,
   },
   providerRow: {
     gap: 10,
     paddingRight: 18,
+    paddingVertical: 2,
   },
   providerChip: {
-    height: 38,
-    paddingHorizontal: 14,
-    borderRadius: 8,
+    height: 40,
+    paddingHorizontal: 16,
+    borderRadius: radii.pill,
     borderWidth: 1,
-    borderColor: '#cbd6e5',
+    borderColor: palette.borderStrong,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#ffffff',
+    backgroundColor: palette.surface,
   },
   providerChipActive: {
-    backgroundColor: '#1f5fbf',
-    borderColor: '#1f5fbf',
+    backgroundColor: palette.accent,
+    borderColor: palette.accent,
   },
   providerChipText: {
-    color: '#35465f',
-    fontWeight: '700',
+    color: palette.text,
+    fontWeight: '600',
   },
   providerChipTextActive: {
-    color: '#ffffff',
+    color: palette.textOnAccent,
   },
   fieldGroup: {
     gap: 8,
   },
   fieldLabel: {
-    color: '#425166',
+    color: palette.textSecondary,
     fontSize: 13,
-    fontWeight: '700',
+    fontWeight: '600',
   },
   input: {
-    minHeight: 44,
-    borderRadius: 8,
+    minHeight: 48,
+    borderRadius: radii.md,
     borderWidth: 1,
-    borderColor: '#cbd6e5',
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 12,
-    color: '#142033',
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    paddingHorizontal: 14,
+    color: palette.text,
     fontSize: 15,
   },
   capabilityRow: {
@@ -1577,15 +1853,17 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   capabilityChip: {
-    borderRadius: 7,
-    backgroundColor: '#e9f1fb',
-    paddingHorizontal: 10,
+    borderRadius: radii.pill,
+    backgroundColor: palette.surfaceAlt,
+    borderWidth: 1,
+    borderColor: palette.border,
+    paddingHorizontal: 12,
     paddingVertical: 6,
   },
   capabilityText: {
-    color: '#27496d',
+    color: palette.textSecondary,
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '600',
   },
   actionRow: {
     flexDirection: 'row',
@@ -1599,19 +1877,20 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   primaryButton: {
-    height: 44,
-    paddingHorizontal: 18,
-    borderRadius: 8,
-    backgroundColor: '#1f5fbf',
+    height: 48,
+    paddingHorizontal: 20,
+    borderRadius: radii.pill,
+    backgroundColor: palette.accent,
     alignItems: 'center',
     justifyContent: 'center',
   },
   primaryButtonText: {
-    color: '#ffffff',
-    fontWeight: '800',
+    color: palette.textOnAccent,
+    fontWeight: '600',
+    fontSize: 15,
   },
   buttonDisabled: {
-    opacity: 0.55,
+    opacity: 0.5,
   },
   modelList: {
     gap: 10,
@@ -1626,7 +1905,7 @@ const styles = StyleSheet.create({
   },
   modelFilterTabs: {
     paddingRight: 18,
-    gap: 24,
+    gap: 22,
   },
   modelFilterTab: {
     height: 34,
@@ -1634,13 +1913,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   modelFilterTabText: {
-    color: '#26384d',
+    color: palette.textSecondary,
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: '600',
   },
   modelFilterTabTextActive: {
-    color: '#00a76f',
-    fontWeight: '900',
+    color: palette.accentText,
+    fontWeight: '700',
   },
   modelFilterTabLine: {
     width: '100%',
@@ -1649,41 +1928,41 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
   },
   modelFilterTabLineActive: {
-    backgroundColor: '#00a76f',
+    backgroundColor: palette.accent,
   },
   modelSearchMeta: {
     marginTop: -8,
-    color: '#66758a',
+    color: palette.textSecondary,
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '600',
   },
   modelSearchEmpty: {
     minHeight: 70,
-    borderRadius: 8,
+    borderRadius: radii.md,
     borderWidth: 1,
-    borderColor: '#d8e2ef',
-    backgroundColor: '#f8fbff',
+    borderColor: palette.border,
+    backgroundColor: palette.surfaceAlt,
     alignItems: 'center',
     justifyContent: 'center',
   },
   modelSearchEmptyText: {
-    color: '#607086',
+    color: palette.textSecondary,
     fontSize: 13,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   modelButton: {
-    borderRadius: 8,
+    borderRadius: radii.md,
     borderWidth: 1,
-    borderColor: '#d4deeb',
-    backgroundColor: '#ffffff',
-    padding: 10,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    padding: 12,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
   },
   modelButtonActive: {
-    borderColor: '#1f5fbf',
-    backgroundColor: '#edf5ff',
+    borderColor: palette.accentBorder,
+    backgroundColor: palette.accentSoft,
   },
   modelSelectArea: {
     flex: 1,
@@ -1694,81 +1973,87 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   modelName: {
-    color: '#142033',
+    color: palette.text,
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: '600',
   },
   modelNameActive: {
-    color: '#174ea6',
+    color: palette.accentText,
   },
   modelMeta: {
     marginTop: 4,
-    color: '#6a778a',
+    color: palette.textSecondary,
     fontSize: 12,
   },
   modelTaskBadge: {
     alignSelf: 'flex-start',
     marginTop: 6,
-    borderRadius: 7,
-    backgroundColor: '#eef4fb',
+    borderRadius: radii.pill,
+    backgroundColor: palette.surfaceAlt,
     borderWidth: 1,
-    borderColor: '#d7e1ee',
-    paddingHorizontal: 8,
+    borderColor: palette.border,
+    paddingHorizontal: 9,
     paddingVertical: 4,
   },
   modelTaskBadgeText: {
-    color: '#40516a',
+    color: palette.textSecondary,
     fontSize: 11,
-    fontWeight: '900',
+    fontWeight: '700',
   },
   candidateRow: {
-    minHeight: 58,
-    borderRadius: 8,
+    minHeight: 60,
+    borderRadius: radii.md,
     borderWidth: 1,
-    borderColor: '#d4deeb',
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
   },
   addModelButton: {
     minWidth: 48,
-    height: 34,
-    borderRadius: 8,
-    backgroundColor: '#1f5fbf',
+    height: 36,
+    borderRadius: radii.pill,
+    backgroundColor: palette.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  addModelButtonAdded: {
+    backgroundColor: palette.surfaceAlt,
+    borderWidth: 1,
+    borderColor: palette.border,
+  },
+  addModelButtonText: {
+    color: palette.textOnAccent,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  addModelButtonTextAdded: {
+    color: palette.textSecondary,
+  },
+  compactButton: {
+    height: 36,
+    minWidth: 52,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: palette.borderStrong,
+    backgroundColor: palette.surface,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 10,
   },
-  addModelButtonText: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '900',
-  },
-  compactButton: {
-    height: 34,
-    minWidth: 52,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#c8d4e3',
-    backgroundColor: '#ffffff',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 8,
-  },
   compactButtonText: {
-    color: '#39516d',
+    color: palette.textSecondary,
     fontSize: 12,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   modelPickerModalRoot: {
     flex: 1,
-    justifyContent: 'flex-start',
-    paddingHorizontal: 14,
-    paddingTop: 104,
-    backgroundColor: 'rgba(20, 32, 51, 0.24)',
+    justifyContent: 'flex-end',
+    backgroundColor: palette.scrim,
   },
   modelPickerBackdrop: {
     position: 'absolute',
@@ -1778,23 +2063,31 @@ const styles = StyleSheet.create({
     left: 0,
   },
   modelPickerSheet: {
-    maxHeight: '72%',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#d8e2ef',
-    backgroundColor: '#ffffff',
-    shadowColor: '#142033',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.15,
+    maxHeight: '82%',
+    borderTopLeftRadius: radii.xl,
+    borderTopRightRadius: radii.xl,
+    backgroundColor: palette.surface,
+    paddingTop: 8,
+    shadowColor: '#2A2018',
+    shadowOffset: { width: 0, height: -6 },
+    shadowOpacity: 0.16,
     shadowRadius: 24,
-    elevation: 8,
+    elevation: 16,
     overflow: 'hidden',
+  },
+  modelPickerHandle: {
+    alignSelf: 'center',
+    width: 40,
+    height: 4,
+    borderRadius: radii.pill,
+    backgroundColor: palette.borderStrong,
+    marginBottom: 6,
   },
   modelPickerSheetHeader: {
     minHeight: 58,
-    paddingHorizontal: 14,
+    paddingHorizontal: 18,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#dbe4f0',
+    borderBottomColor: palette.border,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -1805,35 +2098,36 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   modelPickerTitle: {
-    color: '#142033',
-    fontSize: 16,
-    fontWeight: '800',
+    color: palette.text,
+    fontSize: 18,
+    fontWeight: '600',
+    fontFamily: serifFont,
   },
   modelPickerSubtitle: {
     marginTop: 3,
-    color: '#64748b',
+    color: palette.textSecondary,
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '600',
   },
   modelPickerCloseButton: {
-    width: 34,
-    height: 34,
-    borderRadius: 8,
+    width: 36,
+    height: 36,
+    borderRadius: radii.pill,
     borderWidth: 1,
-    borderColor: '#d5dfec',
+    borderColor: palette.border,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#ffffff',
+    backgroundColor: palette.surface,
   },
   modelPickerCloseText: {
-    color: '#425166',
+    color: palette.textSecondary,
     fontSize: 20,
     lineHeight: 22,
-    fontWeight: '700',
+    fontWeight: '600',
   },
   modelPickerList: {
-    padding: 12,
-    gap: 12,
+    padding: 14,
+    gap: 14,
   },
   modelPickerGroup: {
     gap: 8,
@@ -1846,123 +2140,142 @@ const styles = StyleSheet.create({
   },
   modelPickerGroupName: {
     flex: 1,
-    color: '#40516a',
+    color: palette.textSecondary,
     fontSize: 13,
-    fontWeight: '900',
+    fontWeight: '700',
   },
   modelPickerGroupCount: {
     minWidth: 24,
     height: 22,
-    borderRadius: 7,
-    backgroundColor: '#edf3fb',
-    color: '#50627b',
+    borderRadius: radii.pill,
+    backgroundColor: palette.surfaceAlt,
+    color: palette.textSecondary,
     overflow: 'hidden',
     textAlign: 'center',
     textAlignVertical: 'center',
     fontSize: 11,
-    fontWeight: '800',
+    fontWeight: '700',
   },
   modelPickerRow: {
-    minHeight: 54,
-    borderRadius: 8,
+    minHeight: 56,
+    borderRadius: radii.md,
     borderWidth: 1,
-    borderColor: '#d6e0ed',
-    backgroundColor: '#ffffff',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
   },
   modelPickerRowActive: {
-    borderColor: '#1f5fbf',
-    backgroundColor: '#edf5ff',
+    borderColor: palette.accentBorder,
+    backgroundColor: palette.accentSoft,
   },
   modelPickerRowTextBlock: {
     flex: 1,
     minWidth: 0,
   },
   modelPickerRowName: {
-    color: '#142033',
+    color: palette.text,
     fontSize: 14,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   modelPickerRowNameActive: {
-    color: '#174ea6',
+    color: palette.accentText,
   },
   modelPickerRowMeta: {
     marginTop: 4,
-    color: '#6a778a',
+    color: palette.textSecondary,
     fontSize: 12,
   },
   modelPickerSelectedText: {
-    borderRadius: 7,
-    backgroundColor: '#1f5fbf',
-    color: '#ffffff',
+    borderRadius: radii.pill,
+    backgroundColor: palette.accent,
+    color: palette.textOnAccent,
     overflow: 'hidden',
-    paddingHorizontal: 9,
+    paddingHorizontal: 10,
     paddingVertical: 5,
     fontSize: 12,
-    fontWeight: '800',
+    fontWeight: '700',
   },
   modelPickerEmpty: {
     minHeight: 84,
-    borderRadius: 8,
+    borderRadius: radii.md,
     borderWidth: 1,
-    borderColor: '#d8e2ef',
-    backgroundColor: '#f8fbff',
+    borderColor: palette.border,
+    backgroundColor: palette.surfaceAlt,
     alignItems: 'center',
     justifyContent: 'center',
   },
   modelPickerEmptyText: {
-    color: '#607086',
+    color: palette.textSecondary,
     fontSize: 13,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   messageBubble: {
-    maxWidth: '92%',
-    borderRadius: 8,
-    padding: 12,
-    borderWidth: 1,
+    maxWidth: '100%',
   },
   userBubble: {
     alignSelf: 'flex-end',
-    backgroundColor: '#1f5fbf',
-    borderColor: '#1f5fbf',
+    maxWidth: '86%',
+    backgroundColor: palette.surfaceAlt,
+    borderRadius: radii.lg,
+    borderTopRightRadius: radii.sm,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
   },
   assistantBubble: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#ffffff',
-    borderColor: '#d9e1ec',
+    alignSelf: 'stretch',
+    paddingHorizontal: 2,
   },
   errorBubble: {
-    borderColor: '#f0a3a3',
-    backgroundColor: '#fff6f6',
+    alignSelf: 'stretch',
+    backgroundColor: palette.dangerBg,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: palette.dangerBorder,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
   },
   messageRole: {
     marginBottom: 6,
     fontSize: 11,
-    fontWeight: '800',
+    fontWeight: '700',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
   },
   userRole: {
-    color: '#dceaff',
+    color: palette.textSecondary,
   },
   assistantRole: {
-    color: '#617086',
+    color: palette.accentText,
   },
   messageText: {
-    color: '#142033',
-    fontSize: 15,
-    lineHeight: 21,
+    color: palette.text,
+    fontSize: 16,
+    lineHeight: 25,
   },
   userMessageText: {
-    color: '#ffffff',
+    color: palette.text,
+  },
+  thinkingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 6,
+  },
+  thinkingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: radii.pill,
+    backgroundColor: palette.accent,
   },
   reasoningPanel: {
-    marginTop: 10,
+    marginTop: 12,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#d8e2ef',
-    paddingTop: 8,
+    borderTopColor: palette.border,
+    paddingTop: 10,
     gap: 8,
   },
   reasoningPanelHeader: {
@@ -1973,54 +2286,54 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   reasoningPanelTitle: {
-    color: '#40516a',
+    color: palette.textSecondary,
     fontSize: 12,
-    fontWeight: '900',
+    fontWeight: '700',
   },
   reasoningPanelAction: {
-    color: '#1f5fbf',
+    color: palette.accentText,
     fontSize: 12,
-    fontWeight: '900',
+    fontWeight: '700',
   },
   reasoningPanelText: {
-    color: '#314158',
-    fontSize: 13,
-    lineHeight: 19,
+    color: palette.textSecondary,
+    fontSize: 14,
+    lineHeight: 21,
   },
   tokenUsageRow: {
-    marginTop: 10,
+    marginTop: 12,
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 6,
   },
   tokenUsageChip: {
     minHeight: 26,
-    borderRadius: 7,
+    borderRadius: radii.pill,
     borderWidth: 1,
-    borderColor: '#d8e2ef',
-    backgroundColor: '#f8fbff',
+    borderColor: palette.border,
+    backgroundColor: palette.surfaceAlt,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
-    paddingHorizontal: 8,
+    paddingHorizontal: 10,
   },
   tokenUsageLabel: {
-    color: '#64748b',
+    color: palette.textSecondary,
     fontSize: 11,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   tokenUsageValue: {
-    color: '#25364d',
+    color: palette.text,
     fontSize: 11,
-    fontWeight: '900',
+    fontWeight: '700',
   },
   generationTaskPanel: {
-    marginTop: 10,
-    borderRadius: 8,
+    marginTop: 12,
+    borderRadius: radii.md,
     borderWidth: 1,
-    borderColor: '#d8e2ef',
-    backgroundColor: '#f8fbff',
-    padding: 10,
+    borderColor: palette.border,
+    backgroundColor: palette.surfaceAlt,
+    padding: 12,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
@@ -2030,80 +2343,82 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   generationTaskTitle: {
-    color: '#25364d',
+    color: palette.text,
     fontSize: 12,
-    fontWeight: '900',
+    fontWeight: '700',
   },
   generationTaskMeta: {
     marginTop: 4,
-    color: '#607086',
+    color: palette.textSecondary,
     fontSize: 12,
   },
   generationTaskStatus: {
     marginTop: 4,
-    color: '#40516a',
+    color: palette.textSecondary,
     fontSize: 12,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   generationTaskButton: {
-    height: 34,
-    borderRadius: 8,
-    backgroundColor: '#1f5fbf',
+    height: 36,
+    borderRadius: radii.pill,
+    backgroundColor: palette.accent,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
   },
   generationTaskButtonText: {
-    color: '#ffffff',
+    color: palette.textOnAccent,
     fontSize: 12,
-    fontWeight: '900',
+    fontWeight: '700',
   },
   attachmentGrid: {
-    marginTop: 10,
+    marginTop: 12,
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
   },
   attachmentImage: {
-    width: 92,
-    height: 92,
-    borderRadius: 8,
-    backgroundColor: '#dbe5f2',
+    width: 96,
+    height: 96,
+    borderRadius: radii.md,
+    backgroundColor: palette.surfaceAlt,
   },
   attachmentFile: {
-    width: 118,
-    minHeight: 72,
-    borderRadius: 8,
-    backgroundColor: '#e8eef7',
-    padding: 10,
+    width: 120,
+    minHeight: 74,
+    borderRadius: radii.md,
+    backgroundColor: palette.surfaceAlt,
+    borderWidth: 1,
+    borderColor: palette.border,
+    padding: 12,
     justifyContent: 'space-between',
   },
   attachmentKind: {
-    color: '#36567f',
+    color: palette.accentText,
     fontSize: 11,
-    fontWeight: '800',
+    fontWeight: '700',
   },
   attachmentFileName: {
-    color: '#142033',
+    color: palette.text,
     fontSize: 12,
   },
   attachmentVideoCard: {
     width: 220,
-    borderRadius: 8,
+    borderRadius: radii.md,
     borderWidth: 1,
-    borderColor: '#d4deeb',
-    backgroundColor: '#e8eef7',
+    borderColor: palette.border,
+    backgroundColor: palette.surfaceAlt,
     overflow: 'hidden',
   },
   attachmentVideoPlaceholder: {
     height: 128,
-    backgroundColor: '#dbe5f2',
+    backgroundColor: palette.surfaceSunken,
     alignItems: 'center',
     justifyContent: 'center',
   },
   attachmentVideoFooter: {
     minHeight: 44,
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
     paddingVertical: 8,
     flexDirection: 'row',
     alignItems: 'center',
@@ -2111,107 +2426,111 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   attachmentOpenButton: {
-    height: 28,
-    borderRadius: 7,
-    backgroundColor: '#1f5fbf',
+    height: 30,
+    borderRadius: radii.pill,
+    backgroundColor: palette.accent,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
   },
   attachmentOpenButtonText: {
-    color: '#ffffff',
+    color: palette.textOnAccent,
     fontSize: 12,
-    fontWeight: '900',
+    fontWeight: '700',
   },
   notice: {
-    marginHorizontal: 14,
+    marginHorizontal: 16,
     marginBottom: 8,
-    color: '#9a4d12',
+    color: palette.warning,
     fontSize: 12,
   },
   settingsNotice: {
-    color: '#9a4d12',
+    color: palette.warning,
     fontSize: 12,
     lineHeight: 18,
   },
   pendingAttachments: {
-    paddingHorizontal: 14,
-    paddingBottom: 8,
+    paddingHorizontal: 16,
+    paddingBottom: 10,
     gap: 8,
   },
   pendingAttachment: {
     width: 132,
-    minHeight: 52,
-    borderRadius: 8,
-    backgroundColor: '#ffffff',
+    minHeight: 54,
+    borderRadius: radii.md,
+    backgroundColor: palette.surface,
     borderWidth: 1,
-    borderColor: '#d4deeb',
-    padding: 8,
+    borderColor: palette.border,
+    padding: 10,
   },
   pendingAttachmentText: {
-    color: '#1f5fbf',
+    color: palette.accentText,
     fontSize: 11,
-    fontWeight: '800',
+    fontWeight: '700',
   },
   pendingAttachmentName: {
     marginTop: 4,
-    color: '#425166',
+    color: palette.textSecondary,
     fontSize: 12,
   },
   composerTools: {
     flexDirection: 'row',
     gap: 8,
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
     paddingBottom: 8,
   },
   toolButton: {
     minWidth: 60,
-    height: 34,
-    borderRadius: 8,
-    backgroundColor: '#e7edf6',
+    height: 36,
+    borderRadius: radii.pill,
+    backgroundColor: palette.surfaceAlt,
+    borderWidth: 1,
+    borderColor: palette.border,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
   },
   toolButtonText: {
-    color: '#2b496f',
-    fontWeight: '800',
+    color: palette.textSecondary,
+    fontWeight: '600',
     fontSize: 12,
   },
   composer: {
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
     paddingTop: 10,
-    paddingBottom: 14,
-    backgroundColor: '#ffffff',
+    paddingBottom: 16,
+    backgroundColor: palette.bg,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#d9e1ec',
+    borderTopColor: palette.border,
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 10,
   },
   composerInput: {
     flex: 1,
-    minHeight: 44,
-    maxHeight: 120,
-    borderRadius: 8,
-    backgroundColor: '#f2f5f9',
+    minHeight: 48,
+    maxHeight: 128,
+    borderRadius: radii.lg,
+    backgroundColor: palette.surface,
     borderWidth: 1,
-    borderColor: '#d5deea',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: '#142033',
-    fontSize: 15,
+    borderColor: palette.border,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    color: palette.text,
+    fontSize: 16,
   },
   sendButton: {
-    width: 64,
-    height: 44,
-    borderRadius: 8,
-    backgroundColor: '#1f5fbf',
+    width: 48,
+    height: 48,
+    borderRadius: radii.pill,
+    backgroundColor: palette.accent,
     alignItems: 'center',
     justifyContent: 'center',
   },
   sendButtonText: {
-    color: '#ffffff',
-    fontWeight: '800',
+    color: palette.textOnAccent,
+    fontWeight: '700',
+    fontSize: 20,
+    lineHeight: 22,
   },
 });
