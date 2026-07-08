@@ -13,6 +13,7 @@ Embezzle Studio is a personal Android AI client for people who already own multi
 - Provider-specific when needed: Doubao video input and other non-standard media flows should be adapter modules, not conditionals scattered across the UI.
 - Secrets stay local: API keys are stored through SecureStore when available and never committed.
 - Mobile constraints are real: remote MCP transports are first-class; local stdio MCP is not part of the first mobile milestone because Android process and binary management would make the first version brittle.
+- Web development needs a local proxy: Expo Web runs in a browser and would otherwise hit CORS on provider APIs. Android builds call providers directly.
 
 ## MVP Scope
 

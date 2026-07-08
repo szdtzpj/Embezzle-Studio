@@ -24,7 +24,9 @@
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
-    "web": "expo start --web",
+    "web": "node scripts/start-web.mjs",
+    "web:expo": "expo start --web",
+    "web:proxy": "node scripts/dev-proxy.mjs",
     "typecheck": "tsc --noEmit"
   },
   "private": true

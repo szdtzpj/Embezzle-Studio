@@ -5,6 +5,7 @@ import type {
   ModelInfo,
   ProviderProfile,
 } from '../domain/types';
+import { Platform } from 'react-native';
 
 interface ChatCompletionArgs {
   provider: ProviderProfile;
@@ -17,6 +18,8 @@ interface RemoteModel {
   object?: string;
   owned_by?: string;
 }
+
+const webDevProxyUrl = 'http://127.0.0.1:8787/proxy';
 
 function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl
@@ -42,6 +45,45 @@ function assertBaseUrl(provider: ProviderProfile): string {
     throw new Error('请先填写当前服务商的 Base URL。');
   }
   return baseUrl;
+}
+
+function headersToObject(headers: HeadersInit | undefined): Record<string, string> {
+  if (!headers) {
+    return {};
+  }
+
+  if (headers instanceof Headers) {
+    return Object.fromEntries(headers.entries());
+  }
+
+  if (Array.isArray(headers)) {
+    return Object.fromEntries(headers);
+  }
+
+  return headers as Record<string, string>;
+}
+
+async function providerFetch(url: string, init: RequestInit): Promise<Response> {
+  if (Platform.OS !== 'web') {
+    return fetch(url, init);
+  }
+
+  try {
+    return await fetch(webDevProxyUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url,
+        method: init.method ?? 'GET',
+        headers: headersToObject(init.headers),
+        body: typeof init.body === 'string' ? init.body : undefined,
+      }),
+    });
+  } catch {
+    throw new Error('Web 调试代理未启动或不可访问。请用 npm run web 启动应用，或确认 127.0.0.1:8787 可访问。');
+  }
 }
 
 function imageContent(attachment: MediaAttachment) {
@@ -112,7 +154,7 @@ function readAssistantText(payload: any): string {
 
 export async function fetchOpenAiCompatibleModels(provider: ProviderProfile): Promise<ModelInfo[]> {
   const baseUrl = assertBaseUrl(provider);
-  const response = await fetch(`${baseUrl}/models`, {
+  const response = await providerFetch(`${baseUrl}/models`, {
     method: 'GET',
     headers: authHeaders(provider),
   });
@@ -146,7 +188,7 @@ export async function sendOpenAiCompatibleChat({
     throw new Error('请先选择一个模型。');
   }
 
-  const response = await fetch(`${baseUrl}/chat/completions`, {
+  const response = await providerFetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: authHeaders(provider),
     body: JSON.stringify({
