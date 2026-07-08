@@ -201,6 +201,10 @@ function arkReasoningEffort(effort: ReasoningEffort): string | undefined {
     return 'minimal';
   }
 
+  if (effort === 'max') {
+    return 'high';
+  }
+
   return effort;
 }
 
