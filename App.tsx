@@ -59,6 +59,7 @@ const modelFilterKeywords = {
 function getSelectableModels(provider: ProviderProfile) {
   return provider.models.filter(
     (model) =>
+      model.source !== 'preset' &&
       !(isVolcengineArkProvider(provider) && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
   );
 }
@@ -178,6 +179,7 @@ export default function App() {
   const modelCandidates = activeProvider
     ? (workspace.modelCandidatesByProvider[activeProvider.id] ?? []).filter(
         (model) =>
+          model.source !== 'preset' &&
           !(isVolcengineArkProvider(activeProvider) && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
       )
     : [];

@@ -72,25 +72,16 @@ function normalizeWorkspace(snapshot: PersistedWorkspace, providers: ProviderPro
   const modelCandidatesByProvider = { ...(snapshot.modelCandidatesByProvider ?? {}) };
   const normalizedProviders = providers.map((provider) => {
     const isArkProvider = isVolcengineArkProvider(provider);
-    const presetModels = provider.models.filter((model) => model.source === 'preset');
     const addedModels = provider.models.filter(
       (model) => model.source !== 'preset' && !(isArkProvider && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
     );
 
     const existingCandidates = modelCandidatesByProvider[provider.id] ?? [];
     const retainedCandidates = existingCandidates.filter(
-      (model) => !(isArkProvider && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
+      (model) => model.source !== 'preset' && !(isArkProvider && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
     );
 
-    if (presetModels.length && !isArkProvider) {
-      const existingIds = new Set(existingCandidates.map((model) => model.id));
-      modelCandidatesByProvider[provider.id] = [
-        ...retainedCandidates,
-        ...presetModels.filter((model) => !existingIds.has(model.id)),
-      ];
-    } else {
-      modelCandidatesByProvider[provider.id] = retainedCandidates;
-    }
+    modelCandidatesByProvider[provider.id] = retainedCandidates;
 
     return {
       ...provider,
