@@ -18,9 +18,21 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import type { PressableProps, StyleProp, ViewStyle } from 'react-native';
+import Reanimated, {
+  Extrapolation,
+  interpolate,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
+import { AnimatePresence, MotiView } from 'moti';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { AudioLines, Camera, ChevronDown, Copy, Download, ExternalLink, Image as ImageIcon, Lightbulb, Menu, MessageSquare, MoreHorizontal, Paperclip, PenSquare, Pencil, Pin, Plus, RefreshCw, Search, Share2, Settings, SlidersHorizontal, Trash2, X } from 'lucide-react-native';
 import { Bailian, ChatGLM, Claude, DeepSeek, Doubao, Gemini, Kimi, Minimax, NewAPI, OpenAI, Qwen, Volcengine, Zhipu } from '@lobehub/icons-rn';
@@ -57,6 +69,12 @@ import {
   modelSearchText,
   type ModelCapabilityFilter,
 } from './src/services/modelCapabilities';
+import {
+  getReasoningEffortOptions,
+  normalizeReasoningEffort,
+  reasoningEffortLabels,
+  type ReasoningEffortOption,
+} from './src/services/reasoningEfforts';
 
 /**
  * Anthropic / Claude 风格视觉令牌。
@@ -238,6 +256,29 @@ function ScreenFade({ children }: { children?: ReactNode }) {
 }
 
 /**
+ * 图标 / 内容切换时的交叉淡入淡出：旧内容旋转淡出、新内容旋转淡入。
+ * 用 moti 的 AnimatePresence 编排挂载 / 卸载，避免图标瞬间硬切。
+ */
+function IconCrossfade({ swapKey, children }: { swapKey: string; children: ReactNode }) {
+  return (
+    <View style={styles.iconCrossfade}>
+      <AnimatePresence exitBeforeEnter>
+        <MotiView
+          key={swapKey}
+          from={{ opacity: 0, scale: 0.6, rotate: '-30deg' }}
+          animate={{ opacity: 1, scale: 1, rotate: '0deg' }}
+          exit={{ opacity: 0, scale: 0.6, rotate: '30deg' }}
+          transition={{ type: 'timing', duration: 180 }}
+          style={styles.iconCrossfadeLayer}
+        >
+          {children}
+        </MotiView>
+      </AnimatePresence>
+    </View>
+  );
+}
+
+/**
  * “正在思考”指示器：三个交错脉动的圆点。
  */
 function ThinkingDots() {
@@ -316,15 +357,6 @@ const candidateModelFilters: Array<{ key: ModelCapabilityFilter; label: string }
   { key: 'tool', label: '工具' },
 ];
 
-const reasoningEffortOptions: Array<{ key: ReasoningEffort; label: string }> = [
-  { key: 'default', label: '默认' },
-  { key: 'off', label: '关闭' },
-  { key: 'low', label: '低' },
-  { key: 'medium', label: '中' },
-  { key: 'high', label: '高' },
-  { key: 'max', label: '极高' },
-];
-
 type ParameterKey = Exclude<keyof ModelParameterSettings, 'enabled'>;
 
 const parameterControls: Array<{
@@ -368,7 +400,6 @@ const parameterControls: Array<{
     description: '正值会减少重复表达。',
   },
 ];
-
 const modelTaskLabel: Record<ModelTask, string> = {
   chat: '对话',
   'image-generation': '图片生成',
@@ -658,9 +689,15 @@ export default function App() {
   const activeModel = addedModels.find((model) => model.id === activeModelId);
   const activeModelTask = activeModel ? inferModelTask(activeModel) : 'chat';
   const activeModelKey = activeProvider && activeModelId ? `${activeProvider.id}:${activeModelId}` : '';
-  const activeReasoningEffort: ReasoningEffort = activeModelKey
+  const activeReasoningOptions = useMemo(
+    () => getReasoningEffortOptions(activeProvider, activeModel),
+    [activeProvider, activeModel]
+  );
+  const savedActiveReasoningEffort: ReasoningEffort = activeModelKey
     ? workspace.reasoningEffortByModel[activeModelKey] ?? 'default'
     : 'default';
+  const activeReasoningEffort = normalizeReasoningEffort(activeProvider, activeModel, savedActiveReasoningEffort);
+  const canConfigureReasoning = activeReasoningOptions.length > 1;
   const parameterSettings = {
     ...defaultParameterSettings,
     ...(workspace.parameterSettings ?? {}),
@@ -721,6 +758,12 @@ export default function App() {
     return recentConversations.filter((conversation) => conversationSearchText(conversation).includes(query));
   }, [historySearchQuery, recentConversations]);
 
+  useEffect(() => {
+    if (!canConfigureReasoning && reasoningMenuOpen) {
+      setReasoningMenuOpen(false);
+    }
+  }, [canConfigureReasoning, reasoningMenuOpen]);
+
   function updateActiveProvider(patch: Partial<ProviderProfile>) {
     if (!activeProvider) {
       return;
@@ -774,12 +817,14 @@ export default function App() {
       return;
     }
 
+    const supportedEffort = normalizeReasoningEffort(activeProvider, activeModel, effort);
+
     setWorkspace((current) => {
       const next = { ...current.reasoningEffortByModel };
-      if (effort === 'default') {
+      if (supportedEffort === 'default') {
         delete next[activeModelKey];
       } else {
-        next[activeModelKey] = effort;
+        next[activeModelKey] = supportedEffort;
       }
 
       return {
@@ -1414,17 +1459,20 @@ export default function App() {
 
   if (booting || !activeProvider) {
     return (
-      <SafeAreaProvider>
-        <SafeAreaView style={styles.loadingShell}>
-          <ActivityIndicator color={palette.accent} />
-          <Text style={styles.loadingText}>正在加载工作区</Text>
-        </SafeAreaView>
-      </SafeAreaProvider>
+      <GestureHandlerRootView style={styles.root}>
+        <SafeAreaProvider>
+          <SafeAreaView style={styles.loadingShell}>
+            <ActivityIndicator color={palette.accent} />
+            <Text style={styles.loadingText}>正在加载工作区</Text>
+          </SafeAreaView>
+        </SafeAreaProvider>
+      </GestureHandlerRootView>
     );
   }
 
   return (
-    <SafeAreaProvider>
+    <GestureHandlerRootView style={styles.root}>
+      <SafeAreaProvider>
       <StatusBar style="dark" />
       <SafeAreaView style={styles.shell}>
         <KeyboardAvoidingView
@@ -1446,7 +1494,7 @@ export default function App() {
                   <Text numberOfLines={1} style={styles.modelPickerPillText}>
                     {(activeModel?.name ?? activeModelId) || '选择模型'}
                     {activeReasoningEffort !== 'default' && activeModelTask === 'chat'
-                      ? ` ${reasoningEffortOptions.find((o) => o.key === activeReasoningEffort)?.label ?? ''}`
+                      ? ` ${activeReasoningOptions.find((o) => o.key === activeReasoningEffort)?.label ?? reasoningEffortLabels[activeReasoningEffort]}`
                       : ''}
                   </Text>
                   <ChevronDown size={16} color={palette.textSecondary} strokeWidth={2} />
@@ -1457,7 +1505,9 @@ export default function App() {
                 onPress={() => setSettingsOpen((current) => !current)}
                 style={styles.iconButton}
               >
-                {settingsOpen ? <MessageSquare size={20} color={palette.text} strokeWidth={2} /> : <Settings size={20} color={palette.text} strokeWidth={2} />}
+                <IconCrossfade swapKey={settingsOpen ? 'chat' : 'settings'}>
+                  {settingsOpen ? <MessageSquare size={20} color={palette.text} strokeWidth={2} /> : <Settings size={20} color={palette.text} strokeWidth={2} />}
+                </IconCrossfade>
               </AnimatedPressable>
             </View>
           </View>
@@ -1467,11 +1517,8 @@ export default function App() {
             groups={providerModelGroups}
             activeProviderId={activeProvider.id}
             activeModelId={activeModelId}
-            activeModelTask={activeModelTask}
-            activeReasoningEffort={activeReasoningEffort}
             onClose={() => setModelPickerOpen(false)}
             onSelect={selectProviderModel}
-            onReasoningEffortChange={setActiveReasoningEffort}
           />
 
           {settingsOpen ? (
@@ -1877,107 +1924,134 @@ export default function App() {
                 />
               ) : null}
               <View style={styles.composerWrapper}>
-                {reasoningMenuOpen && activeModelId && activeModelTask === 'chat' ? (
-                  <View style={styles.reasoningMenu}>
-                    {reasoningEffortOptions.map((option) => {
-                      const active = option.key === activeReasoningEffort;
+                <AnimatePresence>
+                  {reasoningMenuOpen && canConfigureReasoning ? (
+                    <MotiView
+                      key="reasoning-menu"
+                      from={{ opacity: 0, translateY: 8, scale: 0.96 }}
+                      animate={{ opacity: 1, translateY: 0, scale: 1 }}
+                      exit={{ opacity: 0, translateY: 8, scale: 0.96 }}
+                      transition={{ type: 'timing', duration: 160 }}
+                      style={styles.reasoningMenu}
+                    >
+                      {activeReasoningOptions.map((option) => {
+                        const active = option.key === activeReasoningEffort;
 
-                      return (
-                        <AnimatedPressable
-                          key={option.key}
-                          accessibilityRole="button"
-                          testID={`reasoning-effort-${option.key}`}
-                          onPress={() => {
-                            setActiveReasoningEffort(option.key);
-                            setReasoningMenuOpen(false);
-                          }}
-                          style={[styles.reasoningMenuItem, active && styles.reasoningMenuItemActive]}
-                        >
-                          <Text style={[styles.reasoningMenuText, active && styles.reasoningMenuTextActive]}>
-                            {option.label}
+                        return (
+                          <AnimatedPressable
+                            key={option.key}
+                            accessibilityRole="button"
+                            testID={`reasoning-effort-${option.key}`}
+                            onPress={() => {
+                              setActiveReasoningEffort(option.key);
+                              setReasoningMenuOpen(false);
+                            }}
+                            style={[styles.reasoningMenuItem, active && styles.reasoningMenuItemActive]}
+                          >
+                            <Text style={[styles.reasoningMenuText, active && styles.reasoningMenuTextActive]}>
+                              {option.label}
+                            </Text>
+                          </AnimatedPressable>
+                        );
+                      })}
+                    </MotiView>
+                  ) : null}
+                </AnimatePresence>
+                <AnimatePresence>
+                  {attachMenuOpen ? (
+                    <MotiView
+                      key="attach-menu"
+                      from={{ opacity: 0, translateY: 8, scale: 0.96 }}
+                      animate={{ opacity: 1, translateY: 0, scale: 1 }}
+                      exit={{ opacity: 0, translateY: 8, scale: 0.96 }}
+                      transition={{ type: 'timing', duration: 160 }}
+                      style={styles.attachMenu}
+                    >
+                      <AnimatedPressable accessibilityRole="button" onPress={() => { addAttachments('image'); setAttachMenuOpen(false); }} style={styles.attachMenuItem}>
+                        <View style={styles.attachMenuIcon}><ImageIcon size={18} color={palette.text} strokeWidth={2} /></View>
+                        <Text style={styles.attachMenuText}>照片</Text>
+                      </AnimatedPressable>
+                      <AnimatedPressable accessibilityRole="button" onPress={() => { addAttachments('video'); setAttachMenuOpen(false); }} style={styles.attachMenuItem}>
+                        <View style={styles.attachMenuIcon}><Camera size={18} color={palette.text} strokeWidth={2} /></View>
+                        <Text style={styles.attachMenuText}>视频</Text>
+                      </AnimatedPressable>
+                      <AnimatedPressable accessibilityRole="button" onPress={() => { addAttachments('file'); setAttachMenuOpen(false); }} style={styles.attachMenuItem}>
+                        <View style={styles.attachMenuIcon}><Paperclip size={18} color={palette.text} strokeWidth={2} /></View>
+                        <Text style={styles.attachMenuText}>文件</Text>
+                      </AnimatedPressable>
+                    </MotiView>
+                  ) : null}
+                </AnimatePresence>
+                <AnimatePresence>
+                  {parameterMenuOpen ? (
+                    <MotiView
+                      key="parameter-menu"
+                      from={{ opacity: 0, translateY: 8, scale: 0.96 }}
+                      animate={{ opacity: 1, translateY: 0, scale: 1 }}
+                      exit={{ opacity: 0, translateY: 8, scale: 0.96 }}
+                      transition={{ type: 'timing', duration: 160 }}
+                      style={styles.parameterMenu}
+                    >
+                      <View style={styles.toolMenuHeader}>
+                        <SlidersHorizontal size={18} color={palette.text} strokeWidth={2.2} />
+                        <View style={styles.toolMenuTitleBlock}>
+                          <Text style={styles.toolMenuTitle}>参数调整</Text>
+                          <Text numberOfLines={1} style={styles.toolMenuSubtitle}>
+                            {parameterRuntimeSummary(parameterSettings)}
                           </Text>
-                        </AnimatedPressable>
-                      );
-                    })}
-                  </View>
-                ) : null}
-                {attachMenuOpen ? (
-                  <View style={styles.attachMenu}>
-                    <AnimatedPressable accessibilityRole="button" onPress={() => { addAttachments('image'); setAttachMenuOpen(false); }} style={styles.attachMenuItem}>
-                      <View style={styles.attachMenuIcon}><ImageIcon size={18} color={palette.text} strokeWidth={2} /></View>
-                      <Text style={styles.attachMenuText}>照片</Text>
-                    </AnimatedPressable>
-                    <AnimatedPressable accessibilityRole="button" onPress={() => { addAttachments('video'); setAttachMenuOpen(false); }} style={styles.attachMenuItem}>
-                      <View style={styles.attachMenuIcon}><Camera size={18} color={palette.text} strokeWidth={2} /></View>
-                      <Text style={styles.attachMenuText}>视频</Text>
-                    </AnimatedPressable>
-                    <AnimatedPressable accessibilityRole="button" onPress={() => { addAttachments('file'); setAttachMenuOpen(false); }} style={styles.attachMenuItem}>
-                      <View style={styles.attachMenuIcon}><Paperclip size={18} color={palette.text} strokeWidth={2} /></View>
-                      <Text style={styles.attachMenuText}>文件</Text>
-                    </AnimatedPressable>
-                  </View>
-                ) : null}
-                {parameterMenuOpen ? (
-                  <View style={styles.parameterMenu}>
-                    <View style={styles.toolMenuHeader}>
-                      <SlidersHorizontal size={18} color={palette.text} strokeWidth={2.2} />
-                      <View style={styles.toolMenuTitleBlock}>
-                        <Text style={styles.toolMenuTitle}>参数调整</Text>
-                        <Text numberOfLines={1} style={styles.toolMenuSubtitle}>
-                          {parameterRuntimeSummary(parameterSettings)}
+                        </View>
+                      </View>
+
+                      <View style={styles.toolMenuSection}>
+                        <Text style={styles.toolMenuSectionTitle}>模式</Text>
+                        <View style={styles.toolSegmentRow}>
+                          <AnimatedPressable
+                            accessibilityRole="button"
+                            onPress={() => updateParameterSettings({ enabled: false })}
+                            style={[styles.toolSegment, !parametersActive && styles.toolSegmentActive]}
+                          >
+                            <Text style={[styles.toolSegmentText, !parametersActive && styles.toolSegmentTextActive]}>
+                              关闭
+                            </Text>
+                          </AnimatedPressable>
+                          <AnimatedPressable
+                            accessibilityRole="button"
+                            onPress={() => updateParameterSettings({ enabled: true })}
+                            style={[styles.toolSegment, parametersActive && styles.toolSegmentActive]}
+                          >
+                            <Text style={[styles.toolSegmentText, parametersActive && styles.toolSegmentTextActive]}>
+                              启用
+                            </Text>
+                          </AnimatedPressable>
+                        </View>
+                        <Text style={styles.toolMenuHint}>
+                          关闭时不发送采样参数，交给服务商默认值处理。
                         </Text>
                       </View>
-                    </View>
 
-                    <View style={styles.toolMenuSection}>
-                      <Text style={styles.toolMenuSectionTitle}>模式</Text>
-                      <View style={styles.toolSegmentRow}>
-                        <AnimatedPressable
-                          accessibilityRole="button"
-                          onPress={() => updateParameterSettings({ enabled: false })}
-                          style={[styles.toolSegment, !parametersActive && styles.toolSegmentActive]}
-                        >
-                          <Text style={[styles.toolSegmentText, !parametersActive && styles.toolSegmentTextActive]}>
-                            关闭
-                          </Text>
-                        </AnimatedPressable>
-                        <AnimatedPressable
-                          accessibilityRole="button"
-                          onPress={() => updateParameterSettings({ enabled: true })}
-                          style={[styles.toolSegment, parametersActive && styles.toolSegmentActive]}
-                        >
-                          <Text style={[styles.toolSegmentText, parametersActive && styles.toolSegmentTextActive]}>
-                            启用
-                          </Text>
-                        </AnimatedPressable>
-                      </View>
-                      <Text style={styles.toolMenuHint}>
-                        关闭时不发送采样参数，交给服务商默认值处理。
-                      </Text>
-                    </View>
-
-                    {parametersActive ? (
-                      <>
-                        {parameterControls.map((control) => (
-                          <ParameterControl
-                            key={control.key}
-                            control={control}
-                            value={parameterSettings[control.key]}
-                            onChange={(value) => updateParameterValue(control.key, value)}
-                          />
-                        ))}
-                        <AnimatedPressable
-                          accessibilityRole="button"
-                          onPress={resetParameterSettings}
-                          style={styles.parameterResetButton}
-                        >
-                          <RefreshCw size={15} color={palette.text} strokeWidth={2.2} />
-                          <Text style={styles.parameterResetButtonText}>还原默认设置</Text>
-                        </AnimatedPressable>
-                      </>
-                    ) : null}
-                  </View>
-                ) : null}
+                      {parametersActive ? (
+                        <>
+                          {parameterControls.map((control) => (
+                            <ParameterControl
+                              key={control.key}
+                              control={control}
+                              value={parameterSettings[control.key]}
+                              onChange={(value) => updateParameterValue(control.key, value)}
+                            />
+                          ))}
+                          <AnimatedPressable
+                            accessibilityRole="button"
+                            onPress={resetParameterSettings}
+                            style={styles.parameterResetButton}
+                          >
+                            <RefreshCw size={15} color={palette.text} strokeWidth={2.2} />
+                            <Text style={styles.parameterResetButtonText}>还原默认设置</Text>
+                          </AnimatedPressable>
+                        </>
+                      ) : null}
+                    </MotiView>
+                  ) : null}
+                </AnimatePresence>
                 <View style={styles.composer}>
                   <TextInput
                     multiline
@@ -1989,7 +2063,7 @@ export default function App() {
                   />
                   <View style={styles.composerFooter}>
                     <View style={styles.composerLeftTools}>
-                      {activeModelId && activeModelTask === 'chat' ? (
+                      {canConfigureReasoning ? (
                         <AnimatedPressable
                           accessibilityRole="button"
                           onPress={() => {
@@ -2045,7 +2119,9 @@ export default function App() {
                       onPress={sendMessage}
                       style={[styles.sendButton, busy && styles.buttonDisabled]}
                     >
-                      <Text style={styles.sendButtonText}>{busy ? '···' : '↑'}</Text>
+                      <IconCrossfade swapKey={busy ? 'busy' : 'idle'}>
+                        <Text style={styles.sendButtonText}>{busy ? '···' : '↑'}</Text>
+                      </IconCrossfade>
                     </AnimatedPressable>
                   </View>
                 </View>
@@ -2055,182 +2131,178 @@ export default function App() {
         </KeyboardAvoidingView>
 
         {/* Sidebar drawer */}
-        <Modal visible={sidebarOpen} transparent animationType="none" onRequestClose={() => setSidebarOpen(false)}>
-          <Pressable style={styles.sidebarScrim} onPress={() => setSidebarOpen(false)}>
-            <Pressable
-              style={styles.sidebarPanel}
-              onPress={(e) => e.stopPropagation()}
-              onLayout={(event) => setSidebarPanelHeight(event.nativeEvent.layout.height)}
-            >
-              <View style={styles.sidebarHeader}>
-                <Text style={styles.sidebarBrand}>Embezzle Studio</Text>
-                <AnimatedPressable accessibilityRole="button" onPress={() => setSidebarOpen(false)} style={styles.sidebarClose}>
-                  <X size={20} color={palette.text} strokeWidth={2} />
-                </AnimatedPressable>
-              </View>
+        <SidebarDrawer
+          open={sidebarOpen}
+          onClose={() => setSidebarOpen(false)}
+          onPanelLayout={(height) => setSidebarPanelHeight(height)}
+        >
+          <View style={styles.sidebarHeader}>
+            <Text style={styles.sidebarBrand}>Embezzle Studio</Text>
+            <AnimatedPressable accessibilityRole="button" onPress={() => setSidebarOpen(false)} style={styles.sidebarClose}>
+              <X size={20} color={palette.text} strokeWidth={2} />
+            </AnimatedPressable>
+          </View>
 
+          <AnimatedPressable
+            accessibilityRole="button"
+            onPress={() => { startNewConversation(); setSidebarOpen(false); }}
+            style={styles.sidebarNewChat}
+          >
+            <PenSquare size={18} color={palette.textOnAccent} strokeWidth={2} />
+            <Text style={styles.sidebarNewChatText}>新对话</Text>
+          </AnimatedPressable>
+
+          <View style={styles.sidebarSearchBox}>
+            <Search size={16} color={palette.textSecondary} strokeWidth={2} />
+            <TextInput
+              value={historySearchQuery}
+              onChangeText={setHistorySearchQuery}
+              placeholder="搜索聊天记录"
+              placeholderTextColor={palette.placeholder}
+              style={styles.sidebarSearchInput}
+            />
+            {historySearchQuery ? (
               <AnimatedPressable
                 accessibilityRole="button"
-                onPress={() => { startNewConversation(); setSidebarOpen(false); }}
-                style={styles.sidebarNewChat}
+                onPress={() => setHistorySearchQuery('')}
+                style={styles.sidebarSearchClear}
               >
-                <PenSquare size={18} color={palette.textOnAccent} strokeWidth={2} />
-                <Text style={styles.sidebarNewChatText}>新对话</Text>
+                <X size={14} color={palette.textSecondary} strokeWidth={2} />
               </AnimatedPressable>
+            ) : null}
+          </View>
 
-              <View style={styles.sidebarSearchBox}>
-                <Search size={16} color={palette.textSecondary} strokeWidth={2} />
-                <TextInput
-                  value={historySearchQuery}
-                  onChangeText={setHistorySearchQuery}
-                  placeholder="搜索聊天记录"
-                  placeholderTextColor={palette.placeholder}
-                  style={styles.sidebarSearchInput}
-                />
-                {historySearchQuery ? (
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    onPress={() => setHistorySearchQuery('')}
-                    style={styles.sidebarSearchClear}
-                  >
-                    <X size={14} color={palette.textSecondary} strokeWidth={2} />
-                  </AnimatedPressable>
-                ) : null}
-              </View>
+          <View style={styles.sidebarSection}>
+            <Text style={styles.sidebarSectionTitle}>最近</Text>
+            {filteredConversations.length ? (
+              <ScrollView
+                style={styles.sidebarConversationList}
+                showsVerticalScrollIndicator={false}
+                contentContainerStyle={styles.sidebarConversationListContent}
+              >
+                {filteredConversations.map((conversation) => {
+                  const active = conversation.id === workspace.activeConversationId;
+                  const dominantModel = dominantConversationModel(conversation);
 
-              <View style={styles.sidebarSection}>
-                <Text style={styles.sidebarSectionTitle}>最近</Text>
-                {filteredConversations.length ? (
-                  <ScrollView
-                    style={styles.sidebarConversationList}
-                    showsVerticalScrollIndicator={false}
-                    contentContainerStyle={styles.sidebarConversationListContent}
-                  >
-                    {filteredConversations.map((conversation) => {
-                      const active = conversation.id === workspace.activeConversationId;
-                      const dominantModel = dominantConversationModel(conversation);
-
-                      return (
-                        <View
-                          key={conversation.id}
-                          style={[styles.sidebarConversationItem, active && styles.sidebarConversationItemActive]}
+                  return (
+                    <View
+                      key={conversation.id}
+                      style={[styles.sidebarConversationItem, active && styles.sidebarConversationItemActive]}
+                    >
+                      <View style={styles.sidebarConversationRow}>
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          onPress={() => selectConversation(conversation.id)}
+                          style={styles.sidebarConversationContent}
                         >
-                          <View style={styles.sidebarConversationRow}>
-                            <AnimatedPressable
-                              accessibilityRole="button"
-                              onPress={() => selectConversation(conversation.id)}
-                              style={styles.sidebarConversationContent}
-                            >
-                              <View style={styles.sidebarConversationTitleRow}>
-                                {conversation.pinnedAt ? (
-                                  <Pin size={12} color={palette.accentText} strokeWidth={2.4} />
-                                ) : null}
-                                <Text numberOfLines={1} style={[styles.sidebarConversationTitle, active && styles.sidebarConversationTitleActive]}>
-                                  {conversation.title}
-                                </Text>
-                              </View>
-                              <View style={styles.sidebarConversationMetaRow}>
-                                {dominantModel ? (
-                                  <ModelAvatar
-                                    modelId={dominantModel.modelId}
-                                    providerName={dominantModel.providerName}
-                                    size={18}
-                                    containerSize={22}
-                                  />
-                                ) : null}
-                                <Text numberOfLines={1} style={styles.sidebarConversationMeta}>
-                                  {dominantModel
-                                    ? `${dominantModel.modelId}${dominantModel.count > 1 ? ` x${dominantModel.count}` : ''} · `
-                                    : ''}
-                                  {formatConversationTime(conversation.updatedAt)}
-                                </Text>
-                              </View>
-                            </AnimatedPressable>
-                            <AnimatedPressable
-                              accessibilityRole="button"
-                              onPress={(event) => {
-                                event.stopPropagation?.();
-                                openConversationActionMenu(conversation.id, event.nativeEvent.pageY);
-                              }}
-                              style={[
-                                styles.sidebarConversationMore,
-                                conversationActionId === conversation.id && styles.sidebarConversationMoreActive,
-                              ]}
-                            >
-                              <MoreHorizontal size={18} color={palette.textSecondary} strokeWidth={2.4} />
-                            </AnimatedPressable>
+                          <View style={styles.sidebarConversationTitleRow}>
+                            {conversation.pinnedAt ? (
+                              <Pin size={12} color={palette.accentText} strokeWidth={2.4} />
+                            ) : null}
+                            <Text numberOfLines={1} style={[styles.sidebarConversationTitle, active && styles.sidebarConversationTitleActive]}>
+                              {conversation.title}
+                            </Text>
                           </View>
-                        </View>
-                      );
-                    })}
-                  </ScrollView>
-                ) : (
-                  <Text style={styles.sidebarEmpty}>
-                    {recentConversations.length ? '没有匹配的聊天记录' : '暂无历史对话'}
+                          <View style={styles.sidebarConversationMetaRow}>
+                            {dominantModel ? (
+                              <ModelAvatar
+                                modelId={dominantModel.modelId}
+                                providerName={dominantModel.providerName}
+                                size={18}
+                                containerSize={22}
+                              />
+                            ) : null}
+                            <Text numberOfLines={1} style={styles.sidebarConversationMeta}>
+                              {dominantModel
+                                ? `${dominantModel.modelId}${dominantModel.count > 1 ? ` x${dominantModel.count}` : ''} · `
+                                : ''}
+                              {formatConversationTime(conversation.updatedAt)}
+                            </Text>
+                          </View>
+                        </AnimatedPressable>
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          onPress={(event) => {
+                            event.stopPropagation?.();
+                            openConversationActionMenu(conversation.id, event.nativeEvent.pageY);
+                          }}
+                          style={[
+                            styles.sidebarConversationMore,
+                            conversationActionId === conversation.id && styles.sidebarConversationMoreActive,
+                          ]}
+                        >
+                          <MoreHorizontal size={18} color={palette.textSecondary} strokeWidth={2.4} />
+                        </AnimatedPressable>
+                      </View>
+                    </View>
+                  );
+                })}
+              </ScrollView>
+            ) : (
+              <Text style={styles.sidebarEmpty}>
+                {recentConversations.length ? '没有匹配的聊天记录' : '暂无历史对话'}
+              </Text>
+            )}
+          </View>
+          {conversationActionConversation ? (
+            <>
+              <BlurView
+                intensity={38}
+                tint="light"
+                blurMethod="dimezisBlurView"
+                style={styles.sidebarConversationFrost}
+              >
+                <Pressable
+                  style={styles.sidebarConversationFrostTapTarget}
+                  onPress={() => setConversationActionId(null)}
+                />
+              </BlurView>
+              <View
+                style={[
+                  styles.sidebarConversationActionMenu,
+                  { top: conversationActionMenuTop },
+                ]}
+              >
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  onPress={() => togglePinConversation(conversationActionConversation.id)}
+                  style={styles.sidebarConversationActionRow}
+                >
+                  <Text style={styles.sidebarConversationActionText}>
+                    {conversationActionConversation.pinnedAt ? '取消置顶' : '置顶'}
                   </Text>
-                )}
+                  <Pin size={16} color="#111827" strokeWidth={2.4} />
+                </AnimatedPressable>
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  onPress={() => beginRenameConversation(conversationActionConversation)}
+                  style={styles.sidebarConversationActionRow}
+                >
+                  <Text style={styles.sidebarConversationActionText}>编辑名称</Text>
+                  <Pencil size={16} color="#2563EB" strokeWidth={2.4} />
+                </AnimatedPressable>
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  onPress={() => { void shareConversation(conversationActionConversation); }}
+                  style={styles.sidebarConversationActionRow}
+                >
+                  <Text style={styles.sidebarConversationActionText}>分享对话</Text>
+                  <Share2 size={16} color="#16A34A" strokeWidth={2.3} />
+                </AnimatedPressable>
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  onPress={() => requestDeleteConversation(conversationActionConversation.id)}
+                  style={[styles.sidebarConversationActionRow, styles.sidebarConversationActionDangerRow]}
+                >
+                  <Text style={[styles.sidebarConversationActionText, styles.sidebarConversationActionDangerText]}>
+                    删除
+                  </Text>
+                  <Trash2 size={16} color={palette.danger} strokeWidth={2.4} />
+                </AnimatedPressable>
               </View>
-              {conversationActionConversation ? (
-                <>
-                  <BlurView
-                    intensity={38}
-                    tint="light"
-                    blurMethod="dimezisBlurView"
-                    style={styles.sidebarConversationFrost}
-                  >
-                    <Pressable
-                      style={styles.sidebarConversationFrostTapTarget}
-                      onPress={() => setConversationActionId(null)}
-                    />
-                  </BlurView>
-                  <View
-                    style={[
-                      styles.sidebarConversationActionMenu,
-                      { top: conversationActionMenuTop },
-                    ]}
-                  >
-                    <AnimatedPressable
-                      accessibilityRole="button"
-                      onPress={() => togglePinConversation(conversationActionConversation.id)}
-                      style={styles.sidebarConversationActionRow}
-                    >
-                      <Text style={styles.sidebarConversationActionText}>
-                        {conversationActionConversation.pinnedAt ? '取消置顶' : '置顶'}
-                      </Text>
-                      <Pin size={16} color="#111827" strokeWidth={2.4} />
-                    </AnimatedPressable>
-                    <AnimatedPressable
-                      accessibilityRole="button"
-                      onPress={() => beginRenameConversation(conversationActionConversation)}
-                      style={styles.sidebarConversationActionRow}
-                    >
-                      <Text style={styles.sidebarConversationActionText}>编辑名称</Text>
-                      <Pencil size={16} color="#2563EB" strokeWidth={2.4} />
-                    </AnimatedPressable>
-                    <AnimatedPressable
-                      accessibilityRole="button"
-                      onPress={() => { void shareConversation(conversationActionConversation); }}
-                      style={styles.sidebarConversationActionRow}
-                    >
-                      <Text style={styles.sidebarConversationActionText}>分享对话</Text>
-                      <Share2 size={16} color="#16A34A" strokeWidth={2.3} />
-                    </AnimatedPressable>
-                    <AnimatedPressable
-                      accessibilityRole="button"
-                      onPress={() => requestDeleteConversation(conversationActionConversation.id)}
-                      style={[styles.sidebarConversationActionRow, styles.sidebarConversationActionDangerRow]}
-                    >
-                      <Text style={[styles.sidebarConversationActionText, styles.sidebarConversationActionDangerText]}>
-                        删除
-                      </Text>
-                      <Trash2 size={16} color={palette.danger} strokeWidth={2.4} />
-                    </AnimatedPressable>
-                  </View>
-                </>
-              ) : null}
-            </Pressable>
-          </Pressable>
-        </Modal>
+            </>
+          ) : null}
+        </SidebarDrawer>
 
         <Modal
           visible={Boolean(renamingConversation)}
@@ -2326,6 +2398,7 @@ export default function App() {
 
       </SafeAreaView>
     </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 
@@ -2576,34 +2649,38 @@ function GenerationTaskPanel({
   );
 }
 
-const reasoningSliderStops: ReasoningEffort[] = ['off', 'low', 'medium', 'high', 'max'];
-const reasoningSliderLabels: Record<string, string> = {
-  off: '关闭',
-  low: '低',
-  medium: '中',
-  high: '高',
-  max: '极高',
-};
-
 function ReasoningSlider({
   value,
+  options,
   onChange,
 }: {
   value: ReasoningEffort;
+  options: ReasoningEffortOption[];
   onChange: (effort: ReasoningEffort) => void;
 }) {
-  const activeIndex = reasoningSliderStops.indexOf(value === 'default' ? 'medium' : value);
+  const sliderOptions = options.filter((option) => option.key !== 'default');
+  if (!sliderOptions.length) {
+    return null;
+  }
+
+  const fallbackIndex = Math.max(0, sliderOptions.findIndex((option) => option.key === 'medium'));
+  const activeIndex = Math.max(
+    0,
+    sliderOptions.findIndex((option) => option.key === value) >= 0
+      ? sliderOptions.findIndex((option) => option.key === value)
+      : fallbackIndex
+  );
   const trackWidth = useRef(0);
   const currentIndex = useRef(activeIndex);
   currentIndex.current = activeIndex;
 
   const snapToIndex = (locationX: number) => {
     const width = trackWidth.current;
-    if (!width) return;
+    if (!width || !sliderOptions.length) return;
     const ratio = Math.max(0, Math.min(1, locationX / width));
-    const index = Math.round(ratio * (reasoningSliderStops.length - 1));
+    const index = Math.round(ratio * (sliderOptions.length - 1));
     if (index !== currentIndex.current) {
-      onChange(reasoningSliderStops[index]);
+      onChange(sliderOptions[index].key);
     }
   };
 
@@ -2620,8 +2697,8 @@ function ReasoningSlider({
     })
   ).current;
 
-  const thumbPosition = reasoningSliderStops.length > 1
-    ? (activeIndex / (reasoningSliderStops.length - 1)) * 100
+  const thumbPosition = sliderOptions.length > 1
+    ? (activeIndex / (sliderOptions.length - 1)) * 100
     : 50;
 
   return (
@@ -2635,15 +2712,15 @@ function ReasoningSlider({
         <View style={[styles.reasoningSliderThumb, { left: `${thumbPosition}%` as any }]} />
       </View>
       <View style={styles.reasoningSliderLabels}>
-        {reasoningSliderStops.map((stop, index) => (
-          <Pressable key={stop} onPress={() => onChange(stop)}>
+        {sliderOptions.map((option, index) => (
+          <Pressable key={option.key} onPress={() => onChange(option.key)}>
             <Text
               style={[
                 styles.reasoningSliderLabel,
                 index === activeIndex && styles.reasoningSliderLabelActive,
               ]}
             >
-              {reasoningSliderLabels[stop]}
+              {option.label}
             </Text>
           </Pressable>
         ))}
@@ -2780,11 +2857,8 @@ interface ModelPickerModalProps {
   }>;
   activeProviderId: string;
   activeModelId: string;
-  activeModelTask: ModelTask;
-  activeReasoningEffort: ReasoningEffort;
   onClose: () => void;
   onSelect: (providerId: string, modelId: string) => void;
-  onReasoningEffortChange: (effort: ReasoningEffort) => void;
 }
 
 function ModelPickerModal({
@@ -2792,103 +2866,225 @@ function ModelPickerModal({
   groups,
   activeProviderId,
   activeModelId,
-  activeModelTask,
-  activeReasoningEffort,
   onClose,
   onSelect,
-  onReasoningEffortChange,
 }: ModelPickerModalProps) {
-  const anim = useRef(new Animated.Value(0)).current;
+  const [mounted, setMounted] = useState(visible);
+  const unmountTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (visible) {
-      Animated.timing(anim, {
-        toValue: 1,
-        duration: 260,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver,
-      }).start();
-    } else {
-      anim.setValue(0);
+    if (unmountTimer.current) {
+      clearTimeout(unmountTimer.current);
+      unmountTimer.current = null;
     }
-  }, [anim, visible]);
 
-  const translateY = anim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [40, 0],
-  });
+    if (visible) {
+      setMounted(true);
+      return undefined;
+    }
+
+    unmountTimer.current = setTimeout(() => {
+      setMounted(false);
+      unmountTimer.current = null;
+    }, 240);
+
+    return () => {
+      if (unmountTimer.current) {
+        clearTimeout(unmountTimer.current);
+        unmountTimer.current = null;
+      }
+    };
+  }, [visible]);
+
+  if (!mounted) {
+    return null;
+  }
 
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+    <Modal visible={mounted} transparent animationType="none" onRequestClose={onClose}>
       <View style={styles.modelPickerModalRoot}>
-        <Pressable accessibilityRole="button" onPress={onClose} style={styles.modelPickerBackdrop} />
-        <Animated.View
-          testID="model-picker-sheet"
-          style={[styles.modelPickerSheet, { opacity: anim, transform: [{ translateY }] }]}
-        >
-          <View style={styles.modelPickerHandle} />
-          <View style={styles.modelPickerSheetHeader}>
-            <View style={styles.modelPickerTitleBlock}>
-              <Text style={styles.modelPickerTitle}>选择模型</Text>
-              <Text style={styles.modelPickerSubtitle}>已添加模型</Text>
-            </View>
-            <AnimatedPressable accessibilityRole="button" onPress={onClose} style={styles.modelPickerCloseButton}>
-              <Text style={styles.modelPickerCloseText}>×</Text>
-            </AnimatedPressable>
-          </View>
+        <AnimatePresence>
+          {visible ? (
+            <MotiView
+              key="model-picker-backdrop"
+              from={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ type: 'timing', duration: 180 }}
+              style={styles.modelPickerBackdrop}
+            >
+              <Pressable accessibilityRole="button" onPress={onClose} style={styles.modelPickerBackdropPressable} />
+            </MotiView>
+          ) : null}
+        </AnimatePresence>
+        <AnimatePresence>
+          {visible ? (
+            <MotiView
+              key="model-picker-sheet"
+              testID="model-picker-sheet"
+              from={{ opacity: 0, translateY: 48, scale: 0.98 }}
+              animate={{ opacity: 1, translateY: 0, scale: 1 }}
+              exit={{ opacity: 0, translateY: 48, scale: 0.98 }}
+              transition={{ type: 'timing', duration: 220 }}
+              style={styles.modelPickerSheet}
+            >
+              <View style={styles.modelPickerHandle} />
+              <View style={styles.modelPickerSheetHeader}>
+                <View style={styles.modelPickerTitleBlock}>
+                  <Text style={styles.modelPickerTitle}>选择模型</Text>
+                  <Text style={styles.modelPickerSubtitle}>已添加模型</Text>
+                </View>
+                <AnimatedPressable accessibilityRole="button" onPress={onClose} style={styles.modelPickerCloseButton}>
+                  <Text style={styles.modelPickerCloseText}>×</Text>
+                </AnimatedPressable>
+              </View>
 
-          <ScrollView contentContainerStyle={styles.modelPickerList}>
-            {groups.length ? (
-              groups.map((group) => (
-                <View key={group.provider.id} style={styles.modelPickerGroup}>
-                  <View style={styles.modelPickerGroupHeader}>
-                    <Text numberOfLines={1} style={styles.modelPickerGroupName}>
-                      {group.provider.name}
-                    </Text>
-                    <Text style={styles.modelPickerGroupCount}>{group.models.length}</Text>
-                  </View>
-                  {group.models.map((model) => {
-                    const selected = group.provider.id === activeProviderId && model.id === activeModelId;
+              <ScrollView contentContainerStyle={styles.modelPickerList}>
+                {groups.length ? (
+                  groups.map((group) => (
+                    <View key={group.provider.id} style={styles.modelPickerGroup}>
+                      <View style={styles.modelPickerGroupHeader}>
+                        <Text numberOfLines={1} style={styles.modelPickerGroupName}>
+                          {group.provider.name}
+                        </Text>
+                        <Text style={styles.modelPickerGroupCount}>{group.models.length}</Text>
+                      </View>
+                      {group.models.map((model) => {
+                        const selected = group.provider.id === activeProviderId && model.id === activeModelId;
 
-                    return (
-                      <AnimatedPressable
-                        key={`${group.provider.id}:${model.id}`}
-                        accessibilityRole="button"
-                        onPress={() => onSelect(group.provider.id, model.id)}
-                        style={[
-                          styles.modelPickerRow,
-                          selected && styles.modelPickerRowActive,
-                        ]}
-                      >
-                        <View style={styles.modelPickerRowTextBlock}>
-                          <Text
-                            numberOfLines={1}
+                        return (
+                          <AnimatedPressable
+                            key={`${group.provider.id}:${model.id}`}
+                            accessibilityRole="button"
+                            onPress={() => onSelect(group.provider.id, model.id)}
                             style={[
-                              styles.modelPickerRowName,
-                              selected && styles.modelPickerRowNameActive,
+                              styles.modelPickerRow,
+                              selected && styles.modelPickerRowActive,
                             ]}
                           >
-                            {model.name ?? model.id}
-                          </Text>
-                          <Text numberOfLines={1} style={styles.modelPickerRowMeta}>
-                            {model.id}
-                          </Text>
-                        </View>
-                        <ModelTaskBadge model={model} />
-                        {selected ? <Text style={styles.modelPickerSelectedText}>当前</Text> : null}
-                      </AnimatedPressable>
-                    );
-                  })}
-                </View>
-              ))
-            ) : (
-              <View style={styles.modelPickerEmpty}>
-                <Text style={styles.modelPickerEmptyText}>暂无已添加模型</Text>
-              </View>
-            )}
-          </ScrollView>
-        </Animated.View>
+                            <View style={styles.modelPickerRowTextBlock}>
+                              <Text
+                                numberOfLines={1}
+                                style={[
+                                  styles.modelPickerRowName,
+                                  selected && styles.modelPickerRowNameActive,
+                                ]}
+                              >
+                                {model.name ?? model.id}
+                              </Text>
+                              <Text numberOfLines={1} style={styles.modelPickerRowMeta}>
+                                {model.id}
+                              </Text>
+                            </View>
+                            <ModelTaskBadge model={model} />
+                            {selected ? <Text style={styles.modelPickerSelectedText}>当前</Text> : null}
+                          </AnimatedPressable>
+                        );
+                      })}
+                    </View>
+                  ))
+                ) : (
+                  <View style={styles.modelPickerEmpty}>
+                    <Text style={styles.modelPickerEmptyText}>暂无已添加模型</Text>
+                  </View>
+                )}
+              </ScrollView>
+            </MotiView>
+          ) : null}
+        </AnimatePresence>
       </View>
+    </Modal>
+  );
+}
+
+const ReanimatedPressable = Reanimated.createAnimatedComponent(Pressable);
+
+/**
+ * 抽屉侧边栏：
+ * - 用 Reanimated 驱动面板滑入 / 遮罩淡入，避免生硬的瞬间弹出；
+ * - 用 gesture-handler 支持向左滑动关闭，手势与动画共享同一个进度值；
+ * - 关闭时先播放退场动画再卸载 Modal（progress 归零后回调卸载）。
+ */
+function SidebarDrawer({
+  open,
+  onClose,
+  onPanelLayout,
+  children,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onPanelLayout?: (height: number) => void;
+  children: ReactNode;
+}) {
+  const { width } = useWindowDimensions();
+  const panelWidth = Math.min(320, Math.round(width * 0.8));
+  const [mounted, setMounted] = useState(open);
+  const progress = useSharedValue(open ? 1 : 0);
+
+  useEffect(() => {
+    if (open) {
+      setMounted(true);
+      progress.value = withSpring(1, { damping: 22, stiffness: 220, mass: 0.9 });
+    } else {
+      progress.value = withTiming(0, { duration: 200 }, (finished) => {
+        if (finished) {
+          runOnJS(setMounted)(false);
+        }
+      });
+    }
+    // 仅依赖 open：手势与内部状态不应重新触发入场/退场。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const panGesture = Gesture.Pan()
+    .activeOffsetX([-12, 12])
+    .onUpdate((event) => {
+      const next = 1 + event.translationX / panelWidth;
+      progress.value = Math.min(1, Math.max(0, next));
+    })
+    .onEnd((event) => {
+      const shouldClose = event.translationX < -panelWidth * 0.35 || event.velocityX < -650;
+      if (shouldClose) {
+        runOnJS(onClose)();
+      } else {
+        progress.value = withSpring(1, { damping: 22, stiffness: 220, mass: 0.9 });
+      }
+    });
+
+  const scrimStyle = useAnimatedStyle(() => ({
+    opacity: progress.value,
+  }));
+
+  const panelStyle = useAnimatedStyle(() => ({
+    transform: [
+      {
+        translateX: interpolate(progress.value, [0, 1], [-panelWidth, 0], Extrapolation.CLAMP),
+      },
+    ],
+  }));
+
+  if (!mounted) {
+    return null;
+  }
+
+  return (
+    <Modal visible transparent animationType="none" onRequestClose={onClose}>
+      {/* Modal 在原生端是独立的视图层级，手势需要在其中单独挂一个 root 才能生效 */}
+      <GestureHandlerRootView style={styles.sidebarRoot}>
+        <ReanimatedPressable
+          accessibilityRole="button"
+          onPress={onClose}
+          style={[styles.sidebarScrimBase, scrimStyle]}
+        />
+        <GestureDetector gesture={panGesture}>
+          <Reanimated.View
+            style={[styles.sidebarPanel, { width: panelWidth }, panelStyle]}
+            onLayout={(event) => onPanelLayout?.(event.nativeEvent.layout.height)}
+          >
+            {children}
+          </Reanimated.View>
+        </GestureDetector>
+      </GestureHandlerRootView>
     </Modal>
   );
 }
@@ -3009,6 +3205,17 @@ function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
 }
 
 const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+  },
+  iconCrossfade: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  iconCrossfadeLayer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   shell: {
     flex: 1,
     backgroundColor: palette.bg,
@@ -3477,7 +3684,6 @@ const styles = StyleSheet.create({
   modelPickerModalRoot: {
     flex: 1,
     justifyContent: 'flex-end',
-    backgroundColor: palette.scrim,
   },
   modelPickerBackdrop: {
     position: 'absolute',
@@ -3485,6 +3691,10 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     left: 0,
+    backgroundColor: palette.scrim,
+  },
+  modelPickerBackdropPressable: {
+    flex: 1,
   },
   modelPickerSheet: {
     maxHeight: '82%',
@@ -3552,12 +3762,6 @@ const styles = StyleSheet.create({
   modelPickerList: {
     padding: 14,
     gap: 14,
-  },
-  modelPickerReasoningSection: {
-    gap: 8,
-    paddingBottom: 14,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: palette.border,
   },
   reasoningSliderEndpoints: {
     flexDirection: 'row',
@@ -3709,8 +3913,8 @@ const styles = StyleSheet.create({
     borderColor: '#BEEBD1',
     borderRadius: radii.lg,
     borderTopRightRadius: radii.sm,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
   },
   assistantBubble: {
     alignSelf: 'stretch',
@@ -3825,8 +4029,8 @@ const styles = StyleSheet.create({
   },
   reasoningPanelText: {
     color: palette.textSecondary,
-    fontSize: 14,
-    lineHeight: 21,
+    fontSize: 13,
+    lineHeight: 20,
   },
   tokenUsageRow: {
     flexDirection: 'row',
@@ -4335,9 +4539,16 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 18,
   },
-  sidebarScrim: {
+  sidebarRoot: {
     flex: 1,
     flexDirection: 'row',
+  },
+  sidebarScrimBase: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     backgroundColor: palette.scrim,
   },
   sidebarPanel: {
