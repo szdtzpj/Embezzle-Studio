@@ -1,8 +1,16 @@
-import type { AppWorkspace, Capability, ProviderProfile } from '../domain/types';
+import type { AppWorkspace, Capability, ModelParameterSettings, ProviderProfile } from '../domain/types';
 
 const textOnly: Capability[] = ['text', 'streaming'];
 const vision: Capability[] = ['text', 'image-input', 'streaming'];
 const video: Capability[] = ['text', 'image-input', 'video-input', 'streaming'];
+
+export const defaultParameterSettings: ModelParameterSettings = {
+  enabled: false,
+  temperature: 1,
+  topP: 1,
+  presencePenalty: 0,
+  frequencyPenalty: 0,
+};
 
 export const defaultProviders: ProviderProfile[] = [
   {
@@ -65,6 +73,7 @@ export function createDefaultWorkspace(): AppWorkspace {
       providers.map((provider) => [provider.id, provider.models[0]?.id ?? ''])
     ),
     reasoningEffortByModel: {},
+    parameterSettings: defaultParameterSettings,
     modelCandidatesByProvider: {},
     activeConversationId: initialConversationId,
     conversations: [

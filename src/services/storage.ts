@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from '../data/arkModels';
+import { defaultParameterSettings } from '../data/providerCatalog';
 import type { AppWorkspace, ChatConversation, ModelInfo, ProviderProfile, ReasoningEffort } from '../domain/types';
 import { createModelInfoFromId, inferModelTask } from './modelCapabilities';
 
@@ -136,6 +137,10 @@ function normalizeWorkspace(snapshot: PersistedWorkspace, providers: ProviderPro
     providers: normalizedProviders,
     activeModelIdByProvider,
     reasoningEffortByModel: snapshot.reasoningEffortByModel ?? {},
+    parameterSettings: {
+      ...defaultParameterSettings,
+      ...(snapshot.parameterSettings ?? {}),
+    },
     modelCandidatesByProvider,
     activeConversationId,
     conversations,

@@ -30,6 +30,14 @@ export type ReasoningEffort = 'default' | 'off' | 'low' | 'medium' | 'high' | 'm
 
 export type ModelTask = 'chat' | 'image-generation' | 'video-generation' | 'embedding' | 'rerank';
 
+export interface ModelParameterSettings {
+  enabled: boolean;
+  temperature: number;
+  topP: number;
+  presencePenalty: number;
+  frequencyPenalty: number;
+}
+
 export interface ModelInfo {
   id: string;
   name?: string;
@@ -98,6 +106,8 @@ export interface ChatMessage {
 export interface ChatConversation {
   id: string;
   title: string;
+  customTitle?: boolean;
+  pinnedAt?: number;
   createdAt: number;
   updatedAt: number;
   messages: ChatMessage[];
@@ -118,6 +128,7 @@ export interface AppWorkspace {
   activeProviderId: string;
   activeModelIdByProvider: Record<string, string>;
   reasoningEffortByModel: Record<string, ReasoningEffort>;
+  parameterSettings: ModelParameterSettings;
   modelCandidatesByProvider: Record<string, ModelInfo[]>;
   activeConversationId: string;
   conversations: ChatConversation[];

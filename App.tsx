@@ -1,4 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
+import { BlurView } from 'expo-blur';
 import { createElement, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import {
@@ -13,6 +14,7 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  Share as NativeShare,
   StyleSheet,
   Text,
   TextInput,
@@ -20,12 +22,12 @@ import {
 } from 'react-native';
 import type { PressableProps, StyleProp, ViewStyle } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { AudioLines, Camera, ChevronDown, Copy, Download, ExternalLink, Image as ImageIcon, Lightbulb, Menu, MessageSquare, MoreHorizontal, Paperclip, PenSquare, Pencil, Plus, RefreshCw, Search, Share2, Settings, Trash2, X } from 'lucide-react-native';
+import { AudioLines, Camera, ChevronDown, Copy, Download, ExternalLink, Image as ImageIcon, Lightbulb, Menu, MessageSquare, MoreHorizontal, Paperclip, PenSquare, Pencil, Pin, Plus, RefreshCw, Search, Share2, Settings, SlidersHorizontal, Trash2, X } from 'lucide-react-native';
 import { Bailian, ChatGLM, Claude, DeepSeek, Doubao, Gemini, Kimi, Minimax, NewAPI, OpenAI, Qwen, Volcengine, Zhipu } from '@lobehub/icons-rn';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/arkModels';
 import { appInfo } from './src/data/appInfo';
-import { createDefaultWorkspace } from './src/data/providerCatalog';
+import { createDefaultWorkspace, defaultParameterSettings } from './src/data/providerCatalog';
 import type {
   AppWorkspace,
   ChatTokenUsage,
@@ -38,6 +40,7 @@ import type {
   ModelTask,
   ProviderProfile,
   ReasoningEffort,
+  ModelParameterSettings,
 } from './src/domain/types';
 import { pickFiles, pickImages, pickVideos } from './src/services/mediaPicker';
 import { queryGenerationTask, sendOpenAiCompatibleChat } from './src/services/openAiCompatible';
@@ -322,6 +325,50 @@ const reasoningEffortOptions: Array<{ key: ReasoningEffort; label: string }> = [
   { key: 'max', label: '极高' },
 ];
 
+type ParameterKey = Exclude<keyof ModelParameterSettings, 'enabled'>;
+
+const parameterControls: Array<{
+  key: ParameterKey;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  description: string;
+}> = [
+  {
+    key: 'temperature',
+    label: '温度',
+    min: 0,
+    max: 2,
+    step: 0.01,
+    description: '越低越稳定，越高越发散。',
+  },
+  {
+    key: 'topP',
+    label: 'Top P',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    description: '控制采样候选范围，一般保持 1。',
+  },
+  {
+    key: 'presencePenalty',
+    label: '存在惩罚',
+    min: -2,
+    max: 2,
+    step: 0.01,
+    description: '正值会鼓励引入新话题。',
+  },
+  {
+    key: 'frequencyPenalty',
+    label: '频率惩罚',
+    min: -2,
+    max: 2,
+    step: 0.01,
+    description: '正值会减少重复表达。',
+  },
+];
+
 const modelTaskLabel: Record<ModelTask, string> = {
   chat: '对话',
   'image-generation': '图片生成',
@@ -329,6 +376,26 @@ const modelTaskLabel: Record<ModelTask, string> = {
   embedding: '嵌入',
   rerank: '重排',
 };
+
+function parameterRuntimeSummary(settings: ModelParameterSettings): string {
+  if (!settings.enabled) {
+    return '参数默认';
+  }
+
+  return `温度 ${settings.temperature.toFixed(2)} · Top P ${settings.topP.toFixed(2)}`;
+}
+
+function clampParameterValue(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function snapParameterValue(value: number, step: number): number {
+  return Math.round(value / step) * step;
+}
+
+function formatParameterValue(value: number): string {
+  return value.toFixed(2).replace(/\.?0+$/, '');
+}
 
 const webVideoPreviewStyle: CSSProperties = {
   width: '100%',
@@ -354,6 +421,7 @@ function matchesCandidateModelFilter(model: ModelInfo, filter: ModelCapabilityFi
 }
 
 const maxSavedConversations = 100;
+const conversationActionMenuHeight = 154;
 
 function isConversationMessage(message: ChatMessage): boolean {
   return (
@@ -402,6 +470,12 @@ function conversationTitleFromMessages(messages: ChatMessage[]): string {
   return '新对话';
 }
 
+function sortConversations(conversations: ChatConversation[]): ChatConversation[] {
+  return [...conversations].sort(
+    (a, b) => (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0) || b.updatedAt - a.updatedAt
+  );
+}
+
 function dominantConversationModel(conversation: ChatConversation): { modelId: string; providerName?: string; count: number } | null {
   const counts = new Map<string, { modelId: string; providerName?: string; count: number; latestAt: number }>();
 
@@ -435,14 +509,15 @@ function upsertConversation(
   const firstTimestamp = messages[0]?.createdAt;
   const conversation: ChatConversation = {
     id: conversationId,
-    title: conversationTitleFromMessages(messages),
+    title: existing?.customTitle ? existing.title : conversationTitleFromMessages(messages),
+    customTitle: existing?.customTitle,
+    pinnedAt: existing?.pinnedAt,
     createdAt: existing?.createdAt ?? firstTimestamp ?? updatedAt,
     updatedAt,
     messages,
   };
 
-  return [conversation, ...conversations.filter((item) => item.id !== conversationId)]
-    .sort((a, b) => b.updatedAt - a.updatedAt)
+  return sortConversations([conversation, ...conversations.filter((item) => item.id !== conversationId)])
     .slice(0, maxSavedConversations);
 }
 
@@ -453,6 +528,26 @@ function formatConversationTime(timestamp: number) {
     hour: 'numeric',
     minute: '2-digit',
   }).format(new Date(timestamp));
+}
+
+function conversationShareText(conversation: ChatConversation): string {
+  const lines = [`# ${conversation.title}`, ''];
+
+  for (const message of conversation.messages.filter(isConversationMessage)) {
+    const role = message.role === 'user' ? '我' : '模型';
+    const model = message.role === 'assistant' && message.modelId ? `（${message.modelId}）` : '';
+    const content = message.content.trim() || '[附件/空内容]';
+    lines.push(`${role}${model}: ${content}`);
+    if (message.reasoningContent?.trim()) {
+      lines.push(`思考过程: ${message.reasoningContent.trim()}`);
+    }
+    if (message.attachments?.length) {
+      lines.push(`附件: ${message.attachments.map((attachment) => attachment.name).join(', ')}`);
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n').trim();
 }
 
 function formatUpdateStatusTitle(updateInfo: AppUpdateInfo | null, updateNotice: string) {
@@ -479,6 +574,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
+  const [parameterMenuOpen, setParameterMenuOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [input, setInput] = useState('');
   const [manualModelId, setManualModelId] = useState('');
@@ -492,6 +588,12 @@ export default function App() {
   const [updateNotice, setUpdateNotice] = useState('');
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [conversationActionId, setConversationActionId] = useState<string | null>(null);
+  const [conversationActionMenuTop, setConversationActionMenuTop] = useState(16);
+  const [renamingConversationId, setRenamingConversationId] = useState<string | null>(null);
+  const [deleteConfirmConversationId, setDeleteConfirmConversationId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [sidebarPanelHeight, setSidebarPanelHeight] = useState(0);
   const [expandedReasoningByMessageId, setExpandedReasoningByMessageId] = useState<Record<string, boolean>>({});
   const [queryingTaskByMessageId, setQueryingTaskByMessageId] = useState<Record<string, boolean>>({});
 
@@ -528,6 +630,12 @@ export default function App() {
     });
   }, [booting, workspace]);
 
+  useEffect(() => {
+    if (!sidebarOpen) {
+      setConversationActionId(null);
+    }
+  }, [sidebarOpen]);
+
   const activeProvider = useMemo(
     () => workspace.providers.find((provider) => provider.id === workspace.activeProviderId) ?? workspace.providers[0],
     [workspace.activeProviderId, workspace.providers]
@@ -553,6 +661,11 @@ export default function App() {
   const activeReasoningEffort: ReasoningEffort = activeModelKey
     ? workspace.reasoningEffortByModel[activeModelKey] ?? 'default'
     : 'default';
+  const parameterSettings = {
+    ...defaultParameterSettings,
+    ...(workspace.parameterSettings ?? {}),
+  };
+  const parametersActive = parameterSettings.enabled;
   const modelCandidates = activeProvider
     ? (workspace.modelCandidatesByProvider[activeProvider.id] ?? []).filter(
         (model) =>
@@ -586,11 +699,18 @@ export default function App() {
   );
   const recentConversations = useMemo(
     () =>
-      workspace.conversations
-        .filter(hasConversationHistory)
-        .sort((a, b) => b.updatedAt - a.updatedAt),
+      sortConversations(workspace.conversations.filter(hasConversationHistory)),
     [workspace.conversations]
   );
+  const renamingConversation = renamingConversationId
+    ? workspace.conversations.find((conversation) => conversation.id === renamingConversationId) ?? null
+    : null;
+  const deleteConfirmConversation = deleteConfirmConversationId
+    ? workspace.conversations.find((conversation) => conversation.id === deleteConfirmConversationId) ?? null
+    : null;
+  const conversationActionConversation = conversationActionId
+    ? workspace.conversations.find((conversation) => conversation.id === conversationActionId) ?? null
+    : null;
   const filteredConversations = useMemo(() => {
     const query = historySearchQuery.trim().toLowerCase();
 
@@ -667,6 +787,41 @@ export default function App() {
         reasoningEffortByModel: next,
       };
     });
+  }
+
+  function updateParameterSettings(patch: Partial<ModelParameterSettings>) {
+    setWorkspace((current) => ({
+      ...current,
+      parameterSettings: {
+        ...defaultParameterSettings,
+        ...(current.parameterSettings ?? {}),
+        ...patch,
+      },
+    }));
+  }
+
+  function updateParameterValue(key: ParameterKey, value: number) {
+    const control = parameterControls.find((item) => item.key === key);
+    if (!control) {
+      return;
+    }
+
+    updateParameterSettings({
+      [key]: snapParameterValue(
+        clampParameterValue(value, control.min, control.max),
+        control.step
+      ),
+    } as Partial<ModelParameterSettings>);
+  }
+
+  function resetParameterSettings() {
+    setWorkspace((current) => ({
+      ...current,
+      parameterSettings: {
+        ...defaultParameterSettings,
+        enabled: true,
+      },
+    }));
   }
 
   function addCustomProvider() {
@@ -855,6 +1010,135 @@ export default function App() {
     setNotice('');
   }
 
+  function openConversationActionMenu(conversationId: string, pageY: number) {
+    if (conversationActionId === conversationId) {
+      setConversationActionId(null);
+      return;
+    }
+
+    const maxTop = sidebarPanelHeight
+      ? Math.max(12, sidebarPanelHeight - conversationActionMenuHeight - 16)
+      : pageY + 16;
+
+    setConversationActionMenuTop(Math.min(Math.max(12, pageY + 16), maxTop));
+    setConversationActionId(conversationId);
+  }
+
+  function requestDeleteConversation(conversationId: string) {
+    setConversationActionId(null);
+    setDeleteConfirmConversationId(conversationId);
+  }
+
+  function deleteConversation(conversationId: string) {
+    setWorkspace((current) => {
+      const conversations = current.conversations.filter((conversation) => conversation.id !== conversationId);
+      const deletedActive = current.activeConversationId === conversationId;
+      const nextActive = deletedActive ? conversations[0] : current.conversations.find((item) => item.id === current.activeConversationId);
+
+      return {
+        ...current,
+        conversations,
+        activeConversationId: nextActive?.id ?? 'conversation-default',
+        messages: deletedActive ? nextActive?.messages ?? [] : current.messages,
+      };
+    });
+    setExpandedReasoningByMessageId({});
+    setQueryingTaskByMessageId({});
+    setConversationActionId(null);
+    setDeleteConfirmConversationId(null);
+    setNotice('已从本地移除该聊天记录。');
+  }
+
+  function togglePinConversation(conversationId: string) {
+    setWorkspace((current) => ({
+      ...current,
+      conversations: sortConversations(
+        current.conversations.map((conversation) => {
+          if (conversation.id !== conversationId) {
+            return conversation;
+          }
+
+          if (conversation.pinnedAt) {
+            const { pinnedAt: _pinnedAt, ...rest } = conversation;
+            return rest;
+          }
+
+          return {
+            ...conversation,
+            pinnedAt: Date.now(),
+          };
+        })
+      ),
+    }));
+    setConversationActionId(null);
+  }
+
+  function beginRenameConversation(conversation: ChatConversation) {
+    setRenamingConversationId(conversation.id);
+    setRenameDraft(conversation.title);
+    setConversationActionId(null);
+  }
+
+  function saveConversationTitle() {
+    if (!renamingConversationId) {
+      return;
+    }
+
+    const title = renameDraft.trim().replace(/\s+/g, ' ');
+    if (!title) {
+      setNotice('对话名称不能为空。');
+      return;
+    }
+
+    setWorkspace((current) => ({
+      ...current,
+      conversations: sortConversations(
+        current.conversations.map((conversation) =>
+          conversation.id === renamingConversationId
+            ? {
+                ...conversation,
+                title,
+                customTitle: true,
+              }
+            : conversation
+        )
+      ),
+    }));
+    setRenamingConversationId(null);
+    setRenameDraft('');
+    setNotice('已更新对话名称。');
+  }
+
+  async function shareConversation(conversation: ChatConversation) {
+    const text = conversationShareText(conversation);
+    setConversationActionId(null);
+
+    try {
+      if (Platform.OS === 'web') {
+        if (typeof navigator !== 'undefined' && navigator.share) {
+          await navigator.share({ title: conversation.title, text });
+          return;
+        }
+
+        if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+          setNotice('已复制对话内容，可直接粘贴分享。');
+          return;
+        }
+      }
+
+      await NativeShare.share({
+        title: conversation.title,
+        message: text,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        return;
+      }
+      setNotice('分享对话失败，请稍后再试。');
+    }
+  }
+
   async function addAttachments(kind: 'image' | 'video' | 'file') {
     setNotice('');
 
@@ -903,7 +1187,7 @@ export default function App() {
 
         return {
           ...conversation,
-          title: conversationTitleFromMessages(updatedMessages),
+          title: conversation.customTitle ? conversation.title : conversationTitleFromMessages(updatedMessages),
           updatedAt: now,
           messages: updatedMessages,
         };
@@ -1097,6 +1381,7 @@ export default function App() {
         model: activeModel,
         messages: transcript,
         reasoningEffort: activeReasoningEffort,
+        parameterSettings,
         onStreamUpdate: (update) => {
           updateAssistantMessage(assistantMessage.id, {
             content: update.content,
@@ -1581,12 +1866,13 @@ export default function App() {
                 </ScrollView>
               ) : null}
 
-              {attachMenuOpen || reasoningMenuOpen ? (
+              {attachMenuOpen || reasoningMenuOpen || parameterMenuOpen ? (
                 <Pressable
                   style={styles.attachMenuBackdrop}
                   onPress={() => {
                     setAttachMenuOpen(false);
                     setReasoningMenuOpen(false);
+                    setParameterMenuOpen(false);
                   }}
                 />
               ) : null}
@@ -1631,6 +1917,67 @@ export default function App() {
                     </AnimatedPressable>
                   </View>
                 ) : null}
+                {parameterMenuOpen ? (
+                  <View style={styles.parameterMenu}>
+                    <View style={styles.toolMenuHeader}>
+                      <SlidersHorizontal size={18} color={palette.text} strokeWidth={2.2} />
+                      <View style={styles.toolMenuTitleBlock}>
+                        <Text style={styles.toolMenuTitle}>参数调整</Text>
+                        <Text numberOfLines={1} style={styles.toolMenuSubtitle}>
+                          {parameterRuntimeSummary(parameterSettings)}
+                        </Text>
+                      </View>
+                    </View>
+
+                    <View style={styles.toolMenuSection}>
+                      <Text style={styles.toolMenuSectionTitle}>模式</Text>
+                      <View style={styles.toolSegmentRow}>
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          onPress={() => updateParameterSettings({ enabled: false })}
+                          style={[styles.toolSegment, !parametersActive && styles.toolSegmentActive]}
+                        >
+                          <Text style={[styles.toolSegmentText, !parametersActive && styles.toolSegmentTextActive]}>
+                            关闭
+                          </Text>
+                        </AnimatedPressable>
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          onPress={() => updateParameterSettings({ enabled: true })}
+                          style={[styles.toolSegment, parametersActive && styles.toolSegmentActive]}
+                        >
+                          <Text style={[styles.toolSegmentText, parametersActive && styles.toolSegmentTextActive]}>
+                            启用
+                          </Text>
+                        </AnimatedPressable>
+                      </View>
+                      <Text style={styles.toolMenuHint}>
+                        关闭时不发送采样参数，交给服务商默认值处理。
+                      </Text>
+                    </View>
+
+                    {parametersActive ? (
+                      <>
+                        {parameterControls.map((control) => (
+                          <ParameterControl
+                            key={control.key}
+                            control={control}
+                            value={parameterSettings[control.key]}
+                            onChange={(value) => updateParameterValue(control.key, value)}
+                          />
+                        ))}
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          onPress={resetParameterSettings}
+                          style={styles.parameterResetButton}
+                        >
+                          <RefreshCw size={15} color={palette.text} strokeWidth={2.2} />
+                          <Text style={styles.parameterResetButtonText}>还原默认设置</Text>
+                        </AnimatedPressable>
+                      </>
+                    ) : null}
+                  </View>
+                ) : null}
                 <View style={styles.composer}>
                   <TextInput
                     multiline
@@ -1647,6 +1994,7 @@ export default function App() {
                           accessibilityRole="button"
                           onPress={() => {
                             setAttachMenuOpen(false);
+                            setParameterMenuOpen(false);
                             setReasoningMenuOpen((current) => !current);
                           }}
                           style={[
@@ -1665,11 +2013,30 @@ export default function App() {
                         accessibilityRole="button"
                         onPress={() => {
                           setReasoningMenuOpen(false);
+                          setParameterMenuOpen(false);
                           setAttachMenuOpen((v) => !v);
                         }}
                         style={styles.composerToolButton}
                       >
                         <Plus size={15} color={palette.textSecondary} strokeWidth={2.4} />
+                      </AnimatedPressable>
+                      <AnimatedPressable
+                        accessibilityRole="button"
+                        onPress={() => {
+                          setReasoningMenuOpen(false);
+                          setAttachMenuOpen(false);
+                          setParameterMenuOpen((current) => !current);
+                        }}
+                        style={[
+                          styles.composerToolButton,
+                          parametersActive && styles.composerToolButtonActive,
+                        ]}
+                      >
+                        <SlidersHorizontal
+                          size={15}
+                          color={parametersActive ? palette.accentText : palette.textSecondary}
+                          strokeWidth={2.3}
+                        />
                       </AnimatedPressable>
                     </View>
                     <AnimatedPressable
@@ -1690,7 +2057,11 @@ export default function App() {
         {/* Sidebar drawer */}
         <Modal visible={sidebarOpen} transparent animationType="none" onRequestClose={() => setSidebarOpen(false)}>
           <Pressable style={styles.sidebarScrim} onPress={() => setSidebarOpen(false)}>
-            <Pressable style={styles.sidebarPanel} onPress={(e) => e.stopPropagation()}>
+            <Pressable
+              style={styles.sidebarPanel}
+              onPress={(e) => e.stopPropagation()}
+              onLayout={(event) => setSidebarPanelHeight(event.nativeEvent.layout.height)}
+            >
               <View style={styles.sidebarHeader}>
                 <Text style={styles.sidebarBrand}>Embezzle Studio</Text>
                 <AnimatedPressable accessibilityRole="button" onPress={() => setSidebarOpen(false)} style={styles.sidebarClose}>
@@ -1740,32 +2111,56 @@ export default function App() {
                       const dominantModel = dominantConversationModel(conversation);
 
                       return (
-                        <AnimatedPressable
+                        <View
                           key={conversation.id}
-                          accessibilityRole="button"
-                          onPress={() => selectConversation(conversation.id)}
                           style={[styles.sidebarConversationItem, active && styles.sidebarConversationItemActive]}
                         >
-                          <Text numberOfLines={1} style={[styles.sidebarConversationTitle, active && styles.sidebarConversationTitleActive]}>
-                            {conversation.title}
-                          </Text>
-                          <View style={styles.sidebarConversationMetaRow}>
-                            {dominantModel ? (
-                              <ModelAvatar
-                                modelId={dominantModel.modelId}
-                                providerName={dominantModel.providerName}
-                                size={18}
-                                containerSize={22}
-                              />
-                            ) : null}
-                            <Text numberOfLines={1} style={styles.sidebarConversationMeta}>
-                              {dominantModel
-                                ? `${dominantModel.modelId}${dominantModel.count > 1 ? ` x${dominantModel.count}` : ''} · `
-                                : ''}
-                              {formatConversationTime(conversation.updatedAt)}
-                            </Text>
+                          <View style={styles.sidebarConversationRow}>
+                            <AnimatedPressable
+                              accessibilityRole="button"
+                              onPress={() => selectConversation(conversation.id)}
+                              style={styles.sidebarConversationContent}
+                            >
+                              <View style={styles.sidebarConversationTitleRow}>
+                                {conversation.pinnedAt ? (
+                                  <Pin size={12} color={palette.accentText} strokeWidth={2.4} />
+                                ) : null}
+                                <Text numberOfLines={1} style={[styles.sidebarConversationTitle, active && styles.sidebarConversationTitleActive]}>
+                                  {conversation.title}
+                                </Text>
+                              </View>
+                              <View style={styles.sidebarConversationMetaRow}>
+                                {dominantModel ? (
+                                  <ModelAvatar
+                                    modelId={dominantModel.modelId}
+                                    providerName={dominantModel.providerName}
+                                    size={18}
+                                    containerSize={22}
+                                  />
+                                ) : null}
+                                <Text numberOfLines={1} style={styles.sidebarConversationMeta}>
+                                  {dominantModel
+                                    ? `${dominantModel.modelId}${dominantModel.count > 1 ? ` x${dominantModel.count}` : ''} · `
+                                    : ''}
+                                  {formatConversationTime(conversation.updatedAt)}
+                                </Text>
+                              </View>
+                            </AnimatedPressable>
+                            <AnimatedPressable
+                              accessibilityRole="button"
+                              onPress={(event) => {
+                                event.stopPropagation?.();
+                                openConversationActionMenu(conversation.id, event.nativeEvent.pageY);
+                              }}
+                              style={[
+                                styles.sidebarConversationMore,
+                                conversationActionId === conversation.id && styles.sidebarConversationMoreActive,
+                              ]}
+                            >
+                              <MoreHorizontal size={18} color={palette.textSecondary} strokeWidth={2.4} />
+                            </AnimatedPressable>
                           </View>
-                        </AnimatedPressable>
+                        </View>
                       );
                     })}
                   </ScrollView>
@@ -1774,6 +2169,156 @@ export default function App() {
                     {recentConversations.length ? '没有匹配的聊天记录' : '暂无历史对话'}
                   </Text>
                 )}
+              </View>
+              {conversationActionConversation ? (
+                <>
+                  <BlurView
+                    intensity={38}
+                    tint="light"
+                    blurMethod="dimezisBlurView"
+                    style={styles.sidebarConversationFrost}
+                  >
+                    <Pressable
+                      style={styles.sidebarConversationFrostTapTarget}
+                      onPress={() => setConversationActionId(null)}
+                    />
+                  </BlurView>
+                  <View
+                    style={[
+                      styles.sidebarConversationActionMenu,
+                      { top: conversationActionMenuTop },
+                    ]}
+                  >
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      onPress={() => togglePinConversation(conversationActionConversation.id)}
+                      style={styles.sidebarConversationActionRow}
+                    >
+                      <Text style={styles.sidebarConversationActionText}>
+                        {conversationActionConversation.pinnedAt ? '取消置顶' : '置顶'}
+                      </Text>
+                      <Pin size={16} color="#111827" strokeWidth={2.4} />
+                    </AnimatedPressable>
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      onPress={() => beginRenameConversation(conversationActionConversation)}
+                      style={styles.sidebarConversationActionRow}
+                    >
+                      <Text style={styles.sidebarConversationActionText}>编辑名称</Text>
+                      <Pencil size={16} color="#2563EB" strokeWidth={2.4} />
+                    </AnimatedPressable>
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      onPress={() => { void shareConversation(conversationActionConversation); }}
+                      style={styles.sidebarConversationActionRow}
+                    >
+                      <Text style={styles.sidebarConversationActionText}>分享对话</Text>
+                      <Share2 size={16} color="#16A34A" strokeWidth={2.3} />
+                    </AnimatedPressable>
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      onPress={() => requestDeleteConversation(conversationActionConversation.id)}
+                      style={[styles.sidebarConversationActionRow, styles.sidebarConversationActionDangerRow]}
+                    >
+                      <Text style={[styles.sidebarConversationActionText, styles.sidebarConversationActionDangerText]}>
+                        删除
+                      </Text>
+                      <Trash2 size={16} color={palette.danger} strokeWidth={2.4} />
+                    </AnimatedPressable>
+                  </View>
+                </>
+              ) : null}
+            </Pressable>
+          </Pressable>
+        </Modal>
+
+        <Modal
+          visible={Boolean(renamingConversation)}
+          transparent
+          animationType="fade"
+          onRequestClose={() => {
+            setRenamingConversationId(null);
+            setRenameDraft('');
+          }}
+        >
+          <Pressable
+            style={styles.renameDialogScrim}
+            onPress={() => {
+              setRenamingConversationId(null);
+              setRenameDraft('');
+            }}
+          >
+            <Pressable style={styles.renameDialog} onPress={(event) => event.stopPropagation()}>
+              <Text style={styles.renameDialogTitle}>编辑对话名称</Text>
+              <TextInput
+                value={renameDraft}
+                onChangeText={setRenameDraft}
+                autoFocus
+                maxLength={60}
+                placeholder="输入对话名称"
+                placeholderTextColor={palette.placeholder}
+                style={styles.renameDialogInput}
+              />
+              <View style={styles.renameDialogActions}>
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  onPress={() => {
+                    setRenamingConversationId(null);
+                    setRenameDraft('');
+                  }}
+                  style={styles.renameDialogSecondaryButton}
+                >
+                  <Text style={styles.renameDialogSecondaryText}>取消</Text>
+                </AnimatedPressable>
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  onPress={saveConversationTitle}
+                  style={styles.renameDialogPrimaryButton}
+                >
+                  <Text style={styles.renameDialogPrimaryText}>保存</Text>
+                </AnimatedPressable>
+              </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
+
+        <Modal
+          visible={Boolean(deleteConfirmConversation)}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setDeleteConfirmConversationId(null)}
+        >
+          <Pressable
+            style={styles.deleteConfirmScrim}
+            onPress={() => setDeleteConfirmConversationId(null)}
+          >
+            <Pressable style={styles.deleteConfirmDialog} onPress={(event) => event.stopPropagation()}>
+              <View style={styles.deleteConfirmIconWrap}>
+                <Trash2 size={22} color={palette.danger} strokeWidth={2.4} />
+              </View>
+              <Text style={styles.deleteConfirmTitle}>删除聊天记录</Text>
+              <Text style={styles.deleteConfirmText}>
+                这会从本地移除「{deleteConfirmConversation?.title ?? '该对话'}」，并释放这条记录占用的本地存储。
+              </Text>
+              <View style={styles.renameDialogActions}>
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  onPress={() => setDeleteConfirmConversationId(null)}
+                  style={styles.renameDialogSecondaryButton}
+                >
+                  <Text style={styles.renameDialogSecondaryText}>取消</Text>
+                </AnimatedPressable>
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  onPress={() => {
+                    if (deleteConfirmConversation) {
+                      deleteConversation(deleteConfirmConversation.id);
+                    }
+                  }}
+                  style={styles.deleteConfirmButton}
+                >
+                  <Text style={styles.deleteConfirmButtonText}>删除</Text>
+                </AnimatedPressable>
               </View>
             </Pressable>
           </Pressable>
@@ -2102,6 +2647,126 @@ function ReasoningSlider({
             </Text>
           </Pressable>
         ))}
+      </View>
+    </View>
+  );
+}
+
+function ParameterSlider({
+  value,
+  min,
+  max,
+  step,
+  onChange,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (value: number) => void;
+}) {
+  const trackWidth = useRef(0);
+  const currentValue = useRef(value);
+  currentValue.current = value;
+
+  const setByLocation = (locationX: number) => {
+    const width = trackWidth.current;
+    if (!width) return;
+    const ratio = Math.max(0, Math.min(1, locationX / width));
+    const raw = min + ratio * (max - min);
+    const next = snapParameterValue(clampParameterValue(raw, min, max), step);
+    if (next !== currentValue.current) {
+      onChange(next);
+    }
+  };
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (event) => {
+        setByLocation(event.nativeEvent.locationX);
+      },
+      onPanResponderMove: (event) => {
+        setByLocation(event.nativeEvent.locationX);
+      },
+    })
+  ).current;
+
+  const thumbPosition = ((value - min) / (max - min)) * 100;
+
+  return (
+    <View
+      style={styles.parameterSliderTrackArea}
+      onLayout={(event) => {
+        trackWidth.current = event.nativeEvent.layout.width;
+      }}
+      {...panResponder.panHandlers}
+    >
+      <View style={styles.parameterSliderTrack} />
+      <View
+        style={[
+          styles.parameterSliderFill,
+          { width: `${Math.max(0, Math.min(100, thumbPosition))}%` as any },
+        ]}
+      />
+      <View
+        style={[
+          styles.parameterSliderThumb,
+          { left: `${Math.max(0, Math.min(100, thumbPosition))}%` as any },
+        ]}
+      />
+    </View>
+  );
+}
+
+function ParameterControl({
+  control,
+  value,
+  onChange,
+}: {
+  control: (typeof parameterControls)[number];
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(formatParameterValue(value));
+
+  useEffect(() => {
+    setDraft(formatParameterValue(value));
+  }, [value]);
+
+  return (
+    <View style={styles.parameterControl}>
+      <View style={styles.parameterControlHeader}>
+        <View style={styles.parameterControlTitleBlock}>
+          <Text style={styles.parameterControlLabel}>{control.label}</Text>
+          <Text style={styles.parameterControlHint}>{control.description}</Text>
+        </View>
+        <TextInput
+          value={draft}
+          onChangeText={(text) => {
+            setDraft(text);
+            const parsed = Number.parseFloat(text.replace(',', '.'));
+            if (Number.isFinite(parsed)) {
+              onChange(parsed);
+            }
+          }}
+          onBlur={() => setDraft(formatParameterValue(value))}
+          keyboardType="default"
+          selectTextOnFocus
+          style={styles.parameterValueInput}
+        />
+      </View>
+      <ParameterSlider
+        value={value}
+        min={control.min}
+        max={control.max}
+        step={control.step}
+        onChange={onChange}
+      />
+      <View style={styles.parameterRangeRow}>
+        <Text style={styles.parameterRangeText}>{formatParameterValue(control.min)}</Text>
+        <Text style={styles.parameterRangeText}>{formatParameterValue(control.max)}</Text>
       </View>
     </View>
   );
@@ -3417,6 +4082,173 @@ const styles = StyleSheet.create({
     color: palette.accentText,
     fontWeight: '700',
   },
+  parameterMenu: {
+    position: 'absolute',
+    bottom: '100%',
+    left: 0,
+    right: 0,
+    marginBottom: 8,
+    backgroundColor: palette.bg,
+    borderRadius: radii.md,
+    padding: 12,
+    gap: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+  toolMenuHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  toolMenuTitleBlock: {
+    flex: 1,
+    minWidth: 0,
+  },
+  toolMenuTitle: {
+    color: palette.text,
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  toolMenuSubtitle: {
+    marginTop: 2,
+    color: palette.textSecondary,
+    fontSize: 12,
+  },
+  toolMenuSection: {
+    gap: 8,
+  },
+  toolMenuSectionTitle: {
+    color: palette.text,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  toolSegmentRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  toolSegment: {
+    minHeight: 30,
+    minWidth: 58,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  toolSegmentActive: {
+    borderColor: palette.accentBorder,
+    backgroundColor: palette.accentSoft,
+  },
+  toolSegmentText: {
+    color: palette.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  toolSegmentTextActive: {
+    color: palette.accentText,
+    fontWeight: '700',
+  },
+  toolMenuHint: {
+    color: palette.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  parameterControl: {
+    gap: 8,
+  },
+  parameterControlHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  parameterControlTitleBlock: {
+    flex: 1,
+    minWidth: 0,
+  },
+  parameterControlLabel: {
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  parameterControlHint: {
+    marginTop: 2,
+    color: palette.textSecondary,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  parameterValueInput: {
+    width: 58,
+    height: 32,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center',
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+  },
+  parameterSliderTrackArea: {
+    height: 24,
+    justifyContent: 'center',
+  },
+  parameterSliderTrack: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: palette.surfaceAlt,
+  },
+  parameterSliderFill: {
+    position: 'absolute',
+    left: 0,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: palette.accent,
+  },
+  parameterSliderThumb: {
+    position: 'absolute',
+    width: 16,
+    height: 16,
+    marginLeft: -8,
+    borderRadius: 8,
+    backgroundColor: palette.bg,
+    borderWidth: 2,
+    borderColor: palette.accent,
+  },
+  parameterRangeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: -4,
+  },
+  parameterRangeText: {
+    color: palette.textMutedSolid,
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  parameterResetButton: {
+    height: 36,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  parameterResetButtonText: {
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '700',
+  },
   attachMenuItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -3511,6 +4343,8 @@ const styles = StyleSheet.create({
   sidebarPanel: {
     width: '80%',
     maxWidth: 320,
+    position: 'relative',
+    overflow: 'hidden',
     backgroundColor: palette.bg,
     paddingTop: 20,
     paddingHorizontal: 20,
@@ -3599,14 +4433,33 @@ const styles = StyleSheet.create({
   },
   sidebarConversationItem: {
     borderRadius: radii.md,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+    gap: 6,
   },
   sidebarConversationItemActive: {
     backgroundColor: palette.surfaceAlt,
   },
+  sidebarConversationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  sidebarConversationContent: {
+    flex: 1,
+    minWidth: 0,
+    gap: 4,
+    paddingVertical: 2,
+  },
+  sidebarConversationTitleRow: {
+    minHeight: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
   sidebarConversationTitle: {
+    flex: 1,
+    minWidth: 0,
     color: palette.text,
     fontSize: 15,
     lineHeight: 20,
@@ -3628,8 +4481,195 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 16,
   },
+  sidebarConversationMore: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: palette.surface,
+  },
+  sidebarConversationMoreActive: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: palette.accentBorder,
+  },
+  sidebarConversationActionMenu: {
+    position: 'absolute',
+    right: 20,
+    zIndex: 31,
+    elevation: 31,
+    width: 184,
+    borderRadius: radii.md,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.12,
+    shadowRadius: 22,
+  },
+  sidebarConversationFrost: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 30,
+    elevation: 30,
+    backgroundColor: 'rgba(255, 255, 255, 0.64)',
+    ...(Platform.OS === 'web'
+      ? ({
+          backdropFilter: 'blur(14px)',
+          WebkitBackdropFilter: 'blur(14px)',
+        } as any)
+      : {}),
+  },
+  sidebarConversationFrostTapTarget: {
+    flex: 1,
+  },
+  sidebarConversationActionRow: {
+    minHeight: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#EFEFEF',
+  },
+  sidebarConversationActionDangerRow: {
+    borderBottomWidth: 0,
+  },
+  sidebarConversationActionText: {
+    flex: 1,
+    minWidth: 0,
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  sidebarConversationActionDangerText: {
+    color: palette.danger,
+  },
   sidebarEmpty: {
     color: palette.placeholder,
     fontSize: 14,
+  },
+  renameDialogScrim: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.32)',
+    paddingHorizontal: 28,
+  },
+  renameDialog: {
+    width: '100%',
+    maxWidth: 380,
+    borderRadius: radii.lg,
+    backgroundColor: palette.bg,
+    padding: 18,
+    gap: 14,
+  },
+  renameDialogTitle: {
+    color: palette.text,
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  renameDialogInput: {
+    minHeight: 44,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    color: palette.text,
+    fontSize: 15,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+  },
+  renameDialogActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+  },
+  renameDialogSecondaryButton: {
+    minWidth: 72,
+    height: 38,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+  },
+  renameDialogSecondaryText: {
+    color: palette.textSecondary,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  renameDialogPrimaryButton: {
+    minWidth: 72,
+    height: 38,
+    borderRadius: radii.sm,
+    backgroundColor: palette.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+  },
+  renameDialogPrimaryText: {
+    color: palette.textOnAccent,
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  deleteConfirmScrim: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.32)',
+    paddingHorizontal: 30,
+  },
+  deleteConfirmDialog: {
+    width: '100%',
+    maxWidth: 340,
+    borderRadius: radii.lg,
+    backgroundColor: palette.bg,
+    padding: 18,
+    gap: 12,
+  },
+  deleteConfirmIconWrap: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: palette.dangerBg,
+    borderWidth: 1,
+    borderColor: palette.dangerBorder,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  deleteConfirmTitle: {
+    color: palette.text,
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  deleteConfirmText: {
+    color: palette.textSecondary,
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  deleteConfirmButton: {
+    minWidth: 72,
+    height: 38,
+    borderRadius: radii.sm,
+    backgroundColor: palette.danger,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+  },
+  deleteConfirmButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '800',
   },
 });

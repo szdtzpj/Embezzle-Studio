@@ -4,6 +4,7 @@ import type {
   ChatTokenUsage,
   GenerationTaskInfo,
   MediaAttachment,
+  ModelParameterSettings,
   ModelInfo,
   ProviderProfile,
   ReasoningEffort,
@@ -24,6 +25,7 @@ interface ChatCompletionArgs {
   model?: ModelInfo;
   messages: ChatMessage[];
   reasoningEffort: ReasoningEffort;
+  parameterSettings?: ModelParameterSettings;
   onStreamUpdate?: (update: ChatStreamUpdate) => void;
 }
 
@@ -553,6 +555,17 @@ function isBailianReasoningEffortModel(modelId: string): boolean {
   return text.includes('deepseek-v4') || text.includes('glm-5');
 }
 
+function supportsOpenAiNoneReasoning(modelId: string): boolean {
+  const text = modelText(modelId);
+  const match = text.match(/(?:^|[/:\s_-])gpt-?5(?:\.(\d+))?/);
+
+  if (!match) {
+    return false;
+  }
+
+  return Number(match[1] ?? '0') >= 1;
+}
+
 function qwenThinkingBudget(effort: ReasoningEffort): number | undefined {
   if (effort === 'low') {
     return 1024;
@@ -578,10 +591,6 @@ function arkReasoningEffort(effort: ReasoningEffort): string | undefined {
     return undefined;
   }
 
-  if (effort === 'off') {
-    return 'minimal';
-  }
-
   if (effort === 'max') {
     return 'high';
   }
@@ -589,13 +598,13 @@ function arkReasoningEffort(effort: ReasoningEffort): string | undefined {
   return effort;
 }
 
-function openAiReasoningEffort(effort: ReasoningEffort): string | undefined {
+function openAiReasoningEffort(effort: ReasoningEffort, modelId: string): string | undefined {
   if (effort === 'default') {
     return undefined;
   }
 
   if (effort === 'off') {
-    return 'none';
+    return supportsOpenAiNoneReasoning(modelId) ? 'none' : 'minimal';
   }
 
   if (effort === 'max') {
@@ -605,16 +614,35 @@ function openAiReasoningEffort(effort: ReasoningEffort): string | undefined {
   return effort;
 }
 
-function compatibleReasoningEffort(effort: ReasoningEffort): string | undefined {
+function compatibleReasoningEffort(effort: ReasoningEffort, modelId: string): string | undefined {
   if (effort === 'default') {
     return undefined;
   }
 
   if (effort === 'off') {
-    return 'minimal';
+    return supportsOpenAiNoneReasoning(modelId) ? 'none' : 'minimal';
   }
 
   return effort === 'max' ? 'xhigh' : effort;
+}
+
+function boundedNumber(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function roundedParameter(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function applyModelParameterOptions(body: Record<string, unknown>, settings?: ModelParameterSettings) {
+  if (!settings?.enabled) {
+    return;
+  }
+
+  body.temperature = roundedParameter(boundedNumber(settings.temperature, 0, 2));
+  body.top_p = roundedParameter(boundedNumber(settings.topP, 0, 1));
+  body.presence_penalty = roundedParameter(boundedNumber(settings.presencePenalty, -2, 2));
+  body.frequency_penalty = roundedParameter(boundedNumber(settings.frequencyPenalty, -2, 2));
 }
 
 function applyReasoningOptions(
@@ -628,12 +656,15 @@ function applyReasoningOptions(
   }
 
   if (provider.kind === 'volcengine-ark') {
-    const value = arkReasoningEffort(effort);
-    if (value) {
-      body.reasoning_effort = value;
-    }
     if (effort === 'off') {
       body.thinking = { type: 'disabled' };
+      return;
+    }
+
+    const value = arkReasoningEffort(effort);
+    if (value) {
+      body.thinking = { type: 'enabled' };
+      body.reasoning_effort = value;
     }
     return;
   }
@@ -661,14 +692,14 @@ function applyReasoningOptions(
   }
 
   if (isOpenAiBaseUrl(provider)) {
-    const value = openAiReasoningEffort(effort);
+    const value = openAiReasoningEffort(effort, modelId);
     if (value) {
-      body.reasoning = { effort: value };
+      body.reasoning_effort = value;
     }
     return;
   }
 
-  const value = compatibleReasoningEffort(effort);
+  const value = compatibleReasoningEffort(effort, modelId);
   if (value) {
     body.reasoning_effort = value;
   }
@@ -946,6 +977,7 @@ export async function sendOpenAiCompatibleChat({
   model,
   messages,
   reasoningEffort,
+  parameterSettings,
   onStreamUpdate,
 }: ChatCompletionArgs): Promise<ChatCompletionResult> {
   if (!modelId) {
@@ -977,12 +1009,12 @@ export async function sendOpenAiCompatibleChat({
   const body: Record<string, unknown> = {
     model: modelId,
     messages: messages.map(toOpenAiMessage),
-    temperature: 0.7,
     stream: true,
     stream_options: {
       include_usage: true,
     },
   };
+  applyModelParameterOptions(body, parameterSettings);
   applyReasoningOptions(body, provider, modelId, reasoningEffort);
 
   const response = await providerFetch(`${baseUrl}/chat/completions`, {
