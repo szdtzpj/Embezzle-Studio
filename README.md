@@ -1,5 +1,7 @@
 # Embezzle Studio
 
+[简体中文](./README.md) | [English](./README.en.md)
+
 Embezzle Studio 是一个面向 Android 的移动端 AI 对话客户端。项目还在早期开发中，当前目标是把常用的 OpenAI 兼容接口、个人中转站和国内模型服务商集中到一个可配置的手机应用里，方便在移动端进行模型选择、对话和简单的多模态调用。
 
 ## 当前功能
