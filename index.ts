@@ -1,3 +1,5 @@
+// gesture-handler 必须在任何其他导入之前引入（原生端要求）。
+import 'react-native-gesture-handler';
 import { registerRootComponent } from 'expo';
 
 import App from './App';
