@@ -1,6 +1,6 @@
 {
   "name": "embezzlestudio",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "main": "index.ts",
   "dependencies": {
     "@lobehub/icons-rn": "^2.8.1",
