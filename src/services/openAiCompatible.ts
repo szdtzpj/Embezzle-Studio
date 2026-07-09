@@ -561,8 +561,8 @@ function isBailianReasoningEffortModel(modelId: string): boolean {
 }
 
 function supportsOpenAiNoneReasoning(modelId: string): boolean {
-  const text = modelText(modelId);
-  const match = text.match(/(?:^|[/:\s_-])gpt-?5(?:\.(\d+))?/);
+  const text = modelText(modelId).replace(/[:/_.\s]+/g, '-');
+  const match = text.match(/(?:^|-)gpt-?5(?:-(\d+))?(?:\b|-)/);
 
   if (!match) {
     return false;

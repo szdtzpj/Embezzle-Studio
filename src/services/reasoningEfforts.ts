@@ -47,15 +47,20 @@ function isBailianEffortModel(text: string): boolean {
 }
 
 function isOpenAiReasoningModel(text: string): boolean {
-  return /(?:^|-)(?:o1|o3|o4)(?:$|-)/.test(text) || /(?:^|-)gpt-5(?:$|-)/.test(text);
+  return /(?:^|-)(?:o1|o3|o4)(?:$|-)/.test(text) || /(?:^|-)gpt-?5(?:$|-)/.test(text);
+}
+
+function isGpt52OrLaterModel(text: string): boolean {
+  const match = text.match(/(?:^|-)gpt-?5-(\d+)(?:\b|-)/);
+  return match ? Number(match[1]) >= 2 : false;
 }
 
 function isGpt51Model(text: string): boolean {
-  return /(?:^|-)gpt-5-1(?:\b|-)/.test(text);
+  return /(?:^|-)gpt-?5-1(?:\b|-)/.test(text);
 }
 
 function isGpt5ProModel(text: string): boolean {
-  return /(?:^|-)gpt-5-pro(?:\b|-)/.test(text);
+  return /(?:^|-)gpt-?5-pro(?:\b|-)/.test(text);
 }
 
 function isDoubaoSeedModel(text: string): boolean {
@@ -103,6 +108,10 @@ export function getSupportedReasoningEfforts(
 
   if (isDoubaoSeedModel(text)) {
     return ['default', 'off', 'low', 'medium', 'high'];
+  }
+
+  if (isGpt52OrLaterModel(text)) {
+    return ['default', 'off', 'low', 'medium', 'high', 'max'];
   }
 
   if (isGpt51Model(text)) {
