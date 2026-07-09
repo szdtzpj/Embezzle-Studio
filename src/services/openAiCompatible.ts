@@ -18,6 +18,7 @@ import {
   isVisionModel,
   type RemoteModelMetadata,
 } from './modelCapabilities';
+import { normalizeReasoningEffort } from './reasoningEfforts';
 
 interface ChatCompletionArgs {
   provider: ProviderProfile;
@@ -550,6 +551,10 @@ function isQwenLikeModel(modelId: string): boolean {
   return text.includes('qwen') || text.includes('qwq') || text.includes('qvq');
 }
 
+function isDoubaoSeedModel(modelId: string): boolean {
+  return modelText(modelId).includes('doubao-seed');
+}
+
 function isBailianReasoningEffortModel(modelId: string): boolean {
   const text = modelText(modelId);
   return text.includes('deepseek-v4') || text.includes('glm-5');
@@ -564,6 +569,11 @@ function supportsOpenAiNoneReasoning(modelId: string): boolean {
   }
 
   return Number(match[1] ?? '0') >= 1;
+}
+
+function isDeepSeekV4Model(modelId: string): boolean {
+  const text = modelText(modelId);
+  return text.includes('deepseek-v4');
 }
 
 function qwenThinkingBudget(effort: ReasoningEffort): number | undefined {
@@ -598,6 +608,14 @@ function arkReasoningEffort(effort: ReasoningEffort): string | undefined {
   return effort;
 }
 
+function doubaoReasoningEffort(effort: ReasoningEffort): string | undefined {
+  if (effort === 'default' || effort === 'off') {
+    return undefined;
+  }
+
+  return effort === 'max' ? 'high' : effort;
+}
+
 function openAiReasoningEffort(effort: ReasoningEffort, modelId: string): string | undefined {
   if (effort === 'default') {
     return undefined;
@@ -624,6 +642,14 @@ function compatibleReasoningEffort(effort: ReasoningEffort, modelId: string): st
   }
 
   return effort === 'max' ? 'xhigh' : effort;
+}
+
+function deepSeekV4ReasoningEffort(effort: ReasoningEffort): string | undefined {
+  if (effort === 'off' || effort === 'default') {
+    return undefined;
+  }
+
+  return effort === 'max' ? 'max' : 'high';
 }
 
 function boundedNumber(value: number, min: number, max: number): number {
@@ -687,6 +713,29 @@ function applyReasoningOptions(
       if (budget) {
         body.thinking_budget = budget;
       }
+    }
+    return;
+  }
+
+  if (isDoubaoSeedModel(modelId)) {
+    body.thinking = { type: effort === 'off' ? 'disabled' : 'enabled' };
+    const value = doubaoReasoningEffort(effort);
+    if (value) {
+      body.reasoning_effort = value;
+    }
+    return;
+  }
+
+  if (isDeepSeekV4Model(modelId)) {
+    if (effort === 'off') {
+      body.thinking = { type: 'disabled' };
+      return;
+    }
+
+    body.thinking = { type: 'enabled' };
+    const value = deepSeekV4ReasoningEffort(effort);
+    if (value) {
+      body.reasoning_effort = value;
     }
     return;
   }
@@ -1015,7 +1064,7 @@ export async function sendOpenAiCompatibleChat({
     },
   };
   applyModelParameterOptions(body, parameterSettings);
-  applyReasoningOptions(body, provider, modelId, reasoningEffort);
+  applyReasoningOptions(body, provider, modelId, normalizeReasoningEffort(provider, requestModel, reasoningEffort));
 
   const response = await providerFetch(`${baseUrl}/chat/completions`, {
     method: 'POST',

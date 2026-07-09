@@ -42,6 +42,7 @@ export interface ModelInfo {
   id: string;
   name?: string;
   capabilities: Capability[];
+  supportedReasoningEfforts?: ReasoningEffort[];
   contextWindow?: number;
   task?: ModelTask;
   source: 'preset' | 'remote' | 'manual';

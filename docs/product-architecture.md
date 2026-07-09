@@ -79,14 +79,14 @@ Local stdio MCP is deferred. It requires packaging executables, sandboxing them,
 
 ## Model Capability Resolution
 
-Model capability checks live behind one module seam: `src/services/modelCapabilities.ts`. Callers should ask predicates such as `isVisionModel`, `isWebSearchModel`, `isToolCallingModel`, and `inferModelTask` instead of doing local string matching.
+Model capability checks live behind module seams: `src/services/modelCapabilities.ts` resolves model tasks and capabilities, while `src/services/reasoningEfforts.ts` resolves provider/model-specific thinking levels. Callers should ask predicates such as `isVisionModel`, `isWebSearchModel`, `isToolCallingModel`, `inferModelTask`, and `getReasoningEffortOptions` instead of doing local string matching.
 
-Discovery keeps `GET /models` as the provider-specific source of model IDs, then enriches each ID through local metadata/rules. Provider-level capabilities describe transport support; they are not blindly copied onto every remote model. Health checks should verify model/API-key availability only, not infer multimodal or web-search support.
+Discovery keeps `GET /models` as the provider-specific source of model IDs, then enriches each ID through local metadata/rules. Provider-level capabilities describe transport support; they are not blindly copied onto every remote model. If a provider returns explicit reasoning/thinking effort metadata, it is preserved on `ModelInfo.supportedReasoningEfforts` and takes precedence over local fallback rules. Health checks should verify model/API-key availability only, not infer multimodal or web-search support.
 
 ## Data Model
 
 - `ProviderProfile`: provider identity, adapter kind, base URL, API key, transport capability hints, and model list.
-- `ModelInfo`: model ID plus resolved capability hints.
+- `ModelInfo`: model ID plus resolved capability hints and optional supported reasoning effort hints.
 - `ChatMessage`: role, content, status, attachments, and error information.
 - `MediaAttachment`: local URI, MIME type, size, optional base64 image payload.
 - `PluginManifest`: mobile-safe plugin or remote MCP entry.

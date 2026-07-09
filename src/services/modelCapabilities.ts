@@ -1,4 +1,4 @@
-import type { Capability, ModelInfo, ModelTask, ProviderProfile } from '../domain/types';
+import type { Capability, ModelInfo, ModelTask, ProviderProfile, ReasoningEffort } from '../domain/types';
 
 export type ModelCapabilityFilter =
   | 'all'
@@ -25,6 +25,11 @@ export interface RemoteModelMetadata {
   supported_parameters?: unknown;
   attachment?: unknown;
   reasoning?: unknown;
+  reasoning_effort?: unknown;
+  reasoning_efforts?: unknown;
+  supported_reasoning_efforts?: unknown;
+  thinking?: unknown;
+  thinking_budget?: unknown;
   tool_call?: unknown;
   structured_output?: unknown;
   owned_by?: unknown;
@@ -63,6 +68,9 @@ const visionKeywords = [
   'qwen2-vl',
   'qwen2.5-vl',
   'qwen3-vl',
+  'qwen3.6',
+  'qwen3-6',
+  'qwen36',
   'qvq',
   'glm-4v',
   'glm-v',
@@ -90,7 +98,17 @@ const visionKeywords = [
 
 const visionExclusions = ['gpt-image', 'gpt-4o-image', 'qwen-max', 'qwen3-max', 'embedding', 'rerank', 'tts', 'whisper'];
 
-const videoInputKeywords = ['video-input', 'video-recognition', 'video-understanding', 'doubao-seed', 'gemini', 'qwen-vl'];
+const videoInputKeywords = [
+  'video-input',
+  'video-recognition',
+  'video-understanding',
+  'doubao-seed',
+  'gemini',
+  'qwen-vl',
+  'qwen3.6',
+  'qwen3-6',
+  'qwen36',
+];
 const videoGenerationKeywords = ['video-generation', 'text-to-video', 'seedance', 'sora', 'veo', 'kling', 'wan-video', 'wanx2.1-t2v'];
 const imageGenerationKeywords = [
   'image-generation',
@@ -115,10 +133,12 @@ const reasoningKeywords = [
   'thinking',
   'think',
   'deepseek-r1',
+  'deepseek-v4',
   '-r1',
   'r1-',
   'qwq',
   'qvq',
+  'qwen3',
   'o1',
   'o3',
   'o4',
@@ -127,6 +147,7 @@ const reasoningKeywords = [
   'hunyuan-t1',
   'grok-4',
   'gpt-5',
+  'doubao-seed',
   'doubao-1-5-thinking',
 ];
 const toolKeywords = [
@@ -153,6 +174,7 @@ const toolKeywords = [
 ];
 const webSearchKeywords = ['web-search', 'web_search', 'search-preview', 'sonar', 'online', 'browsing'];
 const freeKeywords = ['free', 'gratis', 'trial'];
+const arkThinkingKeywords = ['doubao-seed', 'deepseek-v4', 'deepseek-v3-2', 'glm-4-7'];
 
 const exactCapabilities: Record<string, Capability[]> = {
   'gpt-4o-search-preview': ['text', 'image-input', 'tool-calling', 'web-search'],
@@ -200,6 +222,109 @@ function addAll(caps: Set<Capability>, capabilities: Capability[]): void {
 
 function sortedCapabilities(caps: Set<Capability>): Capability[] {
   return capabilityOrder.filter((capability) => caps.has(capability));
+}
+
+const reasoningEffortOrder: ReasoningEffort[] = ['default', 'off', 'low', 'medium', 'high', 'max'];
+const reasoningEffortAliases: Record<string, ReasoningEffort> = {
+  auto: 'default',
+  default: 'default',
+  none: 'off',
+  off: 'off',
+  disabled: 'off',
+  disable: 'off',
+  false: 'off',
+  low: 'low',
+  medium: 'medium',
+  mid: 'medium',
+  high: 'high',
+  max: 'max',
+  maximum: 'max',
+  xhigh: 'max',
+  'x-high': 'max',
+  ultra: 'max',
+};
+
+function normalizeReasoningEffortToken(value: string): ReasoningEffort | undefined {
+  const token = value.trim().toLowerCase().replace(/[\s_]+/g, '-');
+  return reasoningEffortAliases[token];
+}
+
+function addReasoningEffort(efforts: Set<ReasoningEffort>, value: unknown): void {
+  if (typeof value !== 'string') {
+    return;
+  }
+
+  const effort = normalizeReasoningEffortToken(value);
+  if (effort) {
+    efforts.add(effort);
+  }
+}
+
+function collectReasoningEffortValues(efforts: Set<ReasoningEffort>, value: unknown, depth = 0): void {
+  if (depth > 3 || value == null) {
+    return;
+  }
+
+  if (typeof value === 'string') {
+    addReasoningEffort(efforts, value);
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectReasoningEffortValues(efforts, item, depth + 1));
+    return;
+  }
+
+  if (typeof value !== 'object') {
+    return;
+  }
+
+  Object.entries(value as Record<string, unknown>).forEach(([key, entry]) => {
+    const normalizedKey = key.toLowerCase().replace(/[\s_]+/g, '-');
+    if (entry === true) {
+      addReasoningEffort(efforts, normalizedKey);
+    }
+
+    if (
+      normalizedKey.includes('effort') ||
+      normalizedKey.includes('level') ||
+      normalizedKey.includes('budget') ||
+      ['enum', 'values', 'options', 'type', 'types', 'mode', 'modes', 'allowed-values', 'supported-values'].includes(normalizedKey)
+    ) {
+      collectReasoningEffortValues(efforts, entry, depth + 1);
+    }
+  });
+}
+
+function sortedReasoningEfforts(efforts: Set<ReasoningEffort>): ReasoningEffort[] {
+  return reasoningEffortOrder.filter((effort) => efforts.has(effort));
+}
+
+function supportedReasoningEffortsFromMetadata(metadata?: RemoteModelMetadata): ReasoningEffort[] | undefined {
+  if (!metadata) {
+    return undefined;
+  }
+
+  const efforts = new Set<ReasoningEffort>();
+  collectReasoningEffortValues(efforts, metadata.reasoning);
+  collectReasoningEffortValues(efforts, metadata.reasoning_effort);
+  collectReasoningEffortValues(efforts, metadata.reasoning_efforts);
+  collectReasoningEffortValues(efforts, metadata.supported_reasoning_efforts);
+  collectReasoningEffortValues(efforts, metadata.thinking);
+
+  const supportedParameters = stringArray(metadata.supported_parameters);
+  if (supportedParameters.some((item) => item.includes('enable_thinking'))) {
+    efforts.add('off');
+  }
+  if (supportedParameters.some((item) => item.includes('thinking_budget'))) {
+    efforts.add('low');
+    efforts.add('medium');
+    efforts.add('high');
+    efforts.add('max');
+  }
+
+  const sorted = sortedReasoningEfforts(efforts);
+  return sorted.length ? sorted : undefined;
 }
 
 function addExternalCapability(caps: Set<Capability>, raw: string): void {
@@ -259,10 +384,10 @@ function addCapabilitiesFromMetadata(caps: Set<Capability>, metadata?: RemoteMod
   if (outputModalities.includes('video')) add(caps, 'video-generation');
   if (outputModalities.includes('vector')) add(caps, 'embedding');
   if (supportedParameters.some((item) => item.includes('tool') || item.includes('function'))) add(caps, 'tool-calling');
-  if (supportedParameters.some((item) => item.includes('reasoning'))) add(caps, 'reasoning');
+  if (supportedParameters.some((item) => item.includes('reasoning') || item.includes('thinking'))) add(caps, 'reasoning');
   if (metadata.attachment === true) add(caps, 'file-input');
   if (metadata.tool_call === true) add(caps, 'tool-calling');
-  if (metadata.reasoning === true) add(caps, 'reasoning');
+  if (metadata.reasoning === true || supportedReasoningEffortsFromMetadata(metadata)?.length) add(caps, 'reasoning');
 
   if (Array.isArray(metadata.capabilities)) {
     metadata.capabilities.forEach((capability) => {
@@ -296,6 +421,9 @@ function addCapabilitiesFromModelId(caps: Set<Capability>, provider: ProviderPro
   const isGenerationOrVector = caps.has('image-generation') || caps.has('video-generation') || caps.has('embedding') || caps.has('rerank');
 
   if (!isGenerationOrVector && includesAny(text, reasoningKeywords)) add(caps, 'reasoning');
+  if (!isGenerationOrVector && provider.kind === 'bailian-compatible' && includesAny(text, ['qwen', 'qwq', 'qvq'])) {
+    add(caps, 'reasoning');
+  }
 
   const excludedFromVision = includesAny(text, visionExclusions);
   if (!excludedFromVision && !caps.has('embedding') && !caps.has('rerank') && includesAny(text, visionKeywords)) {
@@ -319,6 +447,10 @@ function addCapabilitiesFromModelId(caps: Set<Capability>, provider: ProviderPro
   if (/^grok-(?:3|4)\b/.test(id)) add(caps, 'web-search');
   if (/^(?:gpt-4o|gpt-5|o3|o4)(?:\b|-)/.test(id)) add(caps, 'web-search');
   if (/^claude-(?:opus-4|sonnet-4|haiku-4|3-5-haiku|3-5-sonnet|3-7-sonnet)\b/.test(id)) add(caps, 'web-search');
+
+  if (provider.kind === 'volcengine-ark' && includesAny(text, arkThinkingKeywords)) {
+    add(caps, 'reasoning');
+  }
 
   if (provider.kind === 'volcengine-ark' && id.startsWith('doubao-seed') && !id.includes('code')) {
     add(caps, 'image-input');
@@ -380,10 +512,12 @@ export function createModelInfoFromId(
   metadata?: RemoteModelMetadata
 ): ModelInfo {
   const capabilities = inferModelCapabilities(provider, modelId, metadata, source);
+  const supportedReasoningEfforts = supportedReasoningEffortsFromMetadata(metadata);
   const model: ModelInfo = {
     id: modelId,
     name: metadata?.name ?? modelId,
     capabilities,
+    ...(supportedReasoningEfforts ? { supportedReasoningEfforts } : {}),
     task: inferModelTask({ id: modelId, name: metadata?.name ?? modelId, capabilities }),
     source,
   };

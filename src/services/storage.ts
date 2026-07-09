@@ -74,18 +74,22 @@ function stripSecret(provider: ProviderProfile): PersistedProvider {
 }
 
 function normalizeModelCapabilities(provider: ProviderProfile, model: ModelInfo): ModelInfo {
+  const inferred = createModelInfoFromId(provider, model.id, model.source, { id: model.id, name: model.name });
+
   if (model.source === 'remote') {
-    const inferred = createModelInfoFromId(provider, model.id, 'remote', { id: model.id, name: model.name });
     return {
       ...model,
       capabilities: inferred.capabilities,
+      supportedReasoningEfforts: model.supportedReasoningEfforts ?? inferred.supportedReasoningEfforts,
       task: inferred.task,
     };
   }
 
   return {
     ...model,
-    task: model.task ?? inferModelTask(model),
+    capabilities: Array.from(new Set([...(model.capabilities ?? []), ...inferred.capabilities])),
+    supportedReasoningEfforts: model.supportedReasoningEfforts ?? inferred.supportedReasoningEfforts,
+    task: model.task ?? inferred.task ?? inferModelTask(model),
   };
 }
 
