@@ -7,11 +7,11 @@ Embezzle Studio is a personal Android AI client for people who already own multi
 ## Core Principles
 
 - Provider first: every model belongs to a provider profile with its own base URL, API key, and adapter type.
-- Capability aware: text, image input, video input, tool calling, streaming, and MCP are tracked explicitly instead of guessed from model names.
+- Capability aware: provider metadata and maintained model tables provide defaults; users can explicitly override model task and multimodal/reasoning/tool capabilities when inference is wrong.
 - OpenAI-compatible by default: Volcengine Ark, Bailian compatible mode, New API, One API, and self-hosted relays can share one adapter when they expose `/models` and `/chat/completions`.
-- Discovery is provider-specific: OpenAI-compatible providers use `GET /models` first, including Volcengine Ark/Doubao. Remote discovery populates provider-scoped model candidates; users explicitly add candidates to the local model list before using them in chat. Ark does not mix static Doubao presets into usable candidates because Ark chat often requires account-specific endpoint IDs.
+- Discovery is provider-specific: OpenAI-compatible providers may use `GET /models`; Volcengine Ark uses the maintained official public catalog because its data-plane `GET /models` is not a documented contract. Ark account-specific Endpoint IDs remain manual unless a trusted backend later implements AK/HMAC `ListEndpoints`.
 - Provider-specific when needed: Doubao video input and other non-standard media flows should be adapter modules, not conditionals scattered across the UI.
-- Secrets stay local: API keys are stored through SecureStore when available and never committed.
+- Secrets stay local and platform-scoped: Android requires SecureStore and fails closed if it is unavailable; Web keeps API keys only in the current tab's `sessionStorage` (or memory as a fail-safe), removes legacy persistent values, and never includes keys in workspace snapshots.
 - Mobile constraints are real: remote MCP transports are first-class; local stdio MCP is not part of the first mobile milestone because Android process and binary management would make the first version brittle.
 - Web development needs a local proxy: Expo Web runs in a browser and would otherwise hit CORS on provider APIs. Android builds call providers directly.
 
@@ -20,17 +20,18 @@ Embezzle Studio is a personal Android AI client for people who already own multi
 1. Provider management
    - Built-in presets for Volcengine Ark, Alibaba Bailian compatible mode, New API relay, and custom OpenAI-compatible services.
    - User-editable provider name, base URL, API key, and active model.
-   - Remote model discovery through `GET /models`.
+   - Remote model discovery through `GET /models` where the provider documents it.
    - Candidate model list with explicit add-to-provider action.
    - Manual provider and model entry for relays that disable model-list APIs.
    - Chat-time model switching among added models.
-   - Volcengine Ark `/models` discovery; console-only endpoint IDs can be added manually.
+   - Volcengine Ark official catalog candidates; account Endpoint IDs can be added manually.
 
 2. Chat
-   - Single-session chat surface.
-   - Text messages through Chat Completions.
-   - Image attachments converted to data URLs for models marked with image input.
-   - Video attachments represented in state and UI, blocked in the generic adapter until a provider-specific uploader exists.
+   - Persistent multi-conversation chat surface with search, branching edits/regeneration, stop, copy, share, rename, pin, and deletion flows.
+   - Text messages through Chat Completions, with official OpenAI Responses-only Pro models routed to the Responses API.
+   - Capability-gated image, video, and file pickers. Image bytes are materialized as data URLs only when a request needs them.
+   - Bailian `video_url` request support, including local video selection with a pre-Base64 source bound and a 10 MiB encoded Data URL limit; other chat-video providers remain rejected until their protocols are implemented.
+   - Official OpenAI file input for models explicitly marked with `file-input`; compatible relays are rejected rather than assumed to implement the same wire format.
 
 3. Extension foundation
    - Plugin manifest contract for mobile-safe plugins.
@@ -42,12 +43,16 @@ Embezzle Studio is a personal Android AI client for people who already own multi
 ```mermaid
 flowchart TD
     UI["React Native UI"] --> Workspace["Workspace State"]
-    Workspace --> Storage["AsyncStorage + SecureStore"]
-    UI --> Media["Image/Video/File Pickers"]
+    Workspace --> Snapshots["Versioned AsyncStorage Snapshots + Backup"]
+    Workspace --> Secrets["Android SecureStore / Web Tab Session"]
+    UI --> Media["Capability-gated Image/Video/File Pickers"]
+    Media --> NativeMedia["Native App-owned Documents"]
+    Media --> WebMedia["Web IndexedDB Blobs + Temporary blob: URLs"]
     UI --> ChatEngine["Chat Orchestration"]
     ChatEngine --> ProviderAdapter["Provider Adapter Registry"]
     ProviderAdapter --> OpenAI["OpenAI-compatible Adapter"]
-    ProviderAdapter --> VideoAdapters["Future Provider-specific Video Adapters"]
+    ProviderAdapter --> OpenAIResponses["Official OpenAI Responses"]
+    ProviderAdapter --> ProviderMedia["Bailian video_url / Ark Generation Tasks"]
     ProviderAdapter --> MCP["Future Remote MCP Tool Runtime"]
 ```
 
@@ -60,6 +65,12 @@ The initial adapter supports common OpenAI-compatible APIs:
 - bearer token authentication
 - plain text messages
 - image input through `image_url` data URLs
+
+Protocol-specific branches currently cover:
+
+- official OpenAI Responses-only Pro requests and official OpenAI `file`/`input_file` attachments
+- Alibaba Bailian `video_url` chat content with bounded inline video materialization
+- Volcengine Ark image/video generation task submission and polling
 
 Provider-specific adapters should be added when the protocol diverges:
 
@@ -81,19 +92,33 @@ Local stdio MCP is deferred. It requires packaging executables, sandboxing them,
 
 Model capability checks live behind module seams: `src/services/modelCapabilities.ts` resolves model tasks and capabilities, while `src/services/reasoningEfforts.ts` resolves provider/model-specific thinking levels. Callers should ask predicates such as `isVisionModel`, `isWebSearchModel`, `isToolCallingModel`, `inferModelTask`, and `getReasoningEffortOptions` instead of doing local string matching.
 
-Discovery keeps `GET /models` as the provider-specific source of model IDs, then enriches each ID through local metadata/rules. Provider-level capabilities describe transport support; they are not blindly copied onto every remote model. If a provider returns explicit reasoning/thinking effort metadata, it is preserved on `ModelInfo.supportedReasoningEfforts` and takes precedence over local fallback rules. Health checks should verify model/API-key availability only, not infer multimodal or web-search support.
+Discovery enriches documented remote model IDs through local metadata/rules. Ark instead uses a versioned public-catalog snapshot. Provider-level capabilities describe transport support and are not copied onto each model. Explicit user overrides win over inferred capabilities and survive reloads. Health checks verify availability only; they do not claim that hosted tools such as web search are implemented by the current adapter.
 
 ## Data Model
 
 - `ProviderProfile`: provider identity, adapter kind, base URL, API key, transport capability hints, and model list.
 - `ModelInfo`: model ID plus resolved capability hints and optional supported reasoning effort hints.
 - `ChatMessage`: role, content, status, attachments, and error information.
-- `MediaAttachment`: local URI, MIME type, size, optional base64 image payload.
+- `MediaAttachment`: attachment kind, durable URI, MIME type, size/dimensions, and optional request-time Base64 payload.
 - `PluginManifest`: mobile-safe plugin or remote MCP entry.
+
+## Attachment Lifecycle and Limits
+
+- The picker enforces at most 6 attachments, 10 MiB per image, 100 MiB per video, 20 MiB per ordinary file, 120 MiB in total, and 32 megapixels per image. Provider wire protocols may impose stricter limits; Bailian inline video is limited to a 10 MiB encoded Data URL.
+- Native selections are copied into an app-owned document directory. Web selections are stored as IndexedDB Blobs under durable attachment IDs; previews resolve them to short-lived `blob:` URLs instead of persisting Base64 in the workspace JSON.
+- Attachment deletion is transactional with workspace persistence: committed data is removed only after a successfully saved snapshot no longer references it. Picker failures before commit are reclaimed immediately.
+
+## Release and Update Trust Boundary
+
+- The Android release workflow builds an unsigned APK from a stable tag reachable from `origin/main`, uses `aapt` to enforce the packaged identity/version/SDK contract and reject overlay/camera/microphone permissions, signs it only inside the protected `android-release` environment, verifies the expected production certificate, and publishes the APK together with its SHA-256 file.
+- The Pages stager accepts only safe asset API URLs and the exact `Embezzle-Studio-${tag}-release.apk` filename. It binds the checksum to that filename, limits both declared and streamed bodies (256 MiB APK, 64 KiB checksum), and creates `release.html` only after the APK bytes match. The page contains the version, byte-derived size, full digest, a URL-encoded download link, and HTML-escaped release name/notes; it explicitly says checksum agreement does not replace production-certificate verification with `apksigner`.
+- A valid manifest points `releaseUrl` to the generated Pages `release.html` and its APK URL to the Pages `downloads/` path. If the release or required assets are absent, the stager removes managed download output and writes a fail-closed manifest with `apk: null`; checksum mismatch or other trust failures abort staging.
+- The client fetches only the fixed public Pages manifest and accepts release/asset URLs only on this repository's exact GitHub or Pages paths. It displays the digest and opens the trusted release page; it does not claim to verify or install the APK locally.
 
 ## Security Notes
 
-- API keys are saved through SecureStore when available.
-- Web debugging falls back to AsyncStorage because SecureStore is Android/iOS-only.
+- Android API keys are saved through SecureStore; inability to use secure storage is a hard failure rather than a plaintext fallback.
+- Web API keys are scoped to the current tab session through `sessionStorage`/memory. Legacy Web keys are removed from AsyncStorage during migration, so closing the tab/session requires entering them again.
+- Workspace and chat snapshots remain in AsyncStorage, but provider `apiKey` fields are stripped before serialization.
 - Chat history does not currently encrypt message content; local encrypted history is a later milestone.
 - No key export/sync is included in the first milestone.

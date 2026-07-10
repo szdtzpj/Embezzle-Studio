@@ -1,5 +1,5 @@
 import type { ModelInfo, ProviderProfile, ReasoningEffort } from '../domain/types';
-import { inferModelTask, isReasoningModel } from './modelCapabilities';
+import { getBailianThinkingProfile, inferModelTask, isReasoningModel } from './modelCapabilities';
 
 export interface ReasoningEffortOption {
   key: ReasoningEffort;
@@ -8,21 +8,36 @@ export interface ReasoningEffortOption {
 
 export const reasoningEffortLabels: Record<ReasoningEffort, string> = {
   default: '默认',
-  off: '关闭',
+  off: '关闭思考',
+  none: '无',
+  minimal: '极低',
   low: '低',
   medium: '中',
   high: '高',
-  max: '极高',
+  xhigh: '极高',
+  max: '最高',
 };
 
-const effortOrder: ReasoningEffort[] = ['default', 'off', 'low', 'medium', 'high', 'max'];
+const effortOrder: ReasoningEffort[] = [
+  'default',
+  'off',
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+];
 
 function normalizedText(value?: string): string {
   return (value ?? '').trim().toLowerCase().replace(/[:/_.\s]+/g, '-');
 }
 
 function modelText(model: ModelInfo): string {
-  return `${normalizedText(model.id)} ${normalizedText(model.name)}`.trim();
+  const id = normalizedText(model.id);
+  const name = normalizedText(model.name);
+  return name && name !== id ? `${id}-${name}` : id;
 }
 
 function orderedEfforts(efforts: Iterable<ReasoningEffort>): ReasoningEffort[] {
@@ -35,15 +50,11 @@ function withDefault(efforts: ReasoningEffort[]): ReasoningEffort[] {
 }
 
 function isOpenAiBaseUrl(provider: ProviderProfile): boolean {
-  return provider.baseUrl.toLowerCase().includes('api.openai.com');
-}
-
-function isQwenBudgetModel(text: string): boolean {
-  return text.includes('qwen') || text.includes('qwq') || text.includes('qvq');
-}
-
-function isBailianEffortModel(text: string): boolean {
-  return text.includes('deepseek-v4') || text.includes('glm-5');
+  try {
+    return new URL(provider.baseUrl).hostname.toLowerCase() === 'api.openai.com';
+  } catch {
+    return false;
+  }
 }
 
 function isOpenAiReasoningModel(text: string): boolean {
@@ -55,12 +66,26 @@ function isGpt52OrLaterModel(text: string): boolean {
   return match ? Number(match[1]) >= 2 : false;
 }
 
+function isGpt56OrLaterModel(text: string): boolean {
+  const match = text.match(/(?:^|-)gpt-?5-(\d+)(?:\b|-)/);
+  return match ? Number(match[1]) >= 6 : false;
+}
+
+function gpt5MinorVersion(text: string): number | undefined {
+  const match = text.match(/(?:^|-)gpt-?5-(\d+)(?:\b|-)/);
+  return match ? Number(match[1]) : undefined;
+}
+
 function isGpt51Model(text: string): boolean {
   return /(?:^|-)gpt-?5-1(?:\b|-)/.test(text);
 }
 
 function isGpt5ProModel(text: string): boolean {
-  return /(?:^|-)gpt-?5-pro(?:\b|-)/.test(text);
+  return /(?:^|-)(?:gpt-?5-pro|gpt-?5-(?:2|4|5)-pro)(?:\b|-)/.test(text);
+}
+
+function isBaseGpt5Model(text: string): boolean {
+  return /(?:^|-)gpt-?5(?:-(?:mini|nano))?(?:$|-)/.test(text) && gpt5MinorVersion(text) === undefined;
 }
 
 function isDoubaoSeedModel(text: string): boolean {
@@ -80,12 +105,12 @@ function isArkThinkingModel(text: string): boolean {
   );
 }
 
-function canDisableThinking(provider: ProviderProfile, text: string): boolean {
+function canDisableThinking(provider: ProviderProfile, model: ModelInfo, text: string): boolean {
   if (provider.kind === 'volcengine-ark' || isArkThinkingModel(text)) {
     return true;
   }
 
-  return provider.kind === 'bailian-compatible' && (isQwenBudgetModel(text) || isBailianEffortModel(text));
+  return provider.kind === 'bailian-compatible' && getBailianThinkingProfile(model.id).mode === 'mixed';
 }
 
 export function getSupportedReasoningEfforts(
@@ -97,55 +122,102 @@ export function getSupportedReasoningEfforts(
   }
 
   const text = modelText(model);
+  if (model.capabilityOverrides?.reasoning === false) {
+    return [];
+  }
+  if (provider.kind === 'bailian-compatible') {
+    const profile = getBailianThinkingProfile(model.id);
+    if (profile.mode === 'thinking-only') {
+      return profile.supportsThinkingBudget
+        ? ['default', 'low', 'medium', 'high', 'max']
+        : ['default'];
+    }
+
+    if (profile.mode === 'mixed') {
+      if (profile.reasoningEffortFamily === 'deepseek-v4') {
+        return ['default', 'off', 'high', 'max'];
+      }
+
+      if (
+        profile.reasoningEffortFamily === 'glm-5.2'
+      ) {
+        return ['default', 'off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+      }
+
+      if (profile.reasoningEffortFamily === 'glm-5.1-or-5') {
+        return ['default', 'off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+      }
+
+      if (profile.supportsThinkingBudget) {
+        return ['default', 'off', 'low', 'medium', 'high', 'max'];
+      }
+
+      return profile.defaultEnabled === false
+        ? ['default', 'off', 'high']
+        : ['default', 'off'];
+    }
+  }
+
+  if (provider.kind === 'volcengine-ark') {
+    if (text.includes('glm-5-2')) {
+      return ['default', 'off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+    }
+    if (isDeepSeekV4Model(text)) {
+      return ['default', 'off', 'high', 'max'];
+    }
+    if (text.includes('deepseek-v3-2') || text.includes('glm-4-7')) {
+      return ['default', 'off'];
+    }
+    if (
+      text.includes('doubao-seed-2-') ||
+      text.includes('doubao-seed-evolving') ||
+      text.includes('doubao-seed-character-260628')
+    ) {
+      return ['default', 'off', 'low', 'medium', 'high'];
+    }
+    return isReasoningModel(model) ? ['default', 'off'] : [];
+  }
+
+  if (isOpenAiBaseUrl(provider) || isOpenAiReasoningModel(text)) {
+    if (isGpt5ProModel(text)) {
+      return (gpt5MinorVersion(text) ?? 0) >= 2
+        ? ['default', 'medium', 'high', 'xhigh']
+        : ['default', 'high'];
+    }
+    if (isGpt56OrLaterModel(text)) {
+      return ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'];
+    }
+    if (isGpt52OrLaterModel(text)) {
+      return ['default', 'none', 'low', 'medium', 'high', 'xhigh'];
+    }
+    if (isGpt51Model(text)) {
+      return ['default', 'none', 'low', 'medium', 'high'];
+    }
+    if (isBaseGpt5Model(text)) {
+      return ['default', 'minimal', 'low', 'medium', 'high'];
+    }
+    return isReasoningModel(model) ? ['default', 'low', 'medium', 'high'] : [];
+  }
+
   if (isDeepSeekV4Model(text)) {
     return ['default', 'off', 'high', 'max'];
   }
 
   const explicit = orderedEfforts(model.supportedReasoningEfforts ?? []);
   if (explicit.length) {
-    return withDefault(canDisableThinking(provider, text) ? [...explicit, 'off'] : explicit);
+    return withDefault(canDisableThinking(provider, model, text) ? [...explicit, 'off'] : explicit);
   }
 
   if (isDoubaoSeedModel(text)) {
     return ['default', 'off', 'low', 'medium', 'high'];
   }
 
-  if (isGpt52OrLaterModel(text)) {
-    return ['default', 'off', 'low', 'medium', 'high', 'max'];
-  }
-
-  if (isGpt51Model(text)) {
-    return ['default', 'off', 'low', 'medium', 'high'];
-  }
-
-  if (isGpt5ProModel(text)) {
-    return ['default', 'high'];
-  }
-
-  if (provider.kind === 'bailian-compatible') {
-    if (isQwenBudgetModel(text)) {
-      return ['default', 'off', 'low', 'medium', 'high', 'max'];
-    }
-
-    if (isBailianEffortModel(text)) {
-      return ['default', 'off', 'high', 'max'];
-    }
-  }
-
   if (!isReasoningModel(model)) {
     return isArkThinkingModel(text) ? ['default', 'off', 'low', 'medium', 'high'] : [];
   }
 
-  if (provider.kind === 'volcengine-ark') {
-    return ['default', 'off', 'low', 'medium', 'high'];
-  }
-
   if (provider.kind === 'bailian-compatible') {
-    return ['default', 'off'];
-  }
-
-  if (isOpenAiBaseUrl(provider) || isOpenAiReasoningModel(text)) {
-    return ['default', 'low', 'medium', 'high'];
+    return ['default'];
   }
 
   return ['default', 'off', 'low', 'medium', 'high', 'max'];
@@ -167,5 +239,17 @@ export function normalizeReasoningEffort(
   effort: ReasoningEffort
 ): ReasoningEffort {
   const supported = getSupportedReasoningEfforts(provider, model);
-  return supported.includes(effort) ? effort : 'default';
+  if (supported.includes(effort)) {
+    return effort;
+  }
+  // Preserve the intent of values saved by versions that collapsed official
+  // none/minimal into "off" and xhigh into "max".
+  if (effort === 'off') {
+    if (supported.includes('none')) return 'none';
+    if (supported.includes('minimal')) return 'minimal';
+  }
+  if (effort === 'max' && supported.includes('xhigh')) {
+    return 'xhigh';
+  }
+  return 'default';
 }

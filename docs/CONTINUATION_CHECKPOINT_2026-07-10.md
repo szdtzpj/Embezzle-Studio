@@ -1,0 +1,205 @@
+# Embezzle Studio continuation checkpoint — 2026-07-10
+
+This file is the authoritative handoff for the interrupted audit/fix session. The working tree is intentionally dirty and contains the implementation; do not reset, discard, or recreate it.
+
+## Original objective
+
+Continue the deep, end-to-end audit of the entire Embezzle Studio application. Read the official OpenAI, Volcengine Ark, and Alibaba Bailian documentation carefully; verify model routing, request bodies, reasoning controls, task capabilities, storage, UI state, media handling, security, Web/Android builds, and the release/update chain. Correct errors and risks, and continue until the real external/manual boundary.
+
+## Continuation completion — current authoritative state
+
+The continuation reached the locally provable boundary on 2026-07-10. The historical interruption/evidence/action sections later in this file are retained for traceability, but this section supersedes their stale status.
+
+### Closed implementation and audit items
+
+- `stage-release-for-pages.mjs` now selects only `Embezzle-Studio-${tag}-release.apk`, binds it to its same-name `.sha256` or the exact filename entry in `SHA256SUMS`, and enforces 256 MiB APK / 64 KiB checksum limits from both `Content-Length` and streamed bytes.
+- `release.html` and the Pages APK are written only after the actual APK SHA-256 matches. The page escapes release text, encodes the APK as one URL path segment, displays version/size/full digest, and states that checksum equality is not production-signature verification. Valid manifests point to `release.html`; 404/missing/untrusted assets remain `apk: null` and remove stale managed outputs.
+- Incremental current-doc review added native GPT-5.6 `max` effort without collapsing it to `xhigh`, and explicitly rejects the nonexistent `gpt-5.6-pro` slug as a Responses-only Pro model. Existing GPT-5 through GPT-5.5/o-series matrices remain covered.
+- Ark protocol detection now requires the explicit Ark provider kind or an exact official data-plane hostname. Display names and lookalike hostnames cannot suppress normal `/models` discovery or activate Ark-only request parameters.
+- Android CI now uses `aapt` on the unsigned artifact to enforce package/version/minSdk/targetSdk and reject overlay/camera/microphone permissions before signing. All 15 official GitHub Action uses are pinned to verified full commit SHAs.
+- README/product/roadmap documentation now matches Web tab-session API keys, IndexedDB/native attachment lifecycles, capability-gated image/video/file UI, Bailian video bounds, the public checksum page, and the production release boundary.
+
+### Current local evidence
+
+- `npm.cmd run check`: passed — 12 test files, 183 tests; TypeScript and ESLint zero errors/warnings.
+- Release stager/update checker focus: 26/26 tests passed. A real unauthenticated latest-Release 404 smoke wrote schema 1/version 1.0.4/`apk: null` and no `release.html` or `downloads/` directory.
+- `npm.cmd run build:web`: passed — 3185 modules, 6.9 MB main bundle. `npx.cmd expo-doctor`: 20/20.
+- Exported Web artifact browser smoke passed at the normal desktop viewport and 390×844: chat, settings, return navigation, history dialog, Web key notice, and update 404 state were visible/operable; final browser console warning/error list was empty.
+- `git diff --check` passed for tracked changes and an additional no-index check passed for all 22 untracked files. All 3 workflow YAML files parsed, all 8 embedded Bash blocks passed Git Bash `bash -n`, and all 15 official Action uses passed full-SHA validation.
+- `npm audit --omit=dev --audit-level=high` exited 0. The remaining 11 moderate `uuid -> xcode -> @expo/config-plugins` advisories require a breaking Expo downgrade/change from `npm audit fix --force`, so no blind force-fix was applied.
+- A guarded clean Expo Android prebuild and `gradlew clean assembleRelease --no-daemon` completed with `NODE_ENV=production`; the complete Git status entry set was unchanged before and after native generation/build. The prebuild guard backup is `C:\Users\555\AppData\Local\Temp\EmbezzleStudio-prebuild-20260710-082014`.
+- Final local APK: `android/app/build/outputs/apk/release/app-release.apk`, written `2026-07-10 08:29:46 +08:00`, later than the final `updateChecker.ts` edit.
+  - package `com.szdtzpj.embezzlestudio`; version `1.0.4`; versionCode `4`; minSdk `24`; targetSdk `36`
+  - size `92,978,921` bytes
+  - SHA-256 `F2DA1AAEE90146D30F53534E1213B50410180FA2D227E83E62FB02A4E840D42E`
+  - permissions: INTERNET, legacy read/write storage with maxSdk 32, VIBRATE, biometric/fingerprint, and the app-scoped dynamic receiver permission; no SYSTEM_ALERT_WINDOW, CAMERA, or RECORD_AUDIO
+  - `apksigner` verifies APK Signature Scheme v2; `zipalign -c -P 16 -v 4` succeeds
+  - signer is intentionally local-only `CN=Android Debug`; certificate SHA-256 `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c`. This artifact must not be published as the production release.
+- Final status/diff scope, untracked sizes, common secret patterns, and keystore/private-key file extensions were inspected; no generated source artifact or secret material was found. No push, tag, Release, secret configuration, or remote protection change was performed.
+
+### Not locally verified
+
+- `adb devices -l` is empty. Android install, launch, permission prompts, sharing/export, attachment picker, back handling, update-link handoff, and upgrade/uninstall behavior remain unverified on a real device/emulator.
+- No real OpenAI, Volcengine Ark, or Alibaba Bailian account/key was used. Live entitlement, billing, provider-side model availability, long-running generation, media upload, and error-shape smoke remain unverified.
+- Browser verification is complete for the exported Web artifact; there is no remaining “browser unavailable” gap.
+- Production signing and the public GitHub Release/Pages chain cannot be proved until the user supplies the protected GitHub environment, stable signing identity, remote protections, tag/Release, and real published assets.
+
+## Historical interruption point (resolved)
+
+The four items in this section describe the state at the original interruption; all were closed by the continuation evidence above.
+
+The last edit extended `src/services/updateChecker.ts` so update URLs may come only from this repository's exact `github.com` release paths or `https://szdtzpj.github.io/Embezzle-Studio/...` Pages paths. It also added a Pages-path test.
+
+That change is **not yet fully closed**:
+
+1. `scripts/stage-release-for-pages.mjs` still writes `releaseUrl: publicBaseUrl`; it does **not** yet generate the planned `release.html` page containing the verified APK link, SHA-256, size, version, and escaped release notes.
+2. The latest update-checker test changes have not been rerun.
+3. The current APK was built at 07:50, before the update-checker Pages-path edit at 07:54, so it must be rebuilt once more.
+4. README/product/roadmap docs still need a final consistency pass for Web session-only API keys, IndexedDB attachments, image/video/file attachment support, the public release page, and the final verification state.
+
+Start with the release page/stager closure; do not begin by re-auditing completed provider matrices from scratch.
+
+## Implemented work
+
+### Provider protocols
+
+- OpenAI:
+  - Chat Completions is the normal path.
+  - official `api.openai.com` Responses-only Pro models route to `/responses` without streaming/sampling fields;
+  - Responses requests set `store: false` and Pro gets a 10-minute abortable timeout;
+  - official GPT reasoning matrices distinguish `none`, `minimal`, `xhigh`, and Pro restrictions;
+  - GPT Image uses `output_format`, while DALL-E requests `b64_json` for durable storage;
+  - official OpenAI file input now serializes `file` for Chat Completions and `input_file` for Responses, only when the model explicitly has `file-input`; compatible relays are rejected before fetch.
+- Volcengine Ark:
+  - uses a local official versioned catalog (26 IDs) and never assumes an undocumented bearer `GET /models`;
+  - supports manual Model ID/Endpoint ID;
+  - correct `thinking` and `reasoning_effort` mappings, including current GLM/DeepSeek matrices;
+  - custom profiles pointed at the official Ark host use the same protocol;
+  - Seedance task submission/query, image/video references, terminal expired/cancelled handling.
+- Alibaba Bailian:
+  - distinguishes mixed-thinking and thinking-only Qwen/QwQ/QVQ/DeepSeek/GLM families;
+  - no invented off/budget values for thinking-only models;
+  - GLM effort mapping fixed;
+  - `temperature=2` and `top_p=0` are normalized to Bailian-valid `1.99` and `0.01` at the final wire boundary;
+  - inline video Data URL is rejected before Base64 materialization when it would exceed 10 MiB; public URL remains supported.
+
+### App state and storage
+
+- Abort/stop lifecycle, throttled streaming UI, preservation of streamed partials.
+- Context building uses a token/context-aware helper rather than a fixed last-12 slice.
+- Persistence is versioned, serialized, backed up, corruption-recoverable, and fail-closed on native SecureStore failure.
+- A workspace load failure now enters persistent read-only mode; mutations are guarded and a durable error banner is shown.
+- Historical messages with a deleted explicit `providerId` no longer fall back to the active provider.
+- Regenerate/edit-rerun restores the original branch on request failure/cancel; removed attachments are queued only after success. Explicit destructive branch operations confirm first.
+- Web API keys migrate out of persistent AsyncStorage/localStorage and are kept only in the current tab session; Android uses SecureStore.
+- Native attachments use app-owned document storage. Web attachments use IndexedDB Blob storage and short-lived `blob:` preview URLs rather than embedding Base64 in the workspace JSON.
+- Physical deletion is committed only after a successful workspace snapshot no longer references the attachment. Uncommitted picker failures are reclaimed immediately.
+- Generated images/videos are copied to durable storage when possible; temporary provider URLs surface an expiry/export warning.
+- `expo-sharing` is installed so local Android media/files use the system export/share sheet rather than unreliable direct `file://` opening.
+
+### UI/product behavior
+
+- Clipboard works on native/Web; auto-scroll respects users reading older content; Android back closes overlays.
+- Per-model task and capability overrides persist.
+- Image/video/file attachment entries are capability-gated; file input is additionally restricted to official OpenAI.
+- Embedding/rerank models can be inspected but the chat composer is explicitly disabled until a dedicated workflow exists.
+- Sampling controls are shown only for chat tasks and warn that active reasoning suppresses unsupported sampling parameters.
+- Core icon controls and the custom parameter slider received accessibility labels/value/actions.
+- Update UI opens a trusted release page rather than pretending to verify/install a direct APK itself.
+
+### Security and release
+
+- Base URLs require HTTPS except loopback; response sizes, timeouts, aborts, model-list bounds, and SSE parsing were hardened.
+- Development proxy strips dangerous headers and now trusts only the exact Expo Web origin (default port 8081 or the explicit `--port` propagated by `start-web.mjs`), rather than every localhost port.
+- App version is `1.0.4`, Android `versionCode` is `4` in `app.json`, `package.json`, `package-lock.json`, and `src/data/appInfo.ts`.
+- `android.permission.SYSTEM_ALERT_WINDOW`, CAMERA, and RECORD_AUDIO are blocked/absent from the built APK.
+- Android workflow builds unsigned, signs only inside protected `android-release`, rejects missing secrets/debug cert/wrong fingerprint, verifies zipalign/apksigner, publishes SHA and signing report, accepts only stable releases/tags reachable from `origin/main`, enforces increasing versionCode, and refuses to overwrite existing release assets.
+- Pages write/id-token permissions are scoped only to the deploy job.
+
+## Historical evidence before continuation
+
+- `npm.cmd run check`: passed after OpenAI file support — 11 test files, 163 tests, TypeScript and ESLint zero warnings. This was **before** the final Pages URL test edit, so rerun it.
+- `npm.cmd run build:web`: passed earlier — 3185 modules, 6.9 MB main Web bundle. This was before some later edits, so rerun it.
+- `npx.cmd expo-doctor`: 20/20 earlier. Rerun after all dependency/config changes.
+- clean Expo Android prebuild: passed.
+- Android Release build: passed after native cache cleanup.
+- Built artifact (now stale only with respect to the final update-checker edit):
+  - package: `com.szdtzpj.embezzlestudio`
+  - version: `1.0.4`, versionCode `4`
+  - minSdk `24`, targetSdk `36`
+  - size `92,978,685` bytes
+  - SHA-256 `56DFC46C1A823A9C6C1F8C85367F335AF54976A4EEA50534138F8825E15B2AFB`
+  - permissions contain INTERNET, legacy storage maxSdk32, VIBRATE, biometric/fingerprint; no overlay/camera/microphone.
+  - local Release uses Android Debug cert by generated local config. This is only a build-validation artifact; CI intentionally removes debug signing and applies the protected production key.
+- GitHub workflow YAML parses, and every Android embedded Bash block passes `bash -n`.
+- `npm audit --omit=dev --audit-level=high` exits 0. There are 11 moderate transitive `uuid -> xcode -> @expo/config-plugins` advisories; `npm audit fix --force` proposes incompatible/breaking Expo package changes and must not be applied blindly.
+- No Android device is connected (`adb devices` empty), so install/runtime smoke remains unexecuted.
+- In-app browser automation was unavailable in the prior session, so visual click/screenshot regression remains unexecuted; do not claim it passed.
+
+## Historical next actions (completed locally)
+
+1. Finish `scripts/stage-release-for-pages.mjs`:
+   - generate `dist/release.html` only after APK bytes match the published `.sha256`;
+   - use escaped text for release name/body and URL-safe APK link;
+   - show version, size, full SHA-256, and a clear download button;
+   - set manifest `releaseUrl` to `${publicBaseUrl}/release.html` for a valid release;
+   - keep fail-closed `apk: null` behavior when release/assets/checksum are absent.
+2. Add or adjust tests for the stager/update URL pinning if practical; at minimum run the script against its 404/fail-closed path in a temporary output directory and inspect JSON/HTML.
+3. Update README and docs for the current behavior and release workflow. Remove the stale statement that local video upload has no UI.
+4. Run:
+   - `npm.cmd run check`
+   - `npm.cmd run build:web`
+   - `npx.cmd expo-doctor`
+   - `git diff --check`
+   - YAML parse and embedded `bash -n` checks again.
+5. Run clean Android prebuild and `assembleRelease` with:
+   - `NODE_ENV=production`
+   - `ANDROID_HOME=C:\Users\555\AppData\Local\Android\Sdk`
+6. Inspect the final APK with latest Android build-tools `aapt.exe` and `apksigner.bat`; confirm version 1.0.4/code4 and absence of overlay/camera/microphone.
+7. Review `git status`/diff for accidental generated artifacts or secret material. Do not push, tag, create a Release, or configure secrets without explicit user authorization.
+
+## External/manual release boundary
+
+These are not locally solvable without the user's GitHub/security choices:
+
+- Create GitHub Environment `android-release`, restrict its deployment branch policy to `main`, and decide the repository-plan boundary explicitly. [GitHub's environment limits](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) make required reviewers public-only on Free/Pro/Team; private Environment secrets and deployment branch/tag restrictions need at least Pro/Team. Keeping this personal repository private without Enterprise therefore means either accepting a no-reviewer downgrade after auditing all write collaborators (on Pro/Team), upgrading/migrating, or changing visibility as a separate user decision.
+- Configure and offline-back up the five production secrets:
+  - `ANDROID_KEYSTORE_BASE64`
+  - `ANDROID_KEY_ALIAS`
+  - `ANDROID_KEYSTORE_PASSWORD`
+  - `ANDROID_KEY_PASSWORD`
+  - `ANDROID_SIGNING_CERT_SHA256`
+- Add `main` branch protection/required Quality check and tag/ruleset protection.
+- The existing `v1.0.3` APK is debug-signed; the first production-signed release cannot update over it without uninstall/data migration.
+- Run representative real-device and real-provider-account smoke tests before calling the production release complete.
+
+## Official references already used
+
+- OpenAI Chat Completions: https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+- OpenAI reasoning: https://developers.openai.com/api/docs/guides/reasoning
+- OpenAI Responses migration: https://developers.openai.com/api/docs/guides/migrate-to-responses
+- OpenAI latest-model parameters: https://developers.openai.com/api/docs/guides/latest-model
+- OpenAI image generation: https://developers.openai.com/api/reference/resources/images/methods/generate
+- OpenAI vision/files: https://developers.openai.com/api/docs/guides/images-vision
+- Ark auth/base URL: https://www.volcengine.com/docs/82379/1298459?lang=zh
+- Ark chat: https://www.volcengine.com/docs/82379/1494384?lang=zh
+- Ark thinking: https://www.volcengine.com/docs/82379/1449737?lang=zh
+- Ark create/query video: https://www.volcengine.com/docs/82379/1520757?lang=zh and https://www.volcengine.com/docs/82379/1521309?lang=zh
+- Bailian compatible chat: https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions
+- Bailian deep thinking: https://help.aliyun.com/zh/model-studio/deep-thinking/
+- Bailian visual reasoning: https://help.aliyun.com/zh/model-studio/visual-reasoning
+- Bailian GLM/DeepSeek: https://help.aliyun.com/zh/model-studio/glm and https://help.aliyun.com/zh/model-studio/deepseek-api
+
+## Historical continuation prompt (no longer current)
+
+The prompt below is retained only to explain how this continuation was started; do not use it as the current status.
+
+```text
+请继续处理 C:\Python_project\EmbezzleStudio。上一次任务被中断，工作树中有大量尚未提交但属于本任务的修改，绝对不要 reset、checkout 或覆盖它们。
+
+先完整阅读 docs/CONTINUATION_CHECKPOINT_2026-07-10.md，并以当前工作树为权威状态。原目标不变：继续对整个 Embezzle Studio 做端到端深度审计和修复，严格核对 OpenAI、火山方舟、阿里百炼官方文档中的模型路由、请求结构、思考强度和参数，不要只做表面检查，也不要重复重做已经完成且有测试证据的部分。
+
+从断点的第一项开始：完成 scripts/stage-release-for-pages.mjs 的可信 release.html 下载页与 manifest releaseUrl 闭环，然后更新文档，跑全量 check、Web export、Expo Doctor、diff/YAML/Bash 检查，再干净 prebuild 并重建 Android 1.0.4 Release，使用 aapt/apksigner 复核版本、权限和签名。当前 APK 比最后的 updateChecker 修改早几分钟，不能当最终产物。
+
+请持续执行到真正的外部/人工边界；不要未经我授权 push、tag、创建 GitHub Release、配置生产密钥或改远端保护规则。最终必须明确区分：已由本机证据验证、尚无设备/浏览器所以未验证、以及需要我在 GitHub/真机/真实服务商账号上完成的事项。
+```

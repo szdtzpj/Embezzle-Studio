@@ -1,5 +1,5 @@
 import type { ModelInfo, ProviderProfile } from '../domain/types';
-import { isVolcengineArkProvider } from '../data/arkModels';
+import { arkPresetModels, isVolcengineArkProvider } from '../data/arkModels';
 import { fetchOpenAiCompatibleModels } from './openAiCompatible';
 
 interface ModelDiscoveryResult {
@@ -7,17 +7,42 @@ interface ModelDiscoveryResult {
   notice: string;
 }
 
-export async function refreshProviderModels(provider: ProviderProfile): Promise<ModelDiscoveryResult> {
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) {
+    return;
+  }
+
+  const error = new Error('模型列表刷新已取消。');
+  error.name = 'AbortError';
+  throw error;
+}
+
+function arkCatalogCandidates(): ModelInfo[] {
+  return arkPresetModels.map((model) => ({
+    ...model,
+    capabilities: [...model.capabilities],
+    // The existing model picker treats remote entries as addable candidates.
+    // The notice below makes clear that these came from the public catalog and
+    // were not discovered from the current account.
+    source: 'remote',
+  }));
+}
+
+export async function refreshProviderModels(
+  provider: ProviderProfile,
+  signal?: AbortSignal
+): Promise<ModelDiscoveryResult> {
   if (isVolcengineArkProvider(provider)) {
-    const remoteModels = await fetchOpenAiCompatibleModels(provider);
+    throwIfAborted(signal);
+    const models = arkCatalogCandidates();
 
     return {
-      models: remoteModels,
-      notice: `已从火山方舟获取 ${remoteModels.length} 个可添加模型。`,
+      models,
+      notice: `已载入火山方舟官方模型目录中的 ${models.length} 个候选；目录不会校验当前账号权限，Endpoint ID 请手动添加。`,
     };
   }
 
-  const models = await fetchOpenAiCompatibleModels(provider);
+  const models = await fetchOpenAiCompatibleModels(provider, signal);
 
   return {
     models,

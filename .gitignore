@@ -6,6 +6,7 @@ ios/
 dist/
 build/
 web-build/
+coverage/
 
 .expo-web.*.log
 npm-debug.log*
@@ -19,3 +20,11 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Signing keys and certificates must never enter the repository.
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key

@@ -1,19 +1,22 @@
 {
   "name": "embezzlestudio",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "main": "index.ts",
   "dependencies": {
     "@lobehub/icons-rn": "^2.8.1",
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~57.0.4",
     "expo-blur": "~57.0.0",
+    "expo-clipboard": "~57.0.0",
     "expo-document-picker": "~57.0.0",
     "expo-file-system": "~57.0.0",
     "expo-haptics": "~57.0.0",
     "expo-image-picker": "~57.0.2",
     "expo-linear-gradient": "^57.0.0",
     "expo-secure-store": "~57.0.0",
+    "expo-sharing": "~57.0.3",
     "expo-status-bar": "~57.0.0",
+    "expo-system-ui": "~57.0.0",
     "lucide-react-native": "^1.23.0",
     "moti": "^0.30.0",
     "react": "19.2.3",
@@ -23,11 +26,17 @@
     "react-native-reanimated": "4.5.0",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-svg": "15.15.4",
-    "react-native-web": "^0.21.2"
+    "react-native-web": "^0.21.2",
+    "react-native-worklets": "0.10.0"
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
-    "typescript": "~6.0.3"
+    "@vitest/coverage-v8": "^4.1.10",
+    "eslint": "^9.39.4",
+    "eslint-config-expo": "^57.0.0",
+    "fake-indexeddb": "^6.2.4",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.10"
   },
   "scripts": {
     "start": "expo start",
@@ -37,7 +46,11 @@
     "web:expo": "expo start --web",
     "web:proxy": "node scripts/dev-proxy.mjs",
     "build:web": "expo export --platform web --output-dir dist",
-    "typecheck": "node --stack_size=16384 ./node_modules/typescript/lib/tsc.js --noEmit"
+    "typecheck": "node --stack_size=16384 ./node_modules/typescript/lib/tsc.js --noEmit",
+    "lint": "eslint . --max-warnings=0",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "check": "npm run typecheck && npm run lint && npm run test"
   },
   "private": true
 }
