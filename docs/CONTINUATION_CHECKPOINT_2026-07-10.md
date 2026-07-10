@@ -188,6 +188,19 @@ These are the remaining user/security boundaries after the remote work above:
 - The existing `v1.0.3` APK is debug-signed; the first production-signed release cannot update over it without uninstall/data migration.
 - Run representative real-device and real-provider-account smoke tests before calling the production release complete.
 
+## Live-provider and GitHub continuation evidence
+
+- `api_key.txt` is now explicitly ignored by Git. The three supplied credentials were read only from that local ignored file; no key value was printed, staged, committed, placed in a command argument, or copied into a build/Release artifact.
+- Low-cost live discovery and text smoke tests completed on 2026-07-10:
+  - Volcengine Ark: compatibility `GET /api/v3/models` returned HTTP 200 with 129 raw entries; `doubao-seed-2-0-lite-260428` Chat returned HTTP 200 and non-empty text.
+  - Alibaba Bailian: `GET /compatible-mode/v1/models` returned HTTP 200 with 224 entries; `qwen-turbo` Chat returned HTTP 200 and non-empty text. `MiniMax/MiniMax-M3` also accepted the documented `thinking: { type: "disabled" }` request. `kimi/kimi-k2.6` returned a sanitized HTTP 400 `invalid_parameter_error` stating that the product is not activated, so Kimi live inference remains an account boundary rather than a claimed success.
+  - The supplied third-party OpenAI-compatible host returned HTML at its root and valid JSON only under `/v1`; the app's existing root normalization matches that behavior. `/v1/models` returned 41 entries and `cc-Doubao-seed-2.0-lite` Chat returned HTTP 200 and non-empty text.
+- The observed Ark `/models` response is useful but is **not** listed in the official Ark data-plane API reference. Discovery now probes it only on the exact official Ark host, filters shutdown and unsupported task metadata, labels retiring entries, and falls back to curated candidates maintained from the official model catalog. A `volcengine-ark` profile pointed at any other host never sends its API key during automatic discovery.
+- Ark metadata no longer routes 3D, pure speech-to-text, audio-output, unknown structured tasks, pure image-editing, or conflicting tasks into Chat. Manual and remote generation models expose only adapters the app actually implements. Ark reference-video generation and custom-kind profiles on the exact official host use the same protocol; Ark Chat video understanding remains intentionally unavailable until a dedicated input/upload adapter exists.
+- Bailian thinking and sampling now distinguish Qwen, DeepSeek, GLM, Kimi, MiniMax, and Stepfun families. `default` remains wire-neutral; MiniMax M3 uses its native thinking object; budget presets are labelled as 1K/4K/8K/16K token caps; namespaced fixed-parameter suppliers hide their controls; and UI ranges/fields share the serializer's constraints.
+- Current source validation after these fixes: `npm.cmd run check` passed 12 files / 231 tests, `npm.cmd run build:web` passed (3179 modules, 6.9 MB main bundle), Expo Doctor passed 20/20, all 3 workflow YAML files parsed, all 34 embedded Bash blocks passed `bash -n`, all 15 Action uses remained GitHub-owned full SHAs, and `git diff --check` passed.
+- GitHub now has immutable test prerelease [`v1.0.4-debug.1`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.0.4-debug.1) from main SHA `54f7ef75b924aeec072befe761734a37bc9be5b5`. Its debug-signed APK is 92,979,061 bytes with SHA-256 `945031c481475da160267e2c56a7738dc609d2930ef69136e198392efda1e211`; the release also contains the matching checksum and apksigner report. Stable Latest remains v1.0.3. Because this prerelease predates the provider fixes above, it is an intermediate test artifact and must be superseded by a new debug prerelease built from the final merged main.
+
 ## Official references already used
 
 - OpenAI Chat Completions: https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
@@ -197,13 +210,17 @@ These are the remaining user/security boundaries after the remote work above:
 - OpenAI image generation: https://developers.openai.com/api/reference/resources/images/methods/generate
 - OpenAI vision/files: https://developers.openai.com/api/docs/guides/images-vision
 - Ark auth/base URL: https://www.volcengine.com/docs/82379/1298459?lang=zh
+- Ark public model catalog / OpenAI compatibility: https://www.volcengine.com/docs/82379/1330310 and https://www.volcengine.com/docs/82379/1330626
 - Ark chat: https://www.volcengine.com/docs/82379/1494384?lang=zh
 - Ark thinking: https://www.volcengine.com/docs/82379/1449737?lang=zh
+- Ark Responses / Responses thinking: https://www.volcengine.com/docs/82379/1569618 and https://www.volcengine.com/docs/82379/1956279
 - Ark create/query video: https://www.volcengine.com/docs/82379/1520757?lang=zh and https://www.volcengine.com/docs/82379/1521309?lang=zh
 - Bailian compatible chat: https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions
+- Bailian compatible Responses: https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses
 - Bailian deep thinking: https://help.aliyun.com/zh/model-studio/deep-thinking/
 - Bailian visual reasoning: https://help.aliyun.com/zh/model-studio/visual-reasoning
 - Bailian GLM/DeepSeek: https://help.aliyun.com/zh/model-studio/glm and https://help.aliyun.com/zh/model-studio/deepseek-api
+- Bailian Kimi/MiniMax/Stepfun: https://help.aliyun.com/zh/model-studio/kimi-api, https://help.aliyun.com/zh/model-studio/kimi-api-by-moonshot-ai, https://help.aliyun.com/zh/model-studio/minimax-api, https://help.aliyun.com/zh/model-studio/minimax-api-by-minimax, and https://help.aliyun.com/zh/model-studio/stepfun
 
 ## Historical continuation prompt (no longer current)
 

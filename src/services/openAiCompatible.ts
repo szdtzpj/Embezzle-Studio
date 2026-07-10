@@ -879,6 +879,11 @@ function supportsOpenAiMaxReasoning(modelId: string): boolean {
   return Boolean(match && Number(match[1] ?? '0') >= 6);
 }
 
+function isOpenAiReasoningModelId(modelId: string): boolean {
+  const text = modelText(modelId).replace(/[:/_.\s]+/g, '-');
+  return /(?:^|-)(?:o1|o3|o4)(?:$|-)/.test(text) || /(?:^|-)gpt-?5(?:$|-)/.test(text);
+}
+
 function isDeepSeekV4Model(modelId: string): boolean {
   const text = modelText(modelId);
   return text.includes('deepseek-v4');
@@ -983,6 +988,134 @@ function roundedParameter(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
+function isAlibabaHostedKimiWithSampling(modelId: string): boolean {
+  const id = modelId.trim().toLowerCase();
+  return /^kimi-k2\.(?:5|6)$/.test(id) ||
+    id === 'kimi-k2.7-code' ||
+    id === 'moonshot-kimi-k2-instruct';
+}
+
+function reasoningIsActiveForSampling(
+  provider: ProviderProfile,
+  model: ModelInfo,
+  effort: ReasoningEffort
+): boolean {
+  if (!isReasoningModel(model) || effort === 'off' || effort === 'none') {
+    return false;
+  }
+
+  if (provider.kind === 'bailian-compatible') {
+    const profile = getBailianThinkingProfile(model.id);
+    if (
+      /^minimax-m2\.(?:1|5)$/i.test(model.id.trim()) ||
+      isAlibabaHostedKimiWithSampling(model.id) ||
+      profile.mode === 'mixed'
+    ) {
+      // Bailian mixed-thinking models keep their documented sampling surface;
+      // Alibaba-hosted MiniMax and current Kimi aliases do as well.
+      return false;
+    }
+
+    if (effort === 'default') {
+      return true;
+    }
+  }
+
+  return true;
+}
+
+export function supportsEditableModelParameters(provider: ProviderProfile, modelId: string): boolean {
+  if (provider.kind !== 'bailian-compatible') {
+    return true;
+  }
+
+  const id = modelId.trim().toLowerCase();
+  if (id === 'kimi-k2-thinking' || id.startsWith('kimi/') || id.startsWith('minimax/')) {
+    return false;
+  }
+  const profile = getBailianThinkingProfile(modelId);
+  if (
+    profile.mode === 'thinking-only' &&
+    !profile.supportsThinkingBudget &&
+    !/^minimax-m2\.(?:1|5)$/i.test(modelId.trim()) &&
+    !isAlibabaHostedKimiWithSampling(modelId)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export type EditableModelParameterKey = Exclude<keyof ModelParameterSettings, 'enabled'>;
+
+export interface ModelParameterConstraint {
+  supported: boolean;
+  min: number;
+  max: number;
+}
+
+export function getModelParameterConstraint(
+  provider: ProviderProfile,
+  modelId: string,
+  key: EditableModelParameterKey
+): ModelParameterConstraint {
+  const defaults: Record<EditableModelParameterKey, { min: number; max: number }> = {
+    temperature: { min: 0, max: 2 },
+    topP: { min: 0, max: 1 },
+    presencePenalty: { min: -2, max: 2 },
+    frequencyPenalty: { min: -2, max: 2 },
+  };
+  const range = { ...defaults[key] };
+  if (!supportsEditableModelParameters(provider, modelId)) {
+    return { supported: false, ...range };
+  }
+
+  if (
+    isOpenAiBaseUrl(provider) &&
+    isOpenAiReasoningModelId(modelId) &&
+    (key === 'presencePenalty' || key === 'frequencyPenalty')
+  ) {
+    return { supported: false, ...range };
+  }
+
+  if (provider.kind === 'bailian-compatible') {
+    const id = modelId.trim().toLowerCase();
+    const profile = getBailianThinkingProfile(modelId);
+    if (key === 'temperature') range.max = 1.99;
+    if (key === 'topP') range.min = 0.01;
+    if (
+      (key === 'presencePenalty' || key === 'frequencyPenalty') &&
+      (id.includes('deepseek-') || id.includes('glm-'))
+    ) {
+      return { supported: false, ...range };
+    }
+    if (key === 'presencePenalty' && profile.reasoningEffortFamily === 'stepfun') {
+      return { supported: false, ...range };
+    }
+    if (key === 'frequencyPenalty' && (
+      /^minimax-m2\.(?:1|5)$/i.test(modelId.trim()) ||
+      isAlibabaHostedKimiWithSampling(modelId)
+    )) return { supported: false, ...range };
+    if (
+      key === 'frequencyPenalty' &&
+      profile.reasoningEffortFamily === 'stepfun'
+    ) {
+      range.min = 0;
+      range.max = 1;
+    }
+  }
+
+  return { supported: true, ...range };
+}
+
+export function modelParameterSettingsWillApply(
+  provider: ProviderProfile,
+  model: ModelInfo,
+  effort: ReasoningEffort
+): boolean {
+  return supportsEditableModelParameters(provider, model.id) &&
+    !reasoningIsActiveForSampling(provider, model, effort);
+}
+
 function applyModelParameterOptions(
   body: Record<string, unknown>,
   settings: ModelParameterSettings | undefined,
@@ -995,33 +1128,40 @@ function applyModelParameterOptions(
   }
 
   const reasoningModel = isReasoningModel(model);
-  if (reasoningModel && effort !== 'off' && effort !== 'none') {
+  if (reasoningIsActiveForSampling(provider, model, effort)) {
+    return;
+  }
+  if (!supportsEditableModelParameters(provider, model.id)) {
     return;
   }
 
-  // Bailian documents half-open sampling bounds: temperature must be below 2
-  // and top_p must be greater than 0. Keep the shared UI range while ensuring
-  // its two inclusive endpoints never produce a provider-side 400 response.
-  const bailian = provider.kind === 'bailian-compatible';
+  const temperatureConstraint = getModelParameterConstraint(provider, model.id, 'temperature');
+  const topPConstraint = getModelParameterConstraint(provider, model.id, 'topP');
   const temperature = roundedParameter(
-    boundedNumber(settings.temperature, 0, bailian ? 1.99 : 2)
+    boundedNumber(settings.temperature, temperatureConstraint.min, temperatureConstraint.max)
   );
   const topP = roundedParameter(
-    boundedNumber(settings.topP, bailian ? 0.01 : 0, 1)
+    boundedNumber(settings.topP, topPConstraint.min, topPConstraint.max)
   );
-  if (temperature !== 1) {
+  if (temperatureConstraint.supported && temperature !== 1) {
     body.temperature = temperature;
-  } else if (topP !== 1) {
+  } else if (topPConstraint.supported && topP !== 1) {
     body.top_p = topP;
   }
 
   // Official GPT reasoning models do not document penalty parameters even
   // when effort=none, so keep those fields off the wire.
   if (!reasoningModel || !isOpenAiBaseUrl(provider)) {
-    const presencePenalty = roundedParameter(boundedNumber(settings.presencePenalty, -2, 2));
-    const frequencyPenalty = roundedParameter(boundedNumber(settings.frequencyPenalty, -2, 2));
-    if (presencePenalty !== 0) body.presence_penalty = presencePenalty;
-    if (frequencyPenalty !== 0) body.frequency_penalty = frequencyPenalty;
+    const presenceConstraint = getModelParameterConstraint(provider, model.id, 'presencePenalty');
+    const frequencyConstraint = getModelParameterConstraint(provider, model.id, 'frequencyPenalty');
+    const presencePenalty = roundedParameter(
+      boundedNumber(settings.presencePenalty, presenceConstraint.min, presenceConstraint.max)
+    );
+    const frequencyPenalty = roundedParameter(
+      boundedNumber(settings.frequencyPenalty, frequencyConstraint.min, frequencyConstraint.max)
+    );
+    if (presenceConstraint.supported && presencePenalty !== 0) body.presence_penalty = presencePenalty;
+    if (frequencyConstraint.supported && frequencyPenalty !== 0) body.frequency_penalty = frequencyPenalty;
   }
 }
 
@@ -1057,13 +1197,21 @@ function applyReasoningOptions(
 
     if (effort === 'off') {
       if (profile.mode === 'mixed') {
-        body.enable_thinking = false;
+        if (profile.control === 'thinking-object') {
+          body.thinking = { type: 'disabled' };
+        } else {
+          body.enable_thinking = false;
+        }
       }
       return;
     }
 
     if (profile.mode === 'mixed') {
-      body.enable_thinking = true;
+      if (profile.control === 'thinking-object') {
+        body.thinking = { type: 'adaptive' };
+      } else {
+        body.enable_thinking = true;
+      }
     }
 
     const nativeEffort = bailianReasoningEffort(profile.reasoningEffortFamily, effort);
@@ -1538,7 +1686,10 @@ export function assertChatAttachmentsSupported(
     if (!isVideoInputModel(model)) {
       throw new Error(`当前模型「${model.name ?? model.id}」未标记为支持视频输入，请切换视频模型。`);
     }
-    if (provider?.kind !== 'bailian-compatible') {
+    const arkVideoGeneration = Boolean(
+      provider && isVolcengineArkProvider(provider) && inferModelTask(model) === 'video-generation'
+    );
+    if (provider?.kind !== 'bailian-compatible' && !arkVideoGeneration) {
       throw new Error('当前只在阿里百炼兼容模式中实现了 video_url 对话附件。');
     }
   }

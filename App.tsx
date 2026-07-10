@@ -68,10 +68,13 @@ import { pickFiles, pickImages, pickVideos, validateAttachments } from './src/se
 import { deletePersistedAttachments, discardUncommittedAttachments, resolveAttachmentDisplayUri } from './src/services/mediaStorage';
 import {
   assertChatAttachmentsSupported,
+  getModelParameterConstraint,
   isAbortError,
   isOfficialOpenAiProvider,
+  modelParameterSettingsWillApply,
   queryGenerationTask,
   sendOpenAiCompatibleChat,
+  supportsEditableModelParameters,
 } from './src/services/openAiCompatible';
 import { refreshProviderModels } from './src/services/modelDiscovery';
 import { buildChatTranscript } from './src/services/conversationContext';
@@ -520,6 +523,14 @@ function clampParameterValue(value: number, min: number, max: number): number {
 
 function snapParameterValue(value: number, step: number): number {
   return Math.round(value / step) * step;
+}
+
+function normalizeParameterValue(value: number, min: number, max: number, step: number): number {
+  return clampParameterValue(
+    snapParameterValue(clampParameterValue(value, min, max), step),
+    min,
+    max
+  );
 }
 
 function formatParameterValue(value: number): string {
@@ -1029,7 +1040,24 @@ export default function App() {
   const activeModel = addedModels.find((model) => model.id === activeModelId);
   const activeModelTask = activeModel ? inferModelTask(activeModel) : 'chat';
   const activeModelSupportsComposer = ['chat', 'image-generation', 'video-generation'].includes(activeModelTask);
-  const canConfigureParameters = activeModelTask === 'chat';
+  const canConfigureParameters = Boolean(
+    activeModelTask === 'chat' &&
+    activeProvider &&
+    activeModel &&
+    supportsEditableModelParameters(activeProvider, activeModel.id)
+  );
+  const activeParameterControls = useMemo(() => {
+    if (!activeProvider || !activeModel) {
+      return parameterControls;
+    }
+
+    return parameterControls.flatMap((control) => {
+      const constraint = getModelParameterConstraint(activeProvider, activeModel.id, control.key);
+      return constraint.supported
+        ? [{ ...control, min: constraint.min, max: constraint.max }]
+        : [];
+    });
+  }, [activeProvider, activeModel]);
   const canAttachImage = Boolean(activeModel?.capabilities.includes('image-input'));
   const canAttachVideo = Boolean(activeModel?.capabilities.includes('video-input'));
   const canAttachFile = Boolean(
@@ -1050,7 +1078,24 @@ export default function App() {
     ...defaultParameterSettings,
     ...(workspace.parameterSettings ?? {}),
   };
+  const effectiveParameterSettings = activeParameterControls.reduce<ModelParameterSettings>(
+    (settings, control) => ({
+      ...settings,
+      [control.key]: normalizeParameterValue(
+        settings[control.key],
+        control.min,
+        control.max,
+        control.step
+      ),
+    }),
+    { ...parameterSettings }
+  );
   const parametersActive = parameterSettings.enabled;
+  const activeParameterSettingsWillApply = Boolean(
+    activeProvider &&
+    activeModel &&
+    modelParameterSettingsWillApply(activeProvider, activeModel, activeReasoningEffort)
+  );
   useEffect(() => {
     if (!canConfigureParameters) {
       setParameterMenuOpen(false);
@@ -1232,15 +1277,12 @@ export default function App() {
   }
 
   function updateParameterValue(key: ParameterKey, value: number) {
-    const control = parameterControls.find((item) => item.key === key);
+    const control = activeParameterControls.find((item) => item.key === key);
     if (!control) {
       return;
     }
 
-    const nextValue = snapParameterValue(
-      clampParameterValue(value, control.min, control.max),
-      control.step
-    );
+    const nextValue = normalizeParameterValue(value, control.min, control.max, control.step);
     const patch: Partial<ModelParameterSettings> = { [key]: nextValue };
     // OpenAI recommends changing temperature or top_p, not both. Keeping the
     // other sampler at its neutral value also avoids incompatible combinations
@@ -2535,7 +2577,7 @@ export default function App() {
       setNotice('当前图片生成适配器只支持文本生图，请先移除参考图。');
       return;
     }
-    if (activeModelTask === 'video-generation' && activeProvider.kind !== 'volcengine-ark') {
+    if (activeModelTask === 'video-generation' && !isVolcengineArkProvider(activeProvider)) {
       setNotice('当前只适配了火山方舟的视频生成任务接口。');
       return;
     }
@@ -3274,7 +3316,7 @@ export default function App() {
                           <AnimatedPressable
                             key={option.key}
                             accessibilityRole="button"
-                            accessibilityLabel={`思考强度：${option.label}`}
+                            accessibilityLabel={`思考设置：${option.label}`}
                             testID={`reasoning-effort-${option.key}`}
                             onPress={() => {
                               setActiveReasoningEffort(option.key);
@@ -3354,7 +3396,7 @@ export default function App() {
                         <View style={styles.toolMenuTitleBlock}>
                           <Text style={styles.toolMenuTitle}>参数调整</Text>
                           <Text numberOfLines={1} style={styles.toolMenuSubtitle}>
-                            {parameterRuntimeSummary(parameterSettings)}
+                            {parameterRuntimeSummary(effectiveParameterSettings)}
                           </Text>
                         </View>
                       </View>
@@ -3384,20 +3426,20 @@ export default function App() {
                         <Text style={styles.toolMenuHint}>
                           关闭时不发送采样参数，交给服务商默认值处理。
                         </Text>
-                        {!['default', 'off', 'none'].includes(activeReasoningEffort) ? (
+                        {parametersActive && !activeParameterSettingsWillApply ? (
                           <Text style={styles.toolMenuHint}>
-                            当前已启用思考模式；为遵循模型协议，本次请求会忽略采样与惩罚参数。
+                            当前模型的思考模式会优先；本次请求不会发送采样与惩罚参数。
                           </Text>
                         ) : null}
                       </View>
 
                       {parametersActive ? (
                         <>
-                          {parameterControls.map((control) => (
+                          {activeParameterControls.map((control) => (
                             <ParameterControl
-                              key={control.key}
+                              key={`${control.key}:${control.min}:${control.max}`}
                               control={control}
-                              value={parameterSettings[control.key]}
+                              value={effectiveParameterSettings[control.key]}
                               onChange={(value) => updateParameterValue(control.key, value)}
                             />
                           ))}
@@ -3441,7 +3483,7 @@ export default function App() {
                       {canConfigureReasoning ? (
                         <AnimatedPressable
                           accessibilityRole="button"
-                          accessibilityLabel="设置思考强度"
+                          accessibilityLabel="设置思考参数"
                           accessibilityState={{ expanded: reasoningMenuOpen }}
                           onPress={() => {
                             setAttachMenuOpen(false);
@@ -4247,7 +4289,7 @@ function ParameterSlider({
     if (!width) return;
     const ratio = Math.max(0, Math.min(1, locationX / width));
     const raw = min + ratio * (max - min);
-    const next = snapParameterValue(clampParameterValue(raw, min, max), step);
+    const next = normalizeParameterValue(raw, min, max, step);
     if (next !== currentValue.current) {
       onChange(next);
     }
@@ -4268,7 +4310,7 @@ function ParameterSlider({
 
   const thumbPosition = ((value - min) / (max - min)) * 100;
   const adjust = (direction: 1 | -1) => {
-    onChange(snapParameterValue(clampParameterValue(value + direction * step, min, max), step));
+    onChange(normalizeParameterValue(value + direction * step, min, max, step));
   };
 
   return (

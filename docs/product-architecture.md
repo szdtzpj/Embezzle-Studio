@@ -9,7 +9,7 @@ Embezzle Studio is a personal Android AI client for people who already own multi
 - Provider first: every model belongs to a provider profile with its own base URL, API key, and adapter type.
 - Capability aware: provider metadata and maintained model tables provide defaults; users can explicitly override model task and multimodal/reasoning/tool capabilities when inference is wrong.
 - OpenAI-compatible by default: Volcengine Ark, Bailian compatible mode, New API, One API, and self-hosted relays can share one adapter when they expose `/models` and `/chat/completions`.
-- Discovery is provider-specific: OpenAI-compatible providers may use `GET /models`; Volcengine Ark uses the maintained official public catalog because its data-plane `GET /models` is not a documented contract. Ark account-specific Endpoint IDs remain manual unless a trusted backend later implements AK/HMAC `ListEndpoints`.
+- Discovery is provider-specific: OpenAI-compatible providers may use `GET /models`; Volcengine Ark may best-effort probe the undocumented compatibility response only on an exact official data-plane host, then falls back to curated candidates maintained from the official public catalog. Ark account-specific Endpoint IDs remain manual unless a trusted backend later implements AK/HMAC control-plane discovery.
 - Provider-specific when needed: Doubao video input and other non-standard media flows should be adapter modules, not conditionals scattered across the UI.
 - Secrets stay local and platform-scoped: Android requires SecureStore and fails closed if it is unavailable; Web keeps API keys only in the current tab's `sessionStorage` (or memory as a fail-safe), removes legacy persistent values, and never includes keys in workspace snapshots.
 - Mobile constraints are real: remote MCP transports are first-class; local stdio MCP is not part of the first mobile milestone because Android process and binary management would make the first version brittle.
@@ -24,7 +24,7 @@ Embezzle Studio is a personal Android AI client for people who already own multi
    - Candidate model list with explicit add-to-provider action.
    - Manual provider and model entry for relays that disable model-list APIs.
    - Chat-time model switching among added models.
-   - Volcengine Ark official catalog candidates; account Endpoint IDs can be added manually.
+   - Volcengine Ark compatibility-probe results with shutdown/unsupported tasks filtered, plus curated catalog fallback candidates; account Endpoint IDs can be added manually.
 
 2. Chat
    - Persistent multi-conversation chat surface with search, branching edits/regeneration, stop, copy, share, rename, pin, and deletion flows.
@@ -92,7 +92,7 @@ Local stdio MCP is deferred. It requires packaging executables, sandboxing them,
 
 Model capability checks live behind module seams: `src/services/modelCapabilities.ts` resolves model tasks and capabilities, while `src/services/reasoningEfforts.ts` resolves provider/model-specific thinking levels. Callers should ask predicates such as `isVisionModel`, `isWebSearchModel`, `isToolCallingModel`, `inferModelTask`, and `getReasoningEffortOptions` instead of doing local string matching.
 
-Discovery enriches documented remote model IDs through local metadata/rules. Ark instead uses a versioned public-catalog snapshot. Provider-level capabilities describe transport support and are not copied onto each model. Explicit user overrides win over inferred capabilities and survive reloads. Health checks verify availability only; they do not claim that hosted tools such as web search are implemented by the current adapter.
+Discovery enriches remote model IDs through local metadata/rules. Ark treats its observed `/models` response as a non-contractual compatibility hint, validates its task/modality/status metadata against adapters the app actually implements, and falls back to a versioned curated catalog snapshot. Provider-level capabilities describe transport support and are not copied onto each model. Explicit user overrides win over inferred capabilities and survive reloads. Health checks verify availability only; they do not claim that hosted tools such as web search are implemented by the current adapter.
 
 ## Data Model
 

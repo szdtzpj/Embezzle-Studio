@@ -10,9 +10,15 @@ import {
 } from '../src/services/modelCapabilities';
 import {
   fetchOpenAiCompatibleModels,
+  getModelParameterConstraint,
+  modelParameterSettingsWillApply,
   sendOpenAiCompatibleChat,
+  supportsEditableModelParameters,
 } from '../src/services/openAiCompatible';
-import { getSupportedReasoningEfforts } from '../src/services/reasoningEfforts';
+import {
+  getReasoningEffortOptions,
+  getSupportedReasoningEfforts,
+} from '../src/services/reasoningEfforts';
 
 const platform = vi.hoisted(() => ({ OS: 'android' }));
 const fileSystemState = vi.hoisted(() => ({
@@ -108,7 +114,18 @@ afterEach(() => {
 });
 
 describe('Bailian official thinking capability matrix', () => {
-  it.each(['qwq-plus', 'qvq-max', 'qvq-plus', 'deepseek-r1', 'deepseek-r1-0528'])(
+  it.each([
+    'qwq-plus',
+    'qvq-max',
+    'qvq-plus',
+    'deepseek-r1',
+    'deepseek-r1-0528',
+    'kimi-k2.7-code',
+    'kimi-k2-thinking',
+    'kimi/kimi-k2.7-code-highspeed',
+    'MiniMax-M2.5',
+    'MiniMax/MiniMax-M2.7',
+  ])(
     'treats %s as thinking-only without an off or invented budget option',
     (modelId) => {
       const requestModel = model(modelId);
@@ -159,9 +176,106 @@ describe('Bailian official thinking capability matrix', () => {
       expect(getSupportedReasoningEfforts(provider, model(modelId))).toEqual(expected);
     }
   );
+
+  it.each(['qwen-plus', 'qwen-plus-latest', 'qwen-flash', 'qwen-flash-latest'])(
+    'recognizes the current %s alias as mixed thinking with a server-default off mode',
+    (modelId) => {
+      expect(getBailianThinkingProfile(modelId)).toMatchObject({
+        mode: 'mixed',
+        defaultEnabled: false,
+        supportsThinkingBudget: true,
+      });
+    }
+  );
+
+  it('distinguishes Alibaba-hosted and Moonshot-hosted Kimi thinking controls', () => {
+    expect(getBailianThinkingProfile('kimi-k2.6')).toMatchObject({
+      mode: 'mixed',
+      defaultEnabled: false,
+      supportsThinkingBudget: true,
+    });
+    expect(getBailianThinkingProfile('kimi/kimi-k2.6')).toMatchObject({
+      mode: 'mixed',
+      supportsThinkingBudget: false,
+    });
+    expect(getBailianThinkingProfile('kimi/kimi-k2.6').defaultEnabled).toBeUndefined();
+    expect(getSupportedReasoningEfforts(provider, model('kimi/kimi-k2.6'))).toEqual([
+      'default',
+      'off',
+      'high',
+    ]);
+  });
+
+  it('uses MiniMax and Stepfun provider-native thinking controls', () => {
+    expect(getBailianThinkingProfile('MiniMax/MiniMax-M3')).toMatchObject({
+      mode: 'mixed',
+      defaultEnabled: true,
+      supportsThinkingBudget: false,
+      control: 'thinking-object',
+    });
+    expect(getSupportedReasoningEfforts(provider, model('MiniMax/MiniMax-M3'))).toEqual([
+      'default',
+      'off',
+    ]);
+    expect(getSupportedReasoningEfforts(provider, model('stepfun/step-3.7-flash'))).toEqual([
+      'default',
+      'off',
+      'low',
+      'medium',
+      'high',
+    ]);
+  });
+
+  it('labels Bailian thinking budgets as token caps instead of native effort maxima', () => {
+    const labels = Object.fromEntries(
+      getReasoningEffortOptions(provider, model('qwen-plus')).map((option) => [option.key, option.label])
+    );
+
+    expect(labels).toMatchObject({
+      low: '1K 思考上限',
+      medium: '4K 思考上限',
+      high: '8K 思考上限',
+      max: '16K 思考上限',
+    });
+    expect(labels.max).not.toBe('最高');
+    expect(getReasoningEffortOptions(provider, model('kimi/kimi-k2.6'))).toContainEqual({
+      key: 'high',
+      label: '开启思考',
+    });
+  });
 });
 
 describe('Bailian request parameter mapping', () => {
+  it.each([
+    'qwen-plus',
+    'kimi/kimi-k2.6',
+    'MiniMax/MiniMax-M3',
+    'stepfun/step-3.7-flash',
+  ])('keeps default thinking wire-neutral for %s', async (modelId) => {
+    const { body } = await sendAndReadBody(modelId, 'default');
+
+    expect(body).not.toHaveProperty('enable_thinking');
+    expect(body).not.toHaveProperty('thinking');
+    expect(body).not.toHaveProperty('thinking_budget');
+    expect(body).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('keeps server-default thinking wire-neutral and allows sampling for default-off families', async () => {
+    const { body } = await sendAndReadBody('qwen-plus', 'default', undefined, {
+      enabled: true,
+      temperature: 0.4,
+      topP: 1,
+      presencePenalty: 0,
+      frequencyPenalty: 0,
+    });
+
+    expect(body.temperature).toBe(0.4);
+    expect(body).not.toHaveProperty('enable_thinking');
+    expect(body).not.toHaveProperty('thinking');
+    expect(body).not.toHaveProperty('thinking_budget');
+    expect(body).not.toHaveProperty('reasoning_effort');
+  });
+
   it('normalizes the two unsupported inclusive sampling endpoints', async () => {
     const temperature = await sendAndReadBody('qwen-max', 'default', undefined, {
       enabled: true,
@@ -208,6 +322,153 @@ describe('Bailian request parameter mapping', () => {
     expect(body.enable_thinking).toBe(true);
     expect(body.thinking_budget).toBe(8192);
     expect(body).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('maps Kimi namespaces without inventing an unsupported thinking budget', async () => {
+    const alibaba = await sendAndReadBody('kimi-k2.6', 'high', undefined, {
+      enabled: true,
+      temperature: 0.4,
+      topP: 1,
+      presencePenalty: 1,
+      frequencyPenalty: 1,
+    });
+    expect(alibaba.body.enable_thinking).toBe(true);
+    expect(alibaba.body.thinking_budget).toBe(8192);
+    expect(alibaba.body.temperature).toBe(0.4);
+    expect(alibaba.body.presence_penalty).toBe(1);
+    expect(alibaba.body).not.toHaveProperty('frequency_penalty');
+
+    const moonshot = await sendAndReadBody('kimi/kimi-k2.6', 'high');
+    expect(moonshot.body.enable_thinking).toBe(true);
+    expect(moonshot.body).not.toHaveProperty('thinking_budget');
+
+    const thinkingOnly = await sendAndReadBody('kimi/kimi-k2.7-code', 'off');
+    expect(thinkingOnly.body).not.toHaveProperty('enable_thinking');
+    expect(thinkingOnly.body).not.toHaveProperty('thinking');
+  });
+
+  it('uses MiniMax thinking objects and never sends generic Bailian controls', async () => {
+    const disabled = await sendAndReadBody('MiniMax/MiniMax-M3', 'off');
+    expect(disabled.body.thinking).toEqual({ type: 'disabled' });
+    expect(disabled.body).not.toHaveProperty('enable_thinking');
+    expect(disabled.body).not.toHaveProperty('thinking_budget');
+
+    const thinkingOnly = await sendAndReadBody('MiniMax-M2.5', 'off');
+    expect(thinkingOnly.body).not.toHaveProperty('thinking');
+    expect(thinkingOnly.body).not.toHaveProperty('enable_thinking');
+  });
+
+  it('uses Stepfun native effort without a thinking budget and clamps its frequency penalty', async () => {
+    const reasoning = await sendAndReadBody('stepfun/step-3.7-flash', 'high', undefined, {
+      enabled: true,
+      temperature: 0.4,
+      topP: 1,
+      presencePenalty: 0,
+      frequencyPenalty: 0.8,
+    });
+    expect(reasoning.body.enable_thinking).toBe(true);
+    expect(reasoning.body.reasoning_effort).toBe('high');
+    expect(reasoning.body).not.toHaveProperty('thinking_budget');
+    expect(reasoning.body.temperature).toBe(0.4);
+    expect(reasoning.body.frequency_penalty).toBe(0.8);
+
+    const sampling = await sendAndReadBody('stepfun/step-3.7-flash', 'off', undefined, {
+      enabled: true,
+      temperature: 1,
+      topP: 1,
+      presencePenalty: 0,
+      frequencyPenalty: -2,
+    });
+    expect(sampling.body.enable_thinking).toBe(false);
+    expect(sampling.body.frequency_penalty).toBeUndefined();
+
+    const maxPenalty = await sendAndReadBody('stepfun/step-3.7-flash', 'off', undefined, {
+      enabled: true,
+      temperature: 1,
+      topP: 1,
+      presencePenalty: 0,
+      frequencyPenalty: 2,
+    });
+    expect(maxPenalty.body.frequency_penalty).toBe(1);
+  });
+
+  it('does not send editable sampling fields to fixed-parameter Moonshot Kimi or MiniMax models', async () => {
+    const settings = {
+      enabled: true,
+      temperature: 0.2,
+      topP: 0.4,
+      presencePenalty: 1,
+      frequencyPenalty: 1,
+    };
+    for (const modelId of ['kimi/kimi-k2.6', 'MiniMax/MiniMax-M3']) {
+      const { body } = await sendAndReadBody(modelId, 'off', undefined, settings);
+      expect(body).not.toHaveProperty('temperature');
+      expect(body).not.toHaveProperty('top_p');
+      expect(body).not.toHaveProperty('presence_penalty');
+      expect(body).not.toHaveProperty('frequency_penalty');
+    }
+    expect(supportsEditableModelParameters(provider, 'kimi/kimi-k2.6')).toBe(false);
+    expect(supportsEditableModelParameters(provider, 'MiniMax/MiniMax-M3')).toBe(false);
+    expect(supportsEditableModelParameters(provider, 'MiniMax-M2.5')).toBe(true);
+  });
+
+  it('keeps documented Alibaba-hosted MiniMax sampling fields but omits unsupported frequency penalty', async () => {
+    const { body } = await sendAndReadBody('MiniMax-M2.5', 'default', undefined, {
+      enabled: true,
+      temperature: 0.2,
+      topP: 0.4,
+      presencePenalty: 1,
+      frequencyPenalty: 1,
+    });
+
+    expect(body.temperature).toBe(0.2);
+    expect(body.presence_penalty).toBe(1);
+    expect(body).not.toHaveProperty('top_p');
+    expect(body).not.toHaveProperty('frequency_penalty');
+  });
+
+  it('separates Alibaba-hosted Kimi sampling from fixed or restricted Kimi variants', async () => {
+    const settings = {
+      enabled: true,
+      temperature: 0.4,
+      topP: 1,
+      presencePenalty: 1,
+      frequencyPenalty: 1,
+    };
+    const code = await sendAndReadBody('kimi-k2.7-code', 'default', undefined, settings);
+    expect(code.body.temperature).toBe(0.4);
+    expect(code.body.presence_penalty).toBe(1);
+    expect(code.body).not.toHaveProperty('frequency_penalty');
+
+    const thinking = await sendAndReadBody('kimi-k2-thinking', 'default', undefined, settings);
+    expect(supportsEditableModelParameters(provider, 'kimi-k2-thinking')).toBe(false);
+    expect(thinking.body).not.toHaveProperty('temperature');
+    expect(thinking.body).not.toHaveProperty('top_p');
+    expect(thinking.body).not.toHaveProperty('presence_penalty');
+    expect(thinking.body).not.toHaveProperty('frequency_penalty');
+  });
+
+  it('exposes the same provider-specific parameter constraints used by the serializer', () => {
+    expect(getModelParameterConstraint(provider, 'qwen-plus', 'temperature')).toMatchObject({
+      supported: true,
+      min: 0,
+      max: 1.99,
+    });
+    expect(getModelParameterConstraint(provider, 'qwen-plus', 'topP')).toMatchObject({
+      supported: true,
+      min: 0.01,
+      max: 1,
+    });
+    expect(getModelParameterConstraint(provider, 'stepfun/step-3.7-flash', 'frequencyPenalty')).toMatchObject({
+      supported: true,
+      min: 0,
+      max: 1,
+    });
+    expect(getModelParameterConstraint(provider, 'stepfun/step-3.7-flash', 'presencePenalty').supported).toBe(false);
+    expect(getModelParameterConstraint(provider, 'MiniMax-M2.5', 'frequencyPenalty').supported).toBe(false);
+
+    expect(modelParameterSettingsWillApply(provider, model('qwen3.7-plus'), 'high')).toBe(true);
+    expect(modelParameterSettingsWillApply(provider, model('deepseek-r1'), 'default')).toBe(false);
   });
 
   it.each([
