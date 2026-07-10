@@ -26,12 +26,12 @@ describe('checkForAppUpdate', () => {
   it('accepts only a checksum-backed APK asset from this repository', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       schemaVersion: 1,
-      version: '1.0.5',
+      version: '1.0.6',
       releaseName: 'Stable',
-      releaseUrl: 'https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.0.5',
+      releaseUrl: 'https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.0.6',
       apk: {
         name: 'Embezzle-Studio.apk',
-        downloadUrl: 'https://github.com/szdtzpj/Embezzle-Studio/releases/download/v1.0.5/Embezzle-Studio.apk',
+        downloadUrl: 'https://github.com/szdtzpj/Embezzle-Studio/releases/download/v1.0.6/Embezzle-Studio.apk',
         sha256: 'A'.repeat(64),
       },
     }), { status: 200, headers: { 'content-type': 'application/json' } })));
@@ -43,17 +43,17 @@ describe('checkForAppUpdate', () => {
       name: 'Embezzle-Studio.apk',
       sha256: 'a'.repeat(64),
     });
-    expect(update.releaseUrl).toBe('https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.0.5');
+    expect(update.releaseUrl).toBe('https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.0.6');
   });
 
   it('accepts the pinned public GitHub Pages download path used for private releases', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       schemaVersion: 1,
-      version: '1.0.5',
+      version: '1.0.6',
       releaseUrl: 'https://szdtzpj.github.io/Embezzle-Studio/release.html',
       apk: {
-        name: 'Embezzle-Studio-v1.0.5-release.apk',
-        downloadUrl: 'https://szdtzpj.github.io/Embezzle-Studio/downloads/Embezzle-Studio-v1.0.5-release.apk',
+        name: 'Embezzle-Studio-v1.0.6-release.apk',
+        downloadUrl: 'https://szdtzpj.github.io/Embezzle-Studio/downloads/Embezzle-Studio-v1.0.6-release.apk',
         sha256: 'b'.repeat(64),
       },
     }), { status: 200 })));
@@ -75,7 +75,7 @@ describe('checkForAppUpdate', () => {
   ])('does not expose an install target for %s', async (_label, apk) => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       schemaVersion: 1,
-      version: '1.0.5',
+      version: '1.0.6',
       apk,
     }), { status: 200 })));
 
@@ -88,14 +88,14 @@ describe('checkForAppUpdate', () => {
   it('does not announce a newer manifest version until a trusted APK is staged', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       schemaVersion: 1,
-      version: '1.0.5',
+      version: '1.0.6',
       releaseName: 'Release pending',
       releaseUrl: 'https://szdtzpj.github.io/Embezzle-Studio',
       apk: null,
     }), { status: 200 })));
 
     await expect(checkForAppUpdate()).resolves.toMatchObject({
-      latestVersion: '1.0.5',
+      latestVersion: '1.0.6',
       updateAvailable: false,
       installAsset: undefined,
     });

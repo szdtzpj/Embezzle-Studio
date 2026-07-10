@@ -3,7 +3,7 @@
     "name": "Embezzle Studio",
     "slug": "embezzle-studio",
     "scheme": "embezzlestudio",
-    "version": "1.0.4",
+    "version": "1.0.5",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -12,7 +12,8 @@
     },
     "android": {
       "package": "com.szdtzpj.embezzlestudio",
-      "versionCode": 4,
+      "versionCode": 5,
+      "softwareKeyboardLayoutMode": "resize",
       "blockedPermissions": [
         "android.permission.SYSTEM_ALERT_WINDOW"
       ],
@@ -40,7 +41,8 @@
         }
       ],
       "expo-secure-store",
-      "expo-sharing"
+      "expo-sharing",
+      "expo-video"
     ]
   }
 }

@@ -13,6 +13,8 @@ Embezzle Studio 是一个面向 Android 的移动端 AI 对话客户端。项目
 - 思考设置：按精确模型系列保存思考强度，区分 `off`、`none`、`minimal`、`xhigh`、`max`，并分别映射 OpenAI、火山方舟和百炼协议。
 - 参数调整：按服务商和模型只显示已适配的温度、top_p、惩罚参数及其真实范围；思考模式或固定参数模型会明确提示或隐藏无效控件，关闭后交给服务商默认值处理。
 - 多模态入口：按模型能力显示图片、视频和文件选择入口；图片可发送给视觉模型，百炼兼容模式支持有界的本地视频 `video_url` 输入，文件输入仅对显式具备 `file-input` 能力的 OpenAI 官方模型开放。另支持文本生图，以及带参考图片/视频的火山方舟视频任务提交和后续查询。
+- 媒体预览与导出：待发送图片显示为方形缩略图；对话中的视频使用 `expo-video` 原生控件在当前页播放并支持全屏。视频卡片把文件名与“保存/分享”操作放在独立操作区；Android 保存通过系统 Storage Access Framework 让用户选择目录，Web 使用浏览器下载，其它原生平台回退到系统分享。
+- Android 布局与切页：主聊天区和改名对话框使用键盘避让，Android 配置为 `resize`；聊天页在打开设置后保持挂载，设置页首次打开后复用，并限制远端候选模型的单批渲染量以降低切页和大列表压力。
 - 对话记录：本地保存历史会话，支持搜索用户和模型回复内容，并支持置顶、改名、分享、删除。
 - 消息操作：支持原生/网页复制、分享、停止生成、保留流式部分内容、重新生成、编辑和按因果分支删除。
 - 更新检查：从固定的公共 Pages 更新清单检查版本和已校验 APK 元数据，并跳转到受信任的发布页面；应用本身不会伪装成 APK 校验器或安装器。
@@ -21,6 +23,7 @@ Embezzle Studio 是一个面向 Android 的移动端 AI 对话客户端。项目
 ## 仍在完善
 
 - 对话视频附件目前只为百炼兼容模式实现 `video_url` 传输；其他服务商仍需各自的上传、转码或引用协议适配。
+- Android 真机仍需验收键盘弹出后的输入区位置、Seedance 视频播放/全屏、系统目录保存与取消流程，以及设置/聊天连续切换的内存和稳定性。Web 回归不能替代这些原生验证。
 - MCP、插件系统和联网搜索服务商还没有作为稳定功能接入。
 - OpenAI 官方接口不会返回原始隐藏思考链；应用只能展示接口返回的思考摘要、reasoning_content 或 Token 用量。
 - Android 安装包构建需要本机 Android 工具链，或通过 CI/EAS 等方式构建。
@@ -40,6 +43,7 @@ Embezzle Studio 是一个面向 Android 的移动端 AI 对话客户端。项目
 - TypeScript 6
 - React Native Reanimated
 - React Native Gesture Handler
+- Expo Video
 - AsyncStorage
 - SecureStore
 
@@ -69,6 +73,10 @@ Pull Request 和 `main` 分支推送会触发 `.github/workflows/quality.yml`。
 `.github/workflows/android-apk.yml` 只允许仓库所有者从 `main` 使用稳定的正式密钥签名。读取 owner-authored Draft 的 `contents: write` 仅存在于短小的 `release_contract` 预检 Job；预检和发布都受仅允许 `main` 的 `android-release` Environment 约束，实际 npm/Expo/Gradle 构建继续使用仓库默认的 `contents: read`，且 checkout 不持久化凭据。签名前会用固定的 Android Build Tools 36.0.0 核对实际 APK 的包名、版本、min/target SDK 与禁用权限，证明待签 APK 尚无有效签名，并在签名后只接受一个与固定指纹一致、且不是 `Android Debug` 的签名者。缺少任一签名 Secret、产物契约不符或工具链/证书校验失败时，工作流会直接失败；所有官方 Actions 都使用 GitHub 验证的最新稳定完整 SHA，并运行在 Node 24 代际。
 
 首个正式签名版本 [`v1.0.4`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.0.4) 已于 2026-07-10 发布为 immutable Latest Release。公开的[可信下载页](https://szdtzpj.github.io/Embezzle-Studio/release.html)提供 93,087,208 字节 APK；SHA-256 为 `187f4a90daed7c7d05d423890419d1c4fe1d705674bf1d4955075c8d725b63f0`，正式证书 SHA-256 为 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`。GitHub release attestation、三个本地下载资产和 Pages 匿名 APK 字节均已独立复核。
+
+当前工作树中的移动端修复已把应用版本推进到本地 `1.0.5` 候选，但尚未创建或推送 `v1.0.5` tag，也没有 Draft/正式 GitHub Release；公开 Latest 与下载页仍然是 `v1.0.4`。该候选已通过 `npm.cmd run check`（15 个测试文件、249 个测试，TypeScript/ESLint 为零错误）和 Web export（3131 modules、主 bundle 6.9 MB）。390×844 浏览器回归验证了聊天/设置、真实上传图片的方形待发送预览，以及设置与聊天连续切换 20 次，console 没有 error；仅有 React Native Web 的 `shadow*`/`pointerEvents` 两类弃用 warning。Expo Doctor 为 20/20，`expo install --check` 通过。
+
+干净 Expo prebuild 与未签名 `assembleRelease` 也已通过；随后使用与 `v1.0.4` 相同的正式证书生成了仅供本地验收的 production-signed candidate：`D:\EmbezzleStudio-Releases\v1.0.5-candidate\Embezzle-Studio-v1.0.5-candidate-release.apk`，96,473,241 字节，SHA-256 `c390a116a592773f23626ac6b63ace40a881e710e61318eedd196c6c0d6b8bc7`。它是 `com.szdtzpj.embezzlestudio` 版本 `1.0.5`/versionCode 5、minSdk 24/targetSdk 36，证书 SHA-256 为 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`，APK Signature Scheme v2/v3 与 zipalign 均通过；没有 overlay、camera 或 microphone 权限。新增的 `ACCESS_NETWORK_STATE` 和 `WAKE_LOCK` 来自视频播放依赖。该 APK 不是 GitHub Release，以上构建/浏览器证据也不是 Android 真机键盘、播放器、系统目录保存或切页稳定性的验收结论。
 
 当前仓库已经创建 `Settings -> Environments -> android-release`、把 deployment branch policy 限制为 `main`，并配置了下列五个 Environment secrets；以下表格和命令同时作为环境重建或密钥轮换手册。若仓库/组织方案支持 deployment protection rules，还应启用 required reviewers 和 `Prevent self-review`。[GitHub Environments 官方限制](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)说明：Free、Pro 或 Team 方案的 required reviewers 只可用于公开仓库；私有仓库的 Environment secrets 和 deployment branches/tags 至少需要 Pro/Team，保持私有并获得 required reviewers 则需要 Enterprise。个人私有仓库的直接 collaborator 也没有可降级的 read 角色；当前按维护者决定，`BlueOcean223` 保留为明确受信任的 write collaborator，并接受没有双人审批的剩余风险。不要把“仅允许 `main` + owner workflow gate”描述成等价的双人审批。
 

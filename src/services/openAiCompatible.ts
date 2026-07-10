@@ -1414,6 +1414,7 @@ function videoTaskAttachment(taskId: string, modelId: string, videoUrl: string):
     kind: 'video',
     uri: videoUrl,
     name: `${modelId}.mp4`,
+    mimeType: 'video/mp4',
   };
 }
 

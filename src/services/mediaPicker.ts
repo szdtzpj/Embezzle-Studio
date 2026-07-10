@@ -1,5 +1,6 @@
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
+import { Platform } from 'react-native';
 
 import type { AttachmentKind, MediaAttachment } from '../domain/types';
 import { createId } from './id';
@@ -88,7 +89,10 @@ export async function pickImages(): Promise<MediaAttachment[]> {
   const result = await ImagePicker.launchImageLibraryAsync({
     mediaTypes: ['images'],
     allowsMultipleSelection: true,
-    base64: true,
+    // Native can copy the picker URI into app-owned storage directly. Asking
+    // the picker for Base64 duplicates the full image in the JS heap and can
+    // create a large memory spike for modern high-resolution photos.
+    base64: Platform.OS === 'web',
     quality: 0.82,
   });
 

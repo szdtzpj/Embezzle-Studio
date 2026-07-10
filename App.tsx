@@ -1,16 +1,19 @@
 import { StatusBar } from 'expo-status-bar';
+import { useEvent } from 'expo';
 import { BlurView } from 'expo-blur';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
 import * as Sharing from 'expo-sharing';
-import { createElement, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
+import { VideoView, useVideoPlayer } from 'expo-video';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   ActivityIndicator,
   Alert,
   AppState,
   BackHandler,
   Image,
+  Keyboard,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -42,7 +45,7 @@ import Reanimated, {
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AnimatePresence, MotiView } from 'moti';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { Brain, Check, ChevronDown, Copy, Download, ExternalLink, FileText, Image as ImageIcon, Lightbulb, Menu, MessageSquare, MoreHorizontal, PenSquare, Pencil, Pin, Plus, RefreshCw, Search, Share2, Settings, SlidersHorizontal, Square, Trash2, Video, X } from 'lucide-react-native';
+import { Brain, Check, ChevronDown, Copy, Download, ExternalLink, FileText, Image as ImageIcon, Lightbulb, Menu, MessageSquare, MoreHorizontal, PenSquare, Pencil, Pin, Play, Plus, RefreshCw, Search, Share2, Settings, SlidersHorizontal, Square, Trash2, Video, X } from 'lucide-react-native';
 import { Bailian, ChatGLM, Claude, DeepSeek, Doubao, Gemini, Kimi, Minimax, NewAPI, OpenAI, Qwen, Volcengine, Zhipu } from '@lobehub/icons-rn';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/arkModels';
@@ -65,6 +68,7 @@ import type {
   ModelParameterSettings,
 } from './src/domain/types';
 import { pickFiles, pickImages, pickVideos, validateAttachments } from './src/services/mediaPicker';
+import { saveAttachmentToDevice } from './src/services/mediaExport';
 import { deletePersistedAttachments, discardUncommittedAttachments, resolveAttachmentDisplayUri } from './src/services/mediaStorage';
 import {
   assertChatAttachmentsSupported,
@@ -238,7 +242,42 @@ const DISABLED_FADE = { duration: 160, easing: ReanimatedEasing.out(ReanimatedEa
  * - 按下时轻微缩放 + 轻微压暗 + 触觉反馈，松开时用弹簧自然回弹（带细微过冲）；
  * - 行为与原生 Pressable 完全一致，只是多了触感动画，不改动任何业务逻辑。
  */
-function AnimatedPressable({
+function AndroidPressable({
+  style,
+  children,
+  onPressIn,
+  onPressOut,
+  disabled,
+  pressScale = 0.96,
+  pressOpacity = 0.92,
+  haptic = 'light',
+  ...rest
+}: AnimatedPressableProps) {
+  return (
+    <Pressable
+      {...rest}
+      disabled={disabled}
+      onPressIn={(event) => {
+        if (!disabled) {
+          triggerHaptic(haptic);
+        }
+        onPressIn?.(event);
+      }}
+      onPressOut={onPressOut}
+      style={({ pressed }) => [
+        style,
+        {
+          opacity: disabled ? 0.5 : pressed ? pressOpacity : 1,
+          transform: [{ scale: pressed ? pressScale : 1 }],
+        },
+      ]}
+    >
+      {children}
+    </Pressable>
+  );
+}
+
+function ReanimatedPressableControl({
   style,
   children,
   onPressIn,
@@ -289,11 +328,18 @@ function AnimatedPressable({
   );
 }
 
+function AnimatedPressable(props: AnimatedPressableProps) {
+  if (Platform.OS === 'android') {
+    return <AndroidPressable {...props} />;
+  }
+  return <ReanimatedPressableControl {...props} />;
+}
+
 /**
  * 消息气泡入场动画：淡入 + 轻微上移。仅在首次挂载时播放一次。
  * 用 Reanimated 在 UI 线程执行——即使收到回复瞬间 JS 线程繁忙也不会卡顿。
  */
-function AnimatedMessage({
+function AnimatedMessageSurface({
   style,
   children,
 }: {
@@ -319,10 +365,25 @@ function AnimatedMessage({
   return <Reanimated.View style={[style, animatedStyle]}>{children}</Reanimated.View>;
 }
 
+function AnimatedMessage({
+  animate,
+  style,
+  children,
+}: {
+  animate: boolean;
+  style?: StyleProp<ViewStyle>;
+  children?: ReactNode;
+}) {
+  if (!animate) {
+    return <View style={style}>{children}</View>;
+  }
+  return <AnimatedMessageSurface style={style}>{children}</AnimatedMessageSurface>;
+}
+
 /**
  * 切换聊天 / 配置时的柔和淡入 + 轻微缩放过渡。
  */
-function ScreenFade({ children }: { children?: ReactNode }) {
+function AnimatedScreenFade({ children }: { children?: ReactNode }) {
   const progress = useSharedValue(0);
 
   useEffect(() => {
@@ -338,6 +399,13 @@ function ScreenFade({ children }: { children?: ReactNode }) {
   }));
 
   return <Reanimated.View style={[styles.screenFade, animatedStyle]}>{children}</Reanimated.View>;
+}
+
+function ScreenFade({ children }: { children?: ReactNode }) {
+  if (Platform.OS === 'android') {
+    return <View style={styles.screenFade}>{children}</View>;
+  }
+  return <AnimatedScreenFade>{children}</AnimatedScreenFade>;
 }
 
 /**
@@ -445,6 +513,8 @@ const candidateModelFilters: Array<{ key: ModelCapabilityFilter; label: string }
   { key: 'tool', label: '工具' },
 ];
 
+const candidateModelPageSize = 60;
+
 type ParameterKey = Exclude<keyof ModelParameterSettings, 'enabled'>;
 
 const parameterControls: Array<{
@@ -536,13 +606,6 @@ function normalizeParameterValue(value: number, min: number, max: number, step: 
 function formatParameterValue(value: number): string {
   return value.toFixed(2).replace(/\.?0+$/, '');
 }
-
-const webVideoPreviewStyle: CSSProperties = {
-  width: '100%',
-  height: 128,
-  display: 'block',
-  backgroundColor: '#E4E0D3',
-};
 
 function getSelectableModels(provider: ProviderProfile) {
   return provider.models.filter(
@@ -721,6 +784,7 @@ export default function App() {
   const [persistenceReady, setPersistenceReady] = useState(false);
   const [persistenceLoadError, setPersistenceLoadError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsMounted, setSettingsMounted] = useState(false);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
   const [parameterMenuOpen, setParameterMenuOpen] = useState(false);
@@ -729,8 +793,10 @@ export default function App() {
   const [manualModelId, setManualModelId] = useState('');
   const [modelSearchQuery, setModelSearchQuery] = useState('');
   const [modelCapabilityFilter, setModelCapabilityFilter] = useState<ModelCapabilityFilter>('all');
+  const [candidateModelRenderLimit, setCandidateModelRenderLimit] = useState(candidateModelPageSize);
   const [historySearchQuery, setHistorySearchQuery] = useState('');
   const [attachments, setAttachments] = useState<MediaAttachment[]>([]);
+  const [activeVideoAttachmentId, setActiveVideoAttachmentId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [notice, setNotice] = useState('');
@@ -1134,6 +1200,33 @@ export default function App() {
       return matchesQuery && matchesCandidateModelFilter(model, modelCapabilityFilter);
     });
   }, [modelCandidates, modelCapabilityFilter, modelSearchQuery]);
+  const renderedModelCandidates = useMemo(
+    () => filteredModelCandidates.slice(0, candidateModelRenderLimit),
+    [candidateModelRenderLimit, filteredModelCandidates]
+  );
+  const animatedMessageIds = useMemo(
+    () => new Set(workspace.messages.slice(-2).map((message) => message.id)),
+    [workspace.messages]
+  );
+  const latestVideoAttachmentId = useMemo(() => {
+    for (let messageIndex = workspace.messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+      const messageAttachments = workspace.messages[messageIndex].attachments ?? [];
+      for (let attachmentIndex = messageAttachments.length - 1; attachmentIndex >= 0; attachmentIndex -= 1) {
+        if (messageAttachments[attachmentIndex].kind === 'video') {
+          return messageAttachments[attachmentIndex].id;
+        }
+      }
+    }
+    return null;
+  }, [workspace.messages]);
+
+  useEffect(() => {
+    setCandidateModelRenderLimit(candidateModelPageSize);
+  }, [activeProvider?.id, modelCapabilityFilter, modelSearchQuery]);
+
+  useEffect(() => {
+    setActiveVideoAttachmentId(latestVideoAttachmentId);
+  }, [latestVideoAttachmentId]);
   const providerModelGroups = useMemo(
     () =>
       workspace.providers
@@ -1585,6 +1678,7 @@ export default function App() {
   function resetComposerForConversationChange() {
     setInput('');
     clearPendingAttachments();
+    setActiveVideoAttachmentId(null);
     setAttachMenuOpen(false);
     setReasoningMenuOpen(false);
     setParameterMenuOpen(false);
@@ -2651,6 +2745,19 @@ export default function App() {
     });
   }
 
+  function toggleSettingsScreen() {
+    Keyboard.dismiss();
+    setAttachMenuOpen(false);
+    setReasoningMenuOpen(false);
+    setParameterMenuOpen(false);
+    const nextOpen = !settingsOpen;
+    if (nextOpen) {
+      setSettingsMounted(true);
+      setActiveVideoAttachmentId(null);
+    }
+    setSettingsOpen(nextOpen);
+  }
+
   function handleChatScroll(event: NativeSyntheticEvent<NativeScrollEvent>) {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
     const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
@@ -2682,7 +2789,8 @@ export default function App() {
       <StatusBar style="dark" />
       <SafeAreaView style={styles.shell}>
         <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined}
+          keyboardVerticalOffset={0}
           style={styles.keyboard}
         >
           <View style={styles.topBar}>
@@ -2716,7 +2824,7 @@ export default function App() {
               <AnimatedPressable
                 accessibilityRole="button"
                 accessibilityLabel={settingsOpen ? '返回聊天' : '打开设置'}
-                onPress={() => setSettingsOpen((current) => !current)}
+                onPress={toggleSettingsScreen}
                 style={styles.iconButton}
               >
                 <IconCrossfade swapKey={settingsOpen ? 'chat' : 'settings'}>
@@ -2753,9 +2861,20 @@ export default function App() {
             onSelect={selectProviderModel}
           />
 
-          {settingsOpen ? (
-            <ScreenFade>
-              <ScrollView style={styles.content} contentContainerStyle={styles.settingsContent}>
+          {settingsMounted ? (
+            <View
+              style={[styles.screenPane, !settingsOpen && styles.screenPaneHidden]}
+              pointerEvents={settingsOpen ? 'auto' : 'none'}
+              accessibilityElementsHidden={!settingsOpen}
+              importantForAccessibility={settingsOpen ? 'auto' : 'no-hide-descendants'}
+            >
+              <ScreenFade>
+                <ScrollView
+                  style={styles.content}
+                  contentContainerStyle={styles.settingsContent}
+                  keyboardDismissMode={Platform.OS === 'android' ? 'on-drag' : 'interactive'}
+                  keyboardShouldPersistTaps="handled"
+                >
 
               <View style={styles.settingsCard}>
                 <Text style={styles.settingsCardTitle}>服务商</Text>
@@ -2933,7 +3052,7 @@ export default function App() {
                       })}
                     </ScrollView>
                     <Text testID="candidate-model-search-count" style={styles.modelSearchMeta}>
-                      显示 {filteredModelCandidates.length} / {modelCandidates.length}
+                      已显示 {renderedModelCandidates.length} / {filteredModelCandidates.length} 条匹配结果，共 {modelCandidates.length} 条
                     </Text>
                   </>
                 ) : null}
@@ -2942,9 +3061,9 @@ export default function App() {
                     nestedScrollEnabled
                     style={styles.candidateModelListFrame}
                     contentContainerStyle={styles.modelList}
-                    showsVerticalScrollIndicator={filteredModelCandidates.length > 4}
+                    showsVerticalScrollIndicator={renderedModelCandidates.length > 4}
                   >
-                    {filteredModelCandidates.map((model) => (
+                    {renderedModelCandidates.map((model) => (
                       <CandidateModelRow
                         key={model.id}
                         model={model}
@@ -2957,6 +3076,20 @@ export default function App() {
                       <View style={styles.modelSearchEmpty}>
                         <Text style={styles.modelSearchEmptyText}>没有匹配的模型</Text>
                       </View>
+                    ) : null}
+                    {renderedModelCandidates.length < filteredModelCandidates.length ? (
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel="加载更多候选模型"
+                        onPress={() =>
+                          setCandidateModelRenderLimit((current) => current + candidateModelPageSize)
+                        }
+                        style={({ pressed }) => [styles.loadMoreModelsButton, pressed && styles.buttonPressed]}
+                      >
+                        <Text style={styles.loadMoreModelsButtonText}>
+                          再显示 {Math.min(candidateModelPageSize, filteredModelCandidates.length - renderedModelCandidates.length)} 条
+                        </Text>
+                      </Pressable>
                     ) : null}
                   </ScrollView>
                 ) : null}
@@ -3099,14 +3232,22 @@ export default function App() {
                 </View>
               </View>
 
-              </ScrollView>
-            </ScreenFade>
-          ) : (
+                </ScrollView>
+              </ScreenFade>
+            </View>
+          ) : null}
+          <View
+            style={[styles.screenPane, settingsOpen && styles.screenPaneHidden]}
+            pointerEvents={settingsOpen ? 'none' : 'auto'}
+            accessibilityElementsHidden={settingsOpen}
+            importantForAccessibility={settingsOpen ? 'no-hide-descendants' : 'auto'}
+          >
             <ScreenFade>
               <ScrollView
                 ref={chatScrollRef}
                 style={styles.content}
                 contentContainerStyle={styles.chatContent}
+                keyboardDismissMode={Platform.OS === 'android' ? 'on-drag' : 'interactive'}
                 keyboardShouldPersistTaps="handled"
                 onScroll={handleChatScroll}
                 onContentSizeChange={handleChatContentSizeChange}
@@ -3128,6 +3269,7 @@ export default function App() {
                   return (
                   <AnimatedMessage
                     key={message.id}
+                    animate={Platform.OS !== 'android' && animatedMessageIds.has(message.id)}
                     style={[
                       styles.messageBubble,
                       message.role === 'user' ? styles.userMessageBlock : styles.assistantBubble,
@@ -3154,7 +3296,16 @@ export default function App() {
                           {message.attachments?.length ? (
                             <View style={styles.attachmentGrid}>
                               {message.attachments.map((attachment) => (
-                                <AttachmentPreview key={attachment.id} attachment={attachment} />
+                                <AttachmentPreview
+                                  key={attachment.id}
+                                  attachment={attachment}
+                                  videoActive={!settingsOpen && activeVideoAttachmentId === attachment.id}
+                                  onToggleVideo={() =>
+                                    setActiveVideoAttachmentId((current) =>
+                                      current === attachment.id ? null : attachment.id
+                                    )
+                                  }
+                                />
                               ))}
                             </View>
                           ) : null}
@@ -3223,7 +3374,7 @@ export default function App() {
                             {message.error}
                           </Text>
                         ) : null}
-                        {generationTask ? (
+                        {generationTask && !message.attachments?.some((attachment) => attachment.kind === 'video') ? (
                           <GenerationTaskPanel
                             task={generationTask}
                             busy={Boolean(queryingTaskByMessageId[message.id])}
@@ -3233,7 +3384,16 @@ export default function App() {
                         {message.attachments?.length ? (
                           <View style={styles.attachmentGrid}>
                             {message.attachments.map((attachment) => (
-                              <AttachmentPreview key={attachment.id} attachment={attachment} />
+                              <AttachmentPreview
+                                key={attachment.id}
+                                attachment={attachment}
+                                videoActive={!settingsOpen && activeVideoAttachmentId === attachment.id}
+                                onToggleVideo={() =>
+                                  setActiveVideoAttachmentId((current) =>
+                                    current === attachment.id ? null : attachment.id
+                                  )
+                                }
+                              />
                             ))}
                           </View>
                         ) : null}
@@ -3268,22 +3428,16 @@ export default function App() {
               {attachments.length ? (
                 <ScrollView
                   horizontal
+                  style={styles.pendingAttachmentScroller}
                   showsHorizontalScrollIndicator={false}
                   contentContainerStyle={styles.pendingAttachments}
                 >
                   {attachments.map((attachment) => (
-                    <AnimatedPressable
+                    <PendingAttachmentPreview
                       key={attachment.id}
-                      accessibilityRole="button"
-                      accessibilityLabel={`移除附件 ${attachment.name}`}
-                      onPress={() => removeAttachment(attachment.id)}
-                      style={styles.pendingAttachment}
-                    >
-                      <Text style={styles.pendingAttachmentText}>{attachment.kind}</Text>
-                      <Text numberOfLines={1} style={styles.pendingAttachmentName}>
-                        {attachment.name}
-                      </Text>
-                    </AnimatedPressable>
+                      attachment={attachment}
+                      onRemove={() => removeAttachment(attachment.id)}
+                    />
                   ))}
                 </ScrollView>
               ) : null}
@@ -3569,7 +3723,7 @@ export default function App() {
                 </View>
               </View>
             </ScreenFade>
-          )}
+          </View>
         </KeyboardAvoidingView>
 
         {/* Sidebar drawer */}
@@ -3762,45 +3916,51 @@ export default function App() {
             setRenameDraft('');
           }}
         >
-          <Pressable
-            style={styles.renameDialogScrim}
-            onPress={() => {
-              setRenamingConversationId(null);
-              setRenameDraft('');
-            }}
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined}
+            keyboardVerticalOffset={0}
+            style={styles.modalKeyboard}
           >
-            <Pressable style={styles.renameDialog} onPress={(event) => event.stopPropagation()}>
-              <Text style={styles.renameDialogTitle}>编辑对话名称</Text>
-              <TextInput
-                value={renameDraft}
-                onChangeText={setRenameDraft}
-                autoFocus
-                maxLength={60}
-                placeholder="输入对话名称"
-                placeholderTextColor={palette.placeholder}
-                style={styles.renameDialogInput}
-              />
-              <View style={styles.renameDialogActions}>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  onPress={() => {
-                    setRenamingConversationId(null);
-                    setRenameDraft('');
-                  }}
-                  style={styles.renameDialogSecondaryButton}
-                >
-                  <Text style={styles.renameDialogSecondaryText}>取消</Text>
-                </AnimatedPressable>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  onPress={saveConversationTitle}
-                  style={styles.renameDialogPrimaryButton}
-                >
-                  <Text style={styles.renameDialogPrimaryText}>保存</Text>
-                </AnimatedPressable>
-              </View>
+            <Pressable
+              style={styles.renameDialogScrim}
+              onPress={() => {
+                setRenamingConversationId(null);
+                setRenameDraft('');
+              }}
+            >
+              <Pressable style={styles.renameDialog} onPress={(event) => event.stopPropagation()}>
+                <Text style={styles.renameDialogTitle}>编辑对话名称</Text>
+                <TextInput
+                  value={renameDraft}
+                  onChangeText={setRenameDraft}
+                  autoFocus
+                  maxLength={60}
+                  placeholder="输入对话名称"
+                  placeholderTextColor={palette.placeholder}
+                  style={styles.renameDialogInput}
+                />
+                <View style={styles.renameDialogActions}>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    onPress={() => {
+                      setRenamingConversationId(null);
+                      setRenameDraft('');
+                    }}
+                    style={styles.renameDialogSecondaryButton}
+                  >
+                    <Text style={styles.renameDialogSecondaryText}>取消</Text>
+                  </AnimatedPressable>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    onPress={saveConversationTitle}
+                    style={styles.renameDialogPrimaryButton}
+                  >
+                    <Text style={styles.renameDialogPrimaryText}>保存</Text>
+                  </AnimatedPressable>
+                </View>
+              </Pressable>
             </Pressable>
-          </Pressable>
+          </KeyboardAvoidingView>
         </Modal>
 
         <Modal
@@ -4724,12 +4884,17 @@ function CandidateModelRow({ model, providerName, added, onAdd }: CandidateModel
   );
 }
 
-function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
-  const [displayUri, setDisplayUri] = useState(attachment.uri);
+function useAttachmentDisplayUri(attachment: MediaAttachment) {
+  const requiresWebResolution =
+    Platform.OS === 'web' && attachment.uri.startsWith('embezzle-web-attachment://');
+  const [displayUri, setDisplayUri] = useState(requiresWebResolution ? '' : attachment.uri);
+  const [displayError, setDisplayError] = useState<string | null>(null);
 
   useEffect(() => {
     let disposed = false;
     let temporaryUri: string | undefined;
+    setDisplayError(null);
+    setDisplayUri(requiresWebResolution ? '' : attachment.uri);
     void resolveAttachmentDisplayUri(attachment).then(
       (uri) => {
         if (disposed) {
@@ -4739,21 +4904,126 @@ function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
         temporaryUri = uri.startsWith('blob:') ? uri : undefined;
         setDisplayUri(uri);
       },
-      () => {
-        if (!disposed) setDisplayUri(attachment.uri);
+      (error) => {
+        if (!disposed) {
+          setDisplayError(error instanceof Error ? error.message : '附件预览不可用。');
+        }
       }
     );
     return () => {
       disposed = true;
       if (Platform.OS === 'web' && temporaryUri) URL.revokeObjectURL(temporaryUri);
     };
-  }, [attachment]);
+  }, [attachment, requiresWebResolution]);
+
+  return { displayUri, displayError };
+}
+
+function PendingAttachmentPreview({
+  attachment,
+  onRemove,
+}: {
+  attachment: MediaAttachment;
+  onRemove: () => void;
+}) {
+  const { displayUri, displayError } = useAttachmentDisplayUri(attachment);
+
+  return (
+    <View style={styles.pendingAttachment}>
+      {attachment.kind === 'image' && displayUri ? (
+        <Image
+          source={{ uri: displayUri }}
+          resizeMode="cover"
+          fadeDuration={0}
+          style={styles.pendingAttachmentImage}
+        />
+      ) : (
+        <View style={styles.pendingAttachmentFallback}>
+          {attachment.kind === 'video' ? (
+            <Video size={22} color={palette.textSecondary} strokeWidth={1.8} />
+          ) : attachment.kind === 'image' ? (
+            displayError ? (
+              <ImageIcon size={22} color={palette.danger} strokeWidth={1.8} />
+            ) : (
+              <ActivityIndicator color={palette.textSecondary} size="small" />
+            )
+          ) : (
+            <FileText size={22} color={palette.textSecondary} strokeWidth={1.8} />
+          )}
+        </View>
+      )}
+      <View style={styles.pendingAttachmentNameBar}>
+        <Text numberOfLines={1} style={styles.pendingAttachmentName}>
+          {attachment.name}
+        </Text>
+      </View>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`移除附件 ${attachment.name}`}
+        hitSlop={8}
+        onPress={onRemove}
+        style={({ pressed }) => [styles.pendingAttachmentRemove, pressed && styles.buttonPressed]}
+      >
+        <X size={14} color={palette.textOnAccent} strokeWidth={2.5} />
+      </Pressable>
+    </View>
+  );
+}
+
+function VideoAttachmentSurface({ uri }: { uri: string }) {
+  const player = useVideoPlayer(uri, (createdPlayer) => {
+    createdPlayer.loop = false;
+    createdPlayer.staysActiveInBackground = false;
+  });
+  const { status } = useEvent(player, 'statusChange', { status: player.status });
+
+  return (
+    <View style={styles.attachmentVideoViewport}>
+      <VideoView
+        player={player}
+        nativeControls
+        contentFit="contain"
+        fullscreenOptions={{ enable: true }}
+        playsInline
+        style={styles.attachmentVideoView}
+      />
+      {status === 'loading' ? (
+        <View pointerEvents="none" style={styles.attachmentVideoStatusOverlay}>
+          <ActivityIndicator color={palette.textOnAccent} />
+          <Text style={styles.attachmentVideoStatusText}>正在加载视频</Text>
+        </View>
+      ) : status === 'error' ? (
+        <View pointerEvents="none" style={styles.attachmentVideoStatusOverlay}>
+          <Video size={24} color={palette.textOnAccent} strokeWidth={1.8} />
+          <Text style={styles.attachmentVideoStatusText}>预览加载失败，可尝试保存或分享</Text>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function AttachmentPreview({
+  attachment,
+  videoActive = false,
+  onToggleVideo,
+}: {
+  attachment: MediaAttachment;
+  videoActive?: boolean;
+  onToggleVideo?: () => void;
+}) {
+  const { displayUri, displayError } = useAttachmentDisplayUri(attachment);
 
   const openOrExport = () => {
     void (async () => {
-      const browserReadable = Platform.OS === 'web' || /^(?:https?:|data:|blob:)/i.test(displayUri);
-      if (browserReadable) {
+      if (!displayUri) {
+        throw new Error(displayError ?? '附件仍在准备预览，请稍后重试。');
+      }
+      if (Platform.OS === 'web') {
         await Linking.openURL(displayUri);
+        return;
+      }
+      if (/^https?:\/\//i.test(displayUri)) {
+        await NativeShare.share({ title: attachment.name, message: displayUri });
         return;
       }
       if (await Sharing.isAvailableAsync()) {
@@ -4769,14 +5039,42 @@ function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
     });
   };
 
+  const saveToDevice = () => {
+    void saveAttachmentToDevice(attachment)
+      .then((result) => {
+        if (result.status === 'saved') {
+          Alert.alert('已保存', `“${result.name}”已保存到你选择的位置。`);
+        }
+      })
+      .catch((error) => {
+        Alert.alert('无法保存附件', error instanceof Error ? error.message : '请稍后重试。');
+      });
+  };
+
   if (attachment.kind === 'image') {
     return (
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`打开或导出图片 ${attachment.name}`}
         onPress={openOrExport}
+        style={styles.attachmentImageFrame}
       >
-        <Image source={{ uri: displayUri }} style={styles.attachmentImage} />
+        {displayUri ? (
+          <Image
+            source={{ uri: displayUri }}
+            resizeMode="cover"
+            fadeDuration={0}
+            style={styles.attachmentImage}
+          />
+        ) : (
+          <View style={styles.attachmentImageFallback}>
+            {displayError ? (
+              <ImageIcon size={22} color={palette.danger} strokeWidth={1.8} />
+            ) : (
+              <ActivityIndicator color={palette.textSecondary} size="small" />
+            )}
+          </View>
+        )}
       </Pressable>
     );
   }
@@ -4784,29 +5082,62 @@ function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
   if (attachment.kind === 'video') {
     return (
       <View style={styles.attachmentVideoCard}>
-        {Platform.OS === 'web' ? (
-          createElement('video', {
-            controls: true,
-            src: attachment.uri,
-            style: webVideoPreviewStyle,
-          })
+        {videoActive && displayUri ? (
+          <VideoAttachmentSurface uri={displayUri} />
         ) : (
-          <View style={styles.attachmentVideoPlaceholder}>
-            <Text style={styles.attachmentKind}>VIDEO</Text>
-          </View>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`在当前页面预览视频 ${attachment.name}`}
+            disabled={!displayUri}
+            onPress={onToggleVideo}
+            style={({ pressed }) => [styles.attachmentVideoPlaceholder, pressed && styles.buttonPressed]}
+          >
+            {displayUri ? (
+              <Play size={30} color={palette.textSecondary} fill={palette.textSecondary} strokeWidth={1.6} />
+            ) : (
+              <Video size={28} color={displayError ? palette.danger : palette.textSecondary} strokeWidth={1.8} />
+            )}
+            <Text style={styles.attachmentVideoPlaceholderText}>
+              {displayError ? '视频预览不可用' : '点击在当前页面预览'}
+            </Text>
+          </Pressable>
         )}
         <View style={styles.attachmentVideoFooter}>
-          <Text numberOfLines={1} style={styles.attachmentFileName}>
-            {attachment.name}
-          </Text>
-          <AnimatedPressable
-            accessibilityRole="button"
-            accessibilityLabel={`打开或导出视频 ${attachment.name}`}
-            onPress={openOrExport}
-            style={styles.attachmentOpenButton}
-          >
-            <Text style={styles.attachmentOpenButtonText}>打开 / 导出</Text>
-          </AnimatedPressable>
+          <View style={styles.attachmentVideoTitleRow}>
+            <Text numberOfLines={1} style={styles.attachmentVideoFileName}>
+              {attachment.name}
+            </Text>
+            {videoActive ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`收起视频预览 ${attachment.name}`}
+                onPress={onToggleVideo}
+                hitSlop={8}
+              >
+                <Text style={styles.attachmentVideoCollapseText}>收起</Text>
+              </Pressable>
+            ) : null}
+          </View>
+          <View style={styles.attachmentVideoActions}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`保存视频 ${attachment.name}`}
+              onPress={saveToDevice}
+              style={({ pressed }) => [styles.attachmentSaveButton, pressed && styles.buttonPressed]}
+            >
+              <Download size={15} color={palette.textOnAccent} strokeWidth={2.2} />
+              <Text style={styles.attachmentOpenButtonText}>保存</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`分享视频 ${attachment.name}`}
+              onPress={openOrExport}
+              style={({ pressed }) => [styles.attachmentShareButton, pressed && styles.buttonPressed]}
+            >
+              <Share2 size={15} color={palette.text} strokeWidth={2.2} />
+              <Text style={styles.attachmentShareButtonText}>分享</Text>
+            </Pressable>
+          </View>
         </View>
       </View>
     );
@@ -4830,6 +5161,9 @@ function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
+  },
+  buttonPressed: {
+    opacity: 0.72,
   },
   iconCrossfade: {
     alignItems: 'center',
@@ -4887,6 +5221,12 @@ const styles = StyleSheet.create({
   },
   screenFade: {
     flex: 1,
+  },
+  screenPane: {
+    flex: 1,
+  },
+  screenPaneHidden: {
+    display: 'none',
   },
   loadingShell: {
     flex: 1,
@@ -5318,6 +5658,21 @@ const styles = StyleSheet.create({
     color: palette.textSecondary,
     fontSize: 13,
     fontWeight: '600',
+  },
+  loadMoreModelsButton: {
+    minHeight: 42,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: palette.borderStrong,
+    backgroundColor: palette.bg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+  },
+  loadMoreModelsButtonText: {
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '700',
   },
   modelButton: {
     borderRadius: radii.md,
@@ -5976,12 +6331,26 @@ const styles = StyleSheet.create({
     marginTop: 12,
     flexDirection: 'row',
     flexWrap: 'wrap',
+    alignItems: 'flex-start',
+    alignSelf: 'stretch',
     gap: 8,
   },
-  attachmentImage: {
-    width: 96,
-    height: 96,
+  attachmentImageFrame: {
+    width: 104,
+    aspectRatio: 1,
     borderRadius: radii.md,
+    overflow: 'hidden',
+    backgroundColor: palette.surfaceAlt,
+  },
+  attachmentImage: {
+    width: '100%',
+    height: '100%',
+    backgroundColor: palette.surfaceAlt,
+  },
+  attachmentImageFallback: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: palette.surfaceAlt,
   },
   attachmentFile: {
@@ -6004,38 +6373,117 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   attachmentVideoCard: {
-    width: 220,
+    width: '100%',
+    maxWidth: 360,
+    alignSelf: 'stretch',
     borderRadius: radii.md,
     borderWidth: 1,
     borderColor: palette.border,
     backgroundColor: palette.surfaceAlt,
     overflow: 'hidden',
   },
+  attachmentVideoViewport: {
+    width: '100%',
+    aspectRatio: 16 / 9,
+    position: 'relative',
+    backgroundColor: '#0D0D0D',
+  },
+  attachmentVideoView: {
+    width: '100%',
+    height: '100%',
+    backgroundColor: '#0D0D0D',
+  },
+  attachmentVideoStatusOverlay: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    backgroundColor: 'rgba(13, 13, 13, 0.72)',
+  },
+  attachmentVideoStatusText: {
+    color: palette.textOnAccent,
+    fontSize: 12,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
   attachmentVideoPlaceholder: {
-    height: 128,
+    width: '100%',
+    aspectRatio: 16 / 9,
     backgroundColor: palette.surfaceSunken,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  attachmentVideoFooter: {
-    minHeight: 44,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
     gap: 8,
   },
-  attachmentOpenButton: {
-    height: 30,
+  attachmentVideoPlaceholderText: {
+    color: palette.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  attachmentVideoFooter: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  attachmentVideoTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  attachmentVideoFileName: {
+    flex: 1,
+    minWidth: 0,
+    color: palette.text,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  attachmentVideoCollapseText: {
+    color: palette.textSecondary,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  attachmentVideoActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  attachmentSaveButton: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 40,
     borderRadius: radii.pill,
     backgroundColor: palette.accent,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 12,
+    gap: 6,
+    paddingHorizontal: 10,
+  },
+  attachmentShareButton: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 40,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: palette.borderStrong,
+    backgroundColor: palette.bg,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
   },
   attachmentOpenButtonText: {
     color: palette.textOnAccent,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  attachmentShareButtonText: {
+    color: palette.text,
     fontSize: 12,
     fontWeight: '700',
   },
@@ -6050,29 +6498,64 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
   },
+  pendingAttachmentScroller: {
+    flexGrow: 0,
+    flexShrink: 0,
+    maxHeight: 116,
+  },
   pendingAttachments: {
     paddingHorizontal: 16,
     paddingBottom: 10,
+    alignItems: 'center',
     gap: 8,
   },
   pendingAttachment: {
-    width: 132,
-    minHeight: 54,
+    width: 104,
+    aspectRatio: 1,
     borderRadius: radii.md,
     backgroundColor: palette.surface,
     borderWidth: 1,
     borderColor: palette.border,
-    padding: 10,
+    overflow: 'hidden',
+    position: 'relative',
   },
-  pendingAttachmentText: {
-    color: palette.accentText,
-    fontSize: 11,
-    fontWeight: '700',
+  pendingAttachmentImage: {
+    width: '100%',
+    height: '100%',
+    backgroundColor: palette.surfaceAlt,
+  },
+  pendingAttachmentFallback: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: palette.surfaceAlt,
+  },
+  pendingAttachmentNameBar: {
+    position: 'absolute',
+    right: 0,
+    bottom: 0,
+    left: 0,
+    minHeight: 28,
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+    paddingRight: 26,
+    backgroundColor: 'rgba(13, 13, 13, 0.72)',
   },
   pendingAttachmentName: {
-    marginTop: 4,
-    color: palette.textSecondary,
-    fontSize: 12,
+    color: palette.textOnAccent,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  pendingAttachmentRemove: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(13, 13, 13, 0.82)',
   },
   attachButton: {
     width: 28,
@@ -6630,6 +7113,9 @@ const styles = StyleSheet.create({
   sidebarEmpty: {
     color: palette.placeholder,
     fontSize: 14,
+  },
+  modalKeyboard: {
+    flex: 1,
   },
   renameDialogScrim: {
     flex: 1,
