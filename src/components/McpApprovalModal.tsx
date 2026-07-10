@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useKelivoTheme, type KelivoTheme } from '../ui/theme';
+
 import type { ProviderMcpApprovalDecision } from '../services/providerMcp';
 import type { McpApprovalToken } from '../services/mcpLifecycle';
 
@@ -25,20 +27,6 @@ interface McpApprovalModalProps {
   onDecision: (token: McpApprovalToken, decision: ProviderMcpApprovalDecision) => void;
 }
 
-const colors = {
-  background: '#F4F4F4',
-  surface: '#FFFFFF',
-  surfaceAlt: '#EAEAEA',
-  text: '#0D0D0D',
-  secondary: '#666666',
-  border: '#D9D9D9',
-  accent: '#0D0D0D',
-  warning: '#9A4D09',
-  warningBackground: '#FFF6E8',
-  danger: '#A12828',
-  dangerBackground: '#FFF0F0',
-} as const;
-
 function formatByteLength(bytes: number): string {
   const exact = `${bytes.toLocaleString('en-US')} B`;
   if (bytes < 1024) {
@@ -53,6 +41,10 @@ export function McpApprovalModal({
   onDecision,
 }: McpApprovalModalProps) {
   const insets = useSafeAreaInsets();
+  const theme = useKelivoTheme();
+  const styles = getStyles(theme);
+  const colors = themeColors(theme);
+
   const [decisionPending, setDecisionPending] = useState(false);
   const decisionPendingRef = useRef(false);
 
@@ -184,7 +176,7 @@ export function McpApprovalModal({
             onPress={() => settleOnce('approve')}
             style={[styles.approveButton, decisionPending && styles.actionDisabled]}
           >
-            <Check size={17} color="#FFFFFF" strokeWidth={2.8} />
+            <Check size={17} color={colors.onAccent} strokeWidth={2.8} />
             <Text style={styles.approveButtonText}>批准一次</Text>
           </Pressable>
         </View>
@@ -193,7 +185,9 @@ export function McpApprovalModal({
   );
 }
 
-const styles = StyleSheet.create({
+function createStyles(theme: KelivoTheme) {
+  const colors = themeColors(theme);
+  return StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.background },
   header: {
     minHeight: 72,
@@ -225,9 +219,9 @@ const styles = StyleSheet.create({
   toolName: { color: colors.text, fontSize: 16, lineHeight: 22, fontWeight: '800' },
   byteBadge: { color: colors.secondary, fontSize: 10, backgroundColor: colors.surfaceAlt, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 4, overflow: 'hidden' },
   payloadHint: { color: colors.secondary, fontSize: 11, lineHeight: 17 },
-  codeScroller: { maxHeight: 280, borderRadius: 13, backgroundColor: '#161616' },
+  codeScroller: { maxHeight: 280, borderRadius: 13, backgroundColor: colors.codeBg },
   codeContent: { padding: 13 },
-  codeText: { color: '#F2F2F2', fontFamily: 'monospace', fontSize: 12, lineHeight: 18 },
+  codeText: { color: colors.codeText, fontFamily: 'monospace', fontSize: 12, lineHeight: 18 },
   noticeCard: { padding: 14, borderRadius: 16, backgroundColor: colors.surfaceAlt, gap: 5 },
   noticeTitle: { color: colors.text, fontSize: 12, fontWeight: '700', marginBottom: 2 },
   noticeText: { color: colors.secondary, fontSize: 11, lineHeight: 17 },
@@ -237,6 +231,38 @@ const styles = StyleSheet.create({
   denyButton: { flex: 1, minHeight: 46, paddingHorizontal: 9, borderRadius: 14, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 6 },
   denyButtonText: { color: colors.text, fontSize: 12, fontWeight: '700' },
   approveButton: { flex: 1, minHeight: 46, paddingHorizontal: 9, borderRadius: 14, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 6 },
-  approveButtonText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
+  approveButtonText: { color: colors.onAccent, fontSize: 12, fontWeight: '700' },
   actionDisabled: { opacity: 0.55 },
-});
+  });
+}
+
+const styleCache = new WeakMap<KelivoTheme, ReturnType<typeof createStyles>>();
+
+function getStyles(theme: KelivoTheme) {
+  let styles = styleCache.get(theme);
+  if (!styles) {
+    styles = createStyles(theme);
+    styleCache.set(theme, styles);
+  }
+  return styles;
+}
+
+function themeColors(theme: KelivoTheme) {
+  return {
+    background: theme.colors.surface,
+    surface: theme.colors.card,
+    surfaceAlt: theme.colors.surfaceAlt,
+    surfaceStrong: theme.colors.surfaceSunken,
+    text: theme.colors.text,
+    secondary: theme.colors.textSecondary,
+    border: theme.colors.outline,
+    accent: theme.colors.primary,
+    danger: theme.colors.error,
+    dangerBackground: theme.colors.errorContainer,
+    warning: theme.colors.warning,
+    warningBackground: theme.colors.warningContainer,
+    onAccent: theme.colors.onPrimary,
+    codeBg: theme.dark ? '#0E1015' : '#161616',
+    codeText: theme.dark ? '#E5E7EF' : '#F2F2F2',
+  } as const;
+}

@@ -9,6 +9,7 @@ module.exports = defineConfig([
       'coverage/**',
       'dist/**',
       'node_modules/**',
+      'pro-ref/**',
       'web-build/**',
     ],
   },

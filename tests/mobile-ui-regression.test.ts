@@ -36,7 +36,8 @@ describe('Android mobile UI regressions', () => {
 
     expect(appSource).toContain('const candidateModelPageSize = 60;');
     expect(appSource).toContain('filteredModelCandidates.slice(0, candidateModelRenderLimit)');
-    expect(appSource).toContain('{settingsMounted ? (');
+    expect(appSource).toContain('{settingsMounted && activeProvider ? (');
+    expect(appSource).toContain('<SettingsScreen');
     expect(appSource).toContain('style={[styles.screenPane, settingsOpen && styles.screenPaneHidden]}');
     expect(appSource).toContain('Keyboard.dismiss();');
     expect(appSource).toMatch(

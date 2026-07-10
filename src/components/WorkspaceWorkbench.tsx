@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { Alert, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useKelivoTheme, type KelivoTheme } from '../ui/theme';
+
 import type {
   ProjectKnowledgeSource,
   WorkspaceArtifact,
@@ -46,18 +48,6 @@ const artifactCreateFormats: readonly WorkspaceArtifactFormat[] = [
   'html',
 ];
 
-const colors = {
-  background: '#F4F4F4',
-  surface: '#FFFFFF',
-  surfaceAlt: '#EAEAEA',
-  surfaceStrong: '#DCDCDC',
-  text: '#0D0D0D',
-  secondary: '#6E6E6E',
-  border: '#D9D9D9',
-  accent: '#0D0D0D',
-  danger: '#DC2626',
-} as const;
-
 function activeArtifactContent(artifact: WorkspaceArtifact | undefined): string {
   if (!artifact) return '';
   return artifact.revisions.find((revision) => revision.id === artifact.activeRevisionId)?.content ?? '';
@@ -100,6 +90,10 @@ export function WorkspaceWorkbench({
   onImportTextKnowledge,
 }: WorkspaceWorkbenchProps) {
   const insets = useSafeAreaInsets();
+  const theme = useKelivoTheme();
+  const styles = getStyles(theme);
+  const colors = themeColors(theme);
+
   const [tab, setTab] = useState<WorkbenchTab>('artifacts');
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [artifactTitle, setArtifactTitle] = useState('');
@@ -244,7 +238,7 @@ export function WorkspaceWorkbench({
             onPress={() => setTab('artifacts')}
             style={[styles.tab, tab === 'artifacts' && styles.tabActive]}
           >
-            <FileText size={16} color={tab === 'artifacts' ? '#FFFFFF' : colors.secondary} strokeWidth={2} />
+            <FileText size={16} color={tab === 'artifacts' ? colors.onAccent : colors.secondary} strokeWidth={2} />
             <Text style={[styles.tabText, tab === 'artifacts' && styles.tabTextActive]}>成果 {artifacts.length}</Text>
           </Pressable>
           <Pressable
@@ -253,7 +247,7 @@ export function WorkspaceWorkbench({
             onPress={() => setTab('knowledge')}
             style={[styles.tab, tab === 'knowledge' && styles.tabActive]}
           >
-            <BookOpen size={16} color={tab === 'knowledge' ? '#FFFFFF' : colors.secondary} strokeWidth={2} />
+            <BookOpen size={16} color={tab === 'knowledge' ? colors.onAccent : colors.secondary} strokeWidth={2} />
             <Text style={[styles.tabText, tab === 'knowledge' && styles.tabTextActive]}>资料 {knowledgeSources.length}</Text>
           </Pressable>
         </View>
@@ -332,7 +326,7 @@ export function WorkspaceWorkbench({
                       onPress={() => onSaveArtifact(selectedArtifact.id, artifactTitle, artifactContent)}
                       style={[styles.primaryButton, (readOnly || !artifactDirty || !artifactTitle.trim()) && styles.disabled]}
                     >
-                      <Save size={16} color="#FFFFFF" strokeWidth={2.2} />
+                      <Save size={16} color={colors.onAccent} strokeWidth={2.2} />
                       <Text style={styles.primaryButtonText}>保存新版本</Text>
                     </Pressable>
                     <Pressable
@@ -519,7 +513,7 @@ export function WorkspaceWorkbench({
                 }}
                 style={[styles.primaryButton, (readOnly || !newKnowledgeTitle.trim() || !newKnowledgeContent.trim()) && styles.disabled]}
               >
-                <Plus size={16} color="#FFFFFF" strokeWidth={2.2} />
+                <Plus size={16} color={colors.onAccent} strokeWidth={2.2} />
                 <Text style={styles.primaryButtonText}>保存到当前项目</Text>
               </Pressable>
             </View>
@@ -557,7 +551,7 @@ export function WorkspaceWorkbench({
                     onPress={() => onSaveKnowledge(selectedKnowledge.id, knowledgeTitle, knowledgeContent)}
                     style={[styles.primaryButton, (readOnly || !knowledgeDirty || !knowledgeTitle.trim() || !knowledgeContent.trim()) && styles.disabled]}
                   >
-                    <Save size={16} color="#FFFFFF" strokeWidth={2.2} />
+                    <Save size={16} color={colors.onAccent} strokeWidth={2.2} />
                     <Text style={styles.primaryButtonText}>保存资料</Text>
                   </Pressable>
                   <Pressable
@@ -582,7 +576,9 @@ export function WorkspaceWorkbench({
   );
 }
 
-const styles = StyleSheet.create({
+function createStyles(theme: KelivoTheme) {
+  const colors = themeColors(theme);
+  return StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.background },
   header: { minHeight: 64, paddingHorizontal: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, flexDirection: 'row', alignItems: 'center' },
   headerText: { flex: 1, gap: 2 },
@@ -593,14 +589,14 @@ const styles = StyleSheet.create({
   tab: { flex: 1, minHeight: 42, borderRadius: 13, backgroundColor: colors.surfaceAlt, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center' },
   tabActive: { backgroundColor: colors.accent },
   tabText: { color: colors.secondary, fontSize: 13, fontWeight: '700' },
-  tabTextActive: { color: '#FFFFFF' },
+  tabTextActive: { color: colors.onAccent },
   body: { flex: 1 },
   bodyContent: { padding: 16, gap: 12 },
   chipRow: { gap: 8, paddingRight: 12 },
   chip: { maxWidth: 180, minHeight: 36, paddingHorizontal: 12, borderRadius: 12, backgroundColor: colors.surfaceAlt, justifyContent: 'center' },
   chipActive: { backgroundColor: colors.accent },
   chipText: { color: colors.secondary, fontSize: 12, fontWeight: '600' },
-  chipTextActive: { color: '#FFFFFF' },
+  chipTextActive: { color: colors.onAccent },
   addChip: { minHeight: 36, paddingHorizontal: 12, borderRadius: 12, backgroundColor: colors.surfaceStrong, flexDirection: 'row', gap: 5, alignItems: 'center' },
   addChipText: { color: colors.text, fontSize: 12, fontWeight: '700' },
   card: { padding: 15, borderRadius: 18, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, gap: 12 },
@@ -614,7 +610,7 @@ const styles = StyleSheet.create({
   securityHint: { color: colors.secondary, fontSize: 11, lineHeight: 17 },
   actionRow: { flexDirection: 'row', gap: 8 },
   primaryButton: { flex: 1.35, minHeight: 44, borderRadius: 13, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 7 },
-  primaryButtonText: { color: '#FFFFFF', fontWeight: '700', fontSize: 13 },
+  primaryButtonText: { color: colors.onAccent, fontWeight: '700', fontSize: 13 },
   secondaryButton: { flex: 1, minHeight: 44, borderRadius: 13, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 7 },
   secondaryButtonText: { color: colors.text, fontWeight: '700', fontSize: 13 },
   dangerButton: { flex: 1, minHeight: 44, borderRadius: 13, backgroundColor: '#FEF2F2', alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 7 },
@@ -639,4 +635,36 @@ const styles = StyleSheet.create({
   compactButton: { minHeight: 34, paddingHorizontal: 10, borderRadius: 10, backgroundColor: colors.surfaceAlt, flexDirection: 'row', gap: 5, alignItems: 'center' },
   compactButtonText: { color: colors.text, fontSize: 11, fontWeight: '700' },
   disabled: { opacity: 0.42 },
-});
+  });
+}
+
+const styleCache = new WeakMap<KelivoTheme, ReturnType<typeof createStyles>>();
+
+function getStyles(theme: KelivoTheme) {
+  let styles = styleCache.get(theme);
+  if (!styles) {
+    styles = createStyles(theme);
+    styleCache.set(theme, styles);
+  }
+  return styles;
+}
+
+function themeColors(theme: KelivoTheme) {
+  return {
+    background: theme.colors.surface,
+    surface: theme.colors.card,
+    surfaceAlt: theme.colors.surfaceAlt,
+    surfaceStrong: theme.colors.surfaceSunken,
+    text: theme.colors.text,
+    secondary: theme.colors.textSecondary,
+    border: theme.colors.outline,
+    accent: theme.colors.primary,
+    danger: theme.colors.error,
+    dangerBackground: theme.colors.errorContainer,
+    warning: theme.colors.warning,
+    warningBackground: theme.colors.warningContainer,
+    onAccent: theme.colors.onPrimary,
+    codeBg: theme.dark ? '#0E1015' : '#161616',
+    codeText: theme.dark ? '#E5E7EF' : '#F2F2F2',
+  } as const;
+}

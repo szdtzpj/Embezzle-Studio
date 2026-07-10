@@ -34,6 +34,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useColorScheme,
   useWindowDimensions,
   View,
 } from 'react-native';
@@ -72,6 +73,7 @@ import type {
   ChatCompletionResult,
   ChatTokenUsage,
   ChatConversation,
+  ColorMode,
   GenerationTaskInfo,
   ChatMessage,
   MessageRole,
@@ -113,7 +115,7 @@ import {
   type RequestContextOptions,
 } from './src/services/contextInspector';
 import { createId } from './src/services/id';
-import { consumeStorageRecoveryNotice, loadWorkspace, saveWorkspace } from './src/services/storage';
+import { consumeStorageRecoveryNotice, loadColorMode, loadWorkspace, saveColorMode, saveWorkspace } from './src/services/storage';
 import {
   isWorkspaceReplacementError,
   persistWorkspaceReplacement,
@@ -249,6 +251,8 @@ import {
   upsertProviderUsageEvent,
   type ProviderRequestPlan,
 } from './src/services/costGuard';
+import { SettingsScreen } from './src/ui/screens/SettingsScreen';
+import { KelivoThemeProvider } from './src/ui/theme';
 
 /**
  * Anthropic / Claude 风格视觉令牌。
@@ -1174,6 +1178,60 @@ function formatUpdateStatusTitle(updateInfo: AppUpdateInfo | null, updateNotice:
 }
 
 export default function App() {
+  const systemColorScheme = useColorScheme();
+  const [colorMode, setColorMode] = useState<ColorMode>('system');
+  const [appearanceNotice, setAppearanceNotice] = useState('');
+  const colorModeChangedRef = useRef(false);
+
+  useEffect(() => {
+    let mounted = true;
+    loadColorMode()
+      .then((savedColorMode) => {
+        if (mounted && !colorModeChangedRef.current) {
+          setColorMode(savedColorMode);
+        }
+      })
+      .catch((error) => {
+        if (mounted) {
+          setAppearanceNotice(error instanceof Error ? error.message : '颜色模式加载失败。');
+        }
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  function updateColorMode(nextColorMode: ColorMode) {
+    colorModeChangedRef.current = true;
+    setColorMode(nextColorMode);
+    setAppearanceNotice('');
+    saveColorMode(nextColorMode).catch((error) => {
+      setAppearanceNotice(error instanceof Error ? error.message : '颜色模式保存失败。');
+    });
+  }
+
+  const isDark = colorMode === 'dark' || (colorMode === 'system' && systemColorScheme === 'dark');
+
+  return (
+    <KelivoThemeProvider scheme={isDark ? 'dark' : 'light'}>
+      <AppContent
+        colorMode={colorMode}
+        onSetColorMode={updateColorMode}
+        appearanceNotice={appearanceNotice}
+      />
+    </KelivoThemeProvider>
+  );
+}
+
+function AppContent({
+  colorMode,
+  onSetColorMode,
+  appearanceNotice,
+}: {
+  colorMode: ColorMode;
+  onSetColorMode: (colorMode: ColorMode) => void;
+  appearanceNotice: string;
+}) {
   const voiceRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const voiceRecorderState = useAudioRecorderState(voiceRecorder, 250);
   const [workspace, setWorkspaceState] = useState<AppWorkspace>(() => createDefaultWorkspace());
@@ -1191,6 +1249,7 @@ export default function App() {
   const [persistenceLoadError, setPersistenceLoadError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsMounted, setSettingsMounted] = useState(false);
+  const [refreshingModels, setRefreshingModels] = useState(false);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [workbenchArtifactId, setWorkbenchArtifactId] = useState<string | null>(null);
   const [contextInspectorOpen, setContextInspectorOpen] = useState(false);
@@ -2700,6 +2759,65 @@ export default function App() {
     }
   }
 
+  function updateActiveProvider(patch: Partial<ProviderProfile>) {
+    if (!ensureWorkspaceWritable() || !activeProvider) {
+      return;
+    }
+    setWorkspace((current) => ({
+      ...current,
+      providers: current.providers.map((provider) =>
+        provider.id === activeProvider.id ? { ...provider, ...patch } : provider
+      ),
+    }));
+  }
+
+  function closeSettings() {
+    setSettingsOpen(false);
+    if (workspaceReadOnly) {
+      return;
+    }
+    setWorkspace((current) => {
+      const selectedProvider = current.providers.find(
+        (provider) => provider.id === current.activeProviderId,
+      );
+      if (isProviderEnabled(selectedProvider)) {
+        return current;
+      }
+      const fallbackProvider = current.providers.find(isProviderEnabled);
+      return fallbackProvider
+        ? { ...current, activeProviderId: fallbackProvider.id }
+        : current;
+    });
+  }
+
+  function toggleProviderEnabled(providerId: string) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+    setWorkspace((current) => {
+      const providers = current.providers.map((provider) =>
+        provider.id === providerId
+          ? { ...provider, enabled: !(provider.enabled ?? true) }
+          : provider,
+      );
+      const toggledProvider = providers.find((provider) => provider.id === providerId);
+      const fallbackProvider = providers.find(isProviderEnabled);
+      const activeProviderId =
+        current.activeProviderId === providerId && !isProviderEnabled(toggledProvider)
+          ? fallbackProvider?.id ?? current.activeProviderId
+          : current.activeProviderId;
+      return {
+        ...current,
+        providers,
+        activeProviderId,
+      };
+    });
+  }
+
+  function isProviderEnabled(provider?: ProviderProfile | null): provider is ProviderProfile {
+    return Boolean(provider && (provider.enabled ?? true));
+  }
+
   function selectProvider(providerId: string) {
     if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
       return;
@@ -3369,7 +3487,7 @@ export default function App() {
     setModelCapabilityFilter('all');
   }
 
-  async function deleteProvider(providerId: string) {
+  async function deleteProvider(providerId: string, onDeleted?: () => void) {
     if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
       setDeleteConfirmProviderId(null);
       return;
@@ -3401,6 +3519,7 @@ export default function App() {
       setNotice(
         `已删除服务商、本地 API Key 及 ${removal.removedPluginIds.length} 个绑定 MCP 配置和授权。`
       );
+      onDeleted?.();
     } catch (error) {
       setNotice(
         error instanceof Error
@@ -3637,6 +3756,7 @@ export default function App() {
     if (!controller) {
       return;
     }
+    setRefreshingModels(true);
     setNotice('正在请求服务商模型目录；这不是模型生成测试，也不会由 Embezzle Studio 提供额度。');
 
     try {
@@ -3665,6 +3785,7 @@ export default function App() {
       }));
       setNotice(error instanceof Error ? error.message : '模型列表获取失败。');
     } finally {
+      setRefreshingModels(false);
       finishActiveRequest(controller);
     }
   }
@@ -6747,7 +6868,7 @@ export default function App() {
   return (
     <GestureHandlerRootView style={styles.root}>
       <SafeAreaProvider>
-      <StatusBar style="dark" />
+      <StatusBar style={colorMode === 'light' ? 'dark' : colorMode === 'dark' ? 'light' : 'auto'} />
       <SafeAreaView style={styles.shell}>
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined}
@@ -6832,7 +6953,7 @@ export default function App() {
             onSelect={selectProviderModel}
           />
 
-          {settingsMounted ? (
+          {settingsMounted && activeProvider ? (
             <View
               style={[styles.screenPane, !settingsOpen && styles.screenPaneHidden]}
               pointerEvents={settingsOpen ? 'auto' : 'none'}
@@ -6840,12 +6961,65 @@ export default function App() {
               importantForAccessibility={settingsOpen ? 'auto' : 'no-hide-descendants'}
             >
               <ScreenFade>
-                <ScrollView
-                  style={styles.content}
-                  contentContainerStyle={styles.settingsContent}
-                  keyboardDismissMode={Platform.OS === 'android' ? 'on-drag' : 'interactive'}
-                  keyboardShouldPersistTaps="handled"
-                >
+                <SettingsScreen
+                  readOnly={workspaceReadOnly}
+                  colorMode={colorMode}
+                  onSetColorMode={onSetColorMode}
+                  onClose={closeSettings}
+                  providers={workspace.providers}
+                  activeProvider={activeProvider}
+                  activeModel={activeModel}
+                  activeModelId={activeModelId}
+                  addedModels={addedModels}
+                  addedModelIds={addedModelIds}
+                  modelCandidates={modelCandidates}
+                  filteredModelCandidates={filteredModelCandidates}
+                  renderedModelCandidates={renderedModelCandidates}
+                  modelSearchQuery={modelSearchQuery}
+                  modelCapabilityFilter={modelCapabilityFilter}
+                  candidateModelFilters={candidateModelFilters}
+                  manualModelId={manualModelId}
+                  refreshingModels={refreshingModels}
+                  configurableModelTasks={configurableModelTasks}
+                  configurableModelCapabilities={configurableModelCapabilities}
+                  checkingUpdate={checkingUpdate}
+                  updateInfo={updateInfo}
+                  updateNotice={updateNotice}
+                  notice={[notice, appearanceNotice].filter(Boolean).join('\n')}
+                  onSelectProvider={selectProvider}
+                  onToggleProviderEnabled={toggleProviderEnabled}
+                  onDeleteProvider={deleteProvider}
+                  onAddCustomProvider={addCustomProvider}
+                  onUpdateProvider={updateActiveProvider}
+                  onRefreshModels={refreshModels}
+                  onSetModelSearchQuery={setModelSearchQuery}
+                  onSetModelCapabilityFilter={setModelCapabilityFilter}
+                  onAddCandidateModel={addCandidateModel}
+                  onClearCandidates={() => {
+                    if (!ensureWorkspaceWritable()) {
+                      return;
+                    }
+                    setWorkspace((current) => ({
+                      ...current,
+                      modelCandidatesByProvider: {
+                        ...current.modelCandidatesByProvider,
+                        [activeProvider.id]: [],
+                      },
+                    }));
+                    setModelSearchQuery('');
+                    setModelCapabilityFilter('all');
+                  }}
+                  onSetManualModelId={setManualModelId}
+                  onAddManualModel={addManualModel}
+                  onSelectModel={selectModel}
+                  onRemoveModel={removeModel}
+                  onSetActiveModelTask={setActiveModelTask}
+                  onToggleActiveModelCapability={toggleActiveModelCapability}
+                  onCheckUpdates={checkUpdates}
+                  onOpenUpdateTarget={openUpdateTarget}
+                  renderToolsPanel={() => (
+                    <>
+
 
               <View style={styles.settingsCard} testID="project-workspace-settings-card">
                 <View style={styles.settingsCardHeader}>
@@ -8169,7 +8343,10 @@ export default function App() {
                 </View>
               </View>
 
-                </ScrollView>
+
+                    </>
+                  )}
+                />
               </ScreenFade>
             </View>
           ) : null}

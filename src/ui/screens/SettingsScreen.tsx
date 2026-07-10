@@ -1,0 +1,284 @@
+import { useState, type ReactNode } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
+import { SettingsMainScreen } from './settings/SettingsMainScreen';
+import { ColorModeScreen } from './settings/ColorModeScreen';
+import { ProviderListScreen } from './settings/ProviderListScreen';
+import { ProviderDetailScreen } from './settings/ProviderDetailScreen';
+import { AboutScreen } from './settings/AboutScreen';
+import { ToolsPanelScreen } from './settings/ToolsPanelScreen';
+import { ConfirmDialog } from '../components/ConfirmDialog';
+import { MotionSwitch } from '../components/Motion';
+import { useKelivoTheme, type KelivoTheme } from '../theme';
+import { isUserCreatedProvider } from '../../data/providerCatalog';
+import type { AppUpdateInfo } from '../../services/updateChecker';
+import type { Capability, ModelInfo, ModelTask, ProviderProfile } from '../../domain/types';
+import type { ModelCapabilityFilter } from '../../services/modelCapabilities';
+
+export interface SettingsScreenProps {
+  readOnly: boolean;
+  colorMode: 'system' | 'light' | 'dark';
+  onSetColorMode: (mode: 'system' | 'light' | 'dark') => void;
+  onClose: () => void;
+  providers: ProviderProfile[];
+  activeProvider: ProviderProfile;
+  activeModel?: ModelInfo;
+  activeModelId: string;
+  addedModels: ModelInfo[];
+  addedModelIds: Set<string>;
+  modelCandidates: ModelInfo[];
+  filteredModelCandidates: ModelInfo[];
+  renderedModelCandidates: ModelInfo[];
+  modelSearchQuery: string;
+  modelCapabilityFilter: ModelCapabilityFilter;
+  candidateModelFilters: Array<{ key: ModelCapabilityFilter; label: string }>;
+  manualModelId: string;
+  refreshingModels: boolean;
+  configurableModelTasks: ModelTask[];
+  configurableModelCapabilities: Array<{ key: Capability; label: string }>;
+  checkingUpdate: boolean;
+  updateInfo: AppUpdateInfo | null;
+  updateNotice: string;
+  notice: string;
+  /** Main-branch feature cards (projects/MCP/backup/etc.) rendered inside tools chrome. */
+  renderToolsPanel?: () => ReactNode;
+  onSelectProvider: (providerId: string) => void;
+  onToggleProviderEnabled: (providerId: string) => void;
+  onDeleteProvider: (providerId: string, onDeleted?: () => void) => void;
+  onAddCustomProvider: () => void;
+  onUpdateProvider: (patch: Partial<ProviderProfile>) => void;
+  onRefreshModels: () => void;
+  onSetModelSearchQuery: (query: string) => void;
+  onSetModelCapabilityFilter: (filter: ModelCapabilityFilter) => void;
+  onAddCandidateModel: (model: ModelInfo) => void;
+  onClearCandidates: () => void;
+  onSetManualModelId: (id: string) => void;
+  onAddManualModel: () => void;
+  onSelectModel: (modelId: string) => void;
+  onRemoveModel: (modelId: string) => void;
+  onSetActiveModelTask: (task: ModelTask) => void;
+  onToggleActiveModelCapability: (capability: Capability) => void;
+  onCheckUpdates: () => void;
+  onOpenUpdateTarget: (kind: 'release' | 'install') => void;
+}
+
+type ScreenState =
+  | { key: 'main' }
+  | { key: 'colorMode' }
+  | { key: 'providers' }
+  | { key: 'providerDetail' }
+  | { key: 'tools' }
+  | { key: 'about' };
+
+type PendingProviderDeletion = {
+  providerId: string;
+  providerName: string;
+  onDeleted?: () => void;
+};
+
+export function SettingsScreen(props: SettingsScreenProps) {
+  const theme = useKelivoTheme();
+  const styles = getStyles(theme);
+  const [stack, setStack] = useState<ScreenState[]>([{ key: 'main' }]);
+  const [pendingProviderDeletion, setPendingProviderDeletion] =
+    useState<PendingProviderDeletion | null>(null);
+  const [navigationDirection, setNavigationDirection] =
+    useState<'forward' | 'backward' | 'none'>('none');
+  const current = stack[stack.length - 1].key;
+
+  const push = (key: Exclude<ScreenState['key'], 'main'>) => {
+    setNavigationDirection('forward');
+    setStack((s) => [...s, { key }]);
+  };
+
+  const pop = () => {
+    setNavigationDirection('backward');
+    setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
+  };
+
+  const navigateToProviderDetail = (providerId: string) => {
+    props.onSelectProvider(providerId);
+    push('providerDetail');
+  };
+
+  const requestDeleteProvider = (providerId: string, onDeleted?: () => void) => {
+    if (props.readOnly) {
+      return;
+    }
+    const provider = props.providers.find((item) => item.id === providerId);
+    if (!provider || !isUserCreatedProvider(provider)) {
+      return;
+    }
+
+    setPendingProviderDeletion({
+      providerId: provider.id,
+      providerName: provider.name,
+      onDeleted,
+    });
+  };
+
+  const confirmDeleteProvider = () => {
+    if (!pendingProviderDeletion) {
+      return;
+    }
+
+    const deletion = pendingProviderDeletion;
+    setPendingProviderDeletion(null);
+    props.onDeleteProvider(deletion.providerId, deletion.onDeleted);
+  };
+
+  const renderScreen = () => {
+    switch (current) {
+      case 'main':
+        return (
+          <SettingsMainScreen
+            colorMode={props.colorMode}
+            activeProvider={props.activeProvider}
+            onBack={props.onClose}
+            onColorMode={() => push('colorMode')}
+            onProviders={() => push('providers')}
+            onTools={() => push('tools')}
+            onAbout={() => push('about')}
+          />
+        );
+      case 'about':
+        return (
+          <AboutScreen
+            checkingUpdate={props.checkingUpdate}
+            updateInfo={props.updateInfo}
+            updateNotice={props.updateNotice}
+            onBack={pop}
+            onCheckUpdates={props.onCheckUpdates}
+            onOpenUpdateTarget={props.onOpenUpdateTarget}
+          />
+        );
+      case 'colorMode':
+        return (
+          <ColorModeScreen
+            readOnly={props.readOnly}
+            colorMode={props.colorMode}
+            onSetColorMode={props.onSetColorMode}
+            onBack={pop}
+          />
+        );
+      case 'tools':
+        return (
+          <ToolsPanelScreen onBack={pop}>
+            {props.renderToolsPanel?.() ?? null}
+          </ToolsPanelScreen>
+        );
+      case 'providers':
+        return (
+          <ProviderListScreen
+            readOnly={props.readOnly}
+            providers={props.providers}
+            activeProviderId={props.activeProvider.id}
+            onBack={pop}
+            onSelectProvider={navigateToProviderDetail}
+            onToggleEnabled={props.onToggleProviderEnabled}
+            onDeleteProvider={requestDeleteProvider}
+            onAddProvider={props.onAddCustomProvider}
+          />
+        );
+      case 'providerDetail':
+        return (
+          <ProviderDetailScreen
+            readOnly={props.readOnly}
+            provider={props.activeProvider}
+            activeModel={props.activeModel}
+            activeModelId={props.activeModelId}
+            addedModels={props.addedModels}
+            addedModelIds={props.addedModelIds}
+            modelCandidates={props.modelCandidates}
+            filteredModelCandidates={props.filteredModelCandidates}
+            renderedModelCandidates={props.renderedModelCandidates}
+            modelSearchQuery={props.modelSearchQuery}
+            modelCapabilityFilter={props.modelCapabilityFilter}
+            candidateModelFilters={props.candidateModelFilters}
+            manualModelId={props.manualModelId}
+            refreshingModels={props.refreshingModels}
+            configurableModelTasks={props.configurableModelTasks}
+            configurableModelCapabilities={props.configurableModelCapabilities}
+            notice={props.notice}
+            onBack={pop}
+            onUpdateProvider={props.onUpdateProvider}
+            onRefreshModels={props.onRefreshModels}
+            onSetModelSearchQuery={props.onSetModelSearchQuery}
+            onSetModelCapabilityFilter={props.onSetModelCapabilityFilter}
+            onAddCandidateModel={props.onAddCandidateModel}
+            onClearCandidates={props.onClearCandidates}
+            onSetManualModelId={props.onSetManualModelId}
+            onAddManualModel={props.onAddManualModel}
+            onSelectModel={props.onSelectModel}
+            onRemoveModel={props.onRemoveModel}
+            onSetActiveModelTask={props.onSetActiveModelTask}
+            onToggleActiveModelCapability={props.onToggleActiveModelCapability}
+            onDeleteProvider={
+              isUserCreatedProvider(props.activeProvider)
+                ? () => requestDeleteProvider(props.activeProvider.id, pop)
+                : undefined
+            }
+          />
+        );
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <View style={styles.container}>
+      <MotionSwitch motionKey={current} direction={navigationDirection}>
+        {renderScreen()}
+      </MotionSwitch>
+      {props.notice && current !== 'providerDetail' ? (
+        <View style={styles.noticeBanner}>
+          <Text style={styles.noticeText}>{props.notice}</Text>
+        </View>
+      ) : null}
+      <ConfirmDialog
+        visible={Boolean(pendingProviderDeletion)}
+        title="删除供应商？"
+        subject={pendingProviderDeletion?.providerName}
+        description="相关配置、模型记录和 API Key 将一并移除，此操作无法撤销。"
+        confirmLabel="删除"
+        onCancel={() => setPendingProviderDeletion(null)}
+        onConfirm={confirmDeleteProvider}
+      />
+    </View>
+  );
+}
+
+function createStyles(theme: KelivoTheme) {
+  return StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: theme.colors.surface,
+    },
+    noticeBanner: {
+      marginHorizontal: 12,
+      marginBottom: 10,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: theme.colors.warningBorder,
+      backgroundColor: theme.colors.warningContainer,
+      paddingHorizontal: 12,
+      paddingVertical: 9,
+    },
+    noticeText: {
+      color: theme.colors.warning,
+      fontSize: 12,
+      lineHeight: 17,
+      fontWeight: '600',
+    },
+  });
+}
+
+const styleCache = new WeakMap<KelivoTheme, ReturnType<typeof createStyles>>();
+
+function getStyles(theme: KelivoTheme) {
+  let styles = styleCache.get(theme);
+  if (!styles) {
+    styles = createStyles(theme);
+    styleCache.set(theme, styles);
+  }
+  return styles;
+}
