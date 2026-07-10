@@ -162,7 +162,7 @@ Start with the release page/stager closure; do not begin by re-auditing complete
 
 These are not locally solvable without the user's GitHub/security choices:
 
-- Create protected GitHub Environment `android-release` with required reviewers.
+- Create GitHub Environment `android-release`, restrict its deployment branch policy to `main`, and decide the repository-plan boundary explicitly. [GitHub's environment limits](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) make required reviewers public-only on Free/Pro/Team; private Environment secrets and deployment branch/tag restrictions need at least Pro/Team. Keeping this personal repository private without Enterprise therefore means either accepting a no-reviewer downgrade after auditing all write collaborators (on Pro/Team), upgrading/migrating, or changing visibility as a separate user decision.
 - Configure and offline-back up the five production secrets:
   - `ANDROID_KEYSTORE_BASE64`
   - `ANDROID_KEY_ALIAS`

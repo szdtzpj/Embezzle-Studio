@@ -66,7 +66,7 @@ Pull Request 和 `main` 分支推送会触发 `.github/workflows/quality.yml`。
 
 `.github/workflows/android-apk.yml` 只允许使用稳定的正式密钥签名。签名前会用最新 Android build-tools 的 `aapt` 核对实际 APK 的包名、版本、min/target SDK，并拒绝 CAMERA、RECORD_AUDIO、SYSTEM_ALERT_WINDOW 权限；它也不会再把 Gradle 自动生成的 debug keystore 当作 release 签名。缺少任一签名 Secret、产物契约不符、证书指纹不一致或检测到 `Android Debug` 证书时，工作流会直接失败。
 
-先在 GitHub 仓库的 `Settings -> Environments -> android-release` 中创建受保护环境，建议启用 required reviewers，并配置以下 Environment secrets：
+先在 GitHub 仓库的 `Settings -> Environments -> android-release` 中创建发布环境，把 deployment branch policy 限制为 `main`，并配置以下 Environment secrets。若仓库/组织方案支持 deployment protection rules，还应启用 required reviewers 和 `Prevent self-review`。[GitHub Environments 官方限制](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)说明：Free、Pro 或 Team 方案的 required reviewers 只可用于公开仓库；私有仓库的 Environment secrets 和 deployment branches/tags 至少需要 Pro/Team，保持私有并获得 required reviewers 则需要 Enterprise。因而本仓库若保持个人私有且使用 Pro/Team，只能采用“仅允许 `main` + 无人工审批”的降级保护；若是 Free，则连这组私有环境 Secret/分支限制也不可用。把正式密钥写入该环境前，必须确认实际方案能力，并确认所有具有仓库写权限的协作者都被信任或先收紧其权限；不要把降级配置描述成等价的双人审批。
 
 | Secret | 内容 |
 | --- | --- |
