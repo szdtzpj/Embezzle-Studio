@@ -23,7 +23,7 @@ Embezzle Studio 是一个面向 Android 的移动端 AI 对话客户端。项目
 ## 仍在完善
 
 - 对话视频附件目前只为百炼兼容模式实现 `video_url` 传输；其他服务商仍需各自的上传、转码或引用协议适配。
-- Android 真机仍需验收键盘弹出后的输入区位置、Seedance 视频播放/全屏、系统目录保存与取消流程，以及设置/聊天连续切换的内存和稳定性。Web 回归不能替代这些原生验证。
+- 用户已在一台 Android 真机上确认键盘避让、Seedance 预览/下载、图片预览尺寸和设置/聊天切换的主路径解决；更多机型、系统目录取消/失败/空间不足、远程媒体过期和长时间压力矩阵仍需验收。Web 回归不能替代这些扩展原生验证。
 - MCP、插件系统和联网搜索服务商还没有作为稳定功能接入。
 - OpenAI 官方接口不会返回原始隐藏思考链；应用只能展示接口返回的思考摘要、reasoning_content 或 Token 用量。
 - Android 安装包构建需要本机 Android 工具链，或通过 CI/EAS 等方式构建。
@@ -74,9 +74,11 @@ Pull Request 和 `main` 分支推送会触发 `.github/workflows/quality.yml`。
 
 首个正式签名版本 [`v1.0.4`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.0.4) 已于 2026-07-10 发布为 immutable Latest Release。公开的[可信下载页](https://szdtzpj.github.io/Embezzle-Studio/release.html)提供 93,087,208 字节 APK；SHA-256 为 `187f4a90daed7c7d05d423890419d1c4fe1d705674bf1d4955075c8d725b63f0`，正式证书 SHA-256 为 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`。GitHub release attestation、三个本地下载资产和 Pages 匿名 APK 字节均已独立复核。
 
-当前工作树中的移动端修复已把应用版本推进到本地 `1.0.5` 候选，但尚未创建或推送 `v1.0.5` tag，也没有 Draft/正式 GitHub Release；公开 Latest 与下载页仍然是 `v1.0.4`。该候选已通过 `npm.cmd run check`（15 个测试文件、249 个测试，TypeScript/ESLint 为零错误）和 Web export（3131 modules、主 bundle 6.9 MB）。390×844 浏览器回归验证了聊天/设置、真实上传图片的方形待发送预览，以及设置与聊天连续切换 20 次，console 没有 error；仅有 React Native Web 的 `shadow*`/`pointerEvents` 两类弃用 warning。Expo Doctor 为 20/20，`expo install --check` 通过。
+当前工作树已推进到本地 `1.0.6` / Android versionCode 6 候选，并包含此前 `1.0.5` 的键盘、图片/视频预览、导出和切页稳定性修复。模型选择 `Modal` 现在使用真实 bottom safe-area inset 并允许滚动区收缩，避免三键导航栏遮住最后一行；原 Expo 模板图标/施工网格已替换为统一的双带 S 标志、Android adaptive/monochrome 图标、Web favicon 和显式 `expo-splash-screen` 启动画面；回答等待状态也从三个跳动圆点改为单一折叠变形标志。
 
-干净 Expo prebuild 与未签名 `assembleRelease` 也已通过；随后使用与 `v1.0.4` 相同的正式证书生成了仅供本地验收的 production-signed candidate：`D:\EmbezzleStudio-Releases\v1.0.5-candidate\Embezzle-Studio-v1.0.5-candidate-release.apk`，96,473,241 字节，SHA-256 `c390a116a592773f23626ac6b63ace40a881e710e61318eedd196c6c0d6b8bc7`。它是 `com.szdtzpj.embezzlestudio` 版本 `1.0.5`/versionCode 5、minSdk 24/targetSdk 36，证书 SHA-256 为 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`，APK Signature Scheme v2/v3 与 zipalign 均通过；没有 overlay、camera 或 microphone 权限。新增的 `ACCESS_NETWORK_STATE` 和 `WAKE_LOCK` 来自视频播放依赖。该 APK 不是 GitHub Release，以上构建/浏览器证据也不是 Android 真机键盘、播放器、系统目录保存或切页稳定性的验收结论。
+该候选已通过 `npm.cmd run check`（15 个测试文件、252 个测试，TypeScript/ESLint 零错误或警告）、Web export（3137 modules、主 bundle 6.9 MB）、Expo Doctor 20/20 与 `expo install --check`。导出产物的 390×844 干净浏览器会话覆盖聊天、模型弹层和设置往返，console 为 0 error / 0 warning；本地延迟响应还实际触发了新的单标志动画并正常收束为回答。3 个 workflow YAML 和其中 35 个 Bash block 也重新通过解析/`bash -n`。
+
+干净 Expo prebuild 和未签名 `assembleRelease` 通过后，使用与 `v1.0.4` 相同的正式证书生成了仅供本地验收的 production-signed candidate：`D:\EmbezzleStudio-Releases\v1.0.6-candidate\Embezzle-Studio-v1.0.6-candidate-release.apk`，96,682,256 字节，SHA-256 `51186c1b746210ce60d0c79f84751785f2927766831b4d84566e1b0191baeea0`。`aapt` 确认包名 `com.szdtzpj.embezzlestudio`、版本 `1.0.6`/versionCode 6、minSdk 24/targetSdk 36；`apksigner` 确认单一正式证书 SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`，v2/v3 与 zipalign 均通过，且没有 overlay、camera 或 microphone 权限。用户已在其 Android 真机上确认此前四个问题的主路径（键盘避让、Seedance 预览/下载、图片预览尺寸、设置/聊天切换）解决；这属于用户验收而非本机自动化证据。当前仍无连接设备，所以本次新增的三键/手势导航安全区、桌面/主题图标、启动页和新动画原生流畅度，以及更多机型、SAF 取消/失败/空间不足和长时间压力矩阵仍待验证。`v1.0.6` 尚无 tag、Draft 或 GitHub Release；公开 Latest 与可信下载页仍为 `v1.0.4`。
 
 当前仓库已经创建 `Settings -> Environments -> android-release`、把 deployment branch policy 限制为 `main`，并配置了下列五个 Environment secrets；以下表格和命令同时作为环境重建或密钥轮换手册。若仓库/组织方案支持 deployment protection rules，还应启用 required reviewers 和 `Prevent self-review`。[GitHub Environments 官方限制](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)说明：Free、Pro 或 Team 方案的 required reviewers 只可用于公开仓库；私有仓库的 Environment secrets 和 deployment branches/tags 至少需要 Pro/Team，保持私有并获得 required reviewers 则需要 Enterprise。个人私有仓库的直接 collaborator 也没有可降级的 read 角色；当前按维护者决定，`BlueOcean223` 保留为明确受信任的 write collaborator，并接受没有双人审批的剩余风险。不要把“仅允许 `main` + owner workflow gate”描述成等价的双人审批。
 
@@ -110,7 +112,7 @@ keytool -list -v -keystore $keystore -alias embezzle-studio | Select-String 'SHA
 
 1. 同步更新 `app.json` 的 `expo.version` 和递增的 `android.versionCode`、`package.json`/`package-lock.json` 的版本，以及 `src/data/appInfo.ts` 的版本。
 2. 在本地通过与 CI 相同的质量检查，通过 Pull Request 合并到 `main`，再等待该合并提交的 Quality 与 push-triggered Pages 工作流都成功。
-3. 暂停其它 `main` 合并和新版本 Release；从最新 `origin/main` 的精确提交创建并推送与应用版本一致的 tag，例如下一版本 `v1.0.5`。
+3. 暂停其它 `main` 合并和新版本 Release；从最新 `origin/main` 的精确提交创建并推送与应用版本一致的 tag，例如下一版本 `v1.0.6`。
 4. 确认仓库已启用 Immutable Releases，由 `szdtzpj` 创建同名、非 prerelease 的空 draft Release，再从默认分支 `main` 手动运行 Android 工作流；不要提前发布空 Release。
 5. 工作流会检出与当前 `origin/main` 完全相同的 tag 提交，生成未签名 APK，使用正式 keystore 签名，并在冻结前后重复核对 tag/main 提交以及每个 GitHub asset 的 digest、状态与 uploader，然后才把 draft 发布为 latest immutable Release。等该工作流、自动触发的 Pages 工作流、Release attestation 和公开 APK 字节校验都成功后，才结束发布冻结。
 
@@ -119,11 +121,11 @@ keytool -list -v -keystore $keystore -alias embezzle-studio | Select-String 'SHA
 ```powershell
 git fetch origin
 $mergeSha = git rev-parse origin/main
-git tag -a v1.0.5 $mergeSha -m "Embezzle Studio v1.0.5"
-git push origin v1.0.5
+git tag -a v1.0.6 $mergeSha -m "Embezzle Studio v1.0.6"
+git push origin v1.0.6
 gh api --method PUT repos/szdtzpj/Embezzle-Studio/immutable-releases
-gh release create v1.0.5 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.0.5" --notes "Android production release v1.0.5."
-gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.0.5
+gh release create v1.0.6 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.0.6" --notes "Android production release v1.0.6."
+gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.0.6
 ```
 
 Release 标题、正文与发布时间会被复制到公开 Pages 清单和下载页。创建 draft 前必须把这些文字当作公开内容审阅，不得包含私有仓库、账号、客户或密钥信息；不要未经检查直接使用自动生成的 release notes。

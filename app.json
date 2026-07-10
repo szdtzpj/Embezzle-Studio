@@ -3,22 +3,23 @@
     "name": "Embezzle Studio",
     "slug": "embezzle-studio",
     "scheme": "embezzlestudio",
-    "version": "1.0.5",
+    "version": "1.0.6",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
+    "backgroundColor": "#F4F4F4",
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true
     },
     "android": {
       "package": "com.szdtzpj.embezzlestudio",
-      "versionCode": 5,
+      "versionCode": 6,
       "softwareKeyboardLayoutMode": "resize",
       "blockedPermissions": [
         "android.permission.SYSTEM_ALERT_WINDOW"
       ],
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#F4F4F4",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -42,7 +43,16 @@
       ],
       "expo-secure-store",
       "expo-sharing",
-      "expo-video"
+      "expo-video",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#F4F4F4",
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 184,
+          "resizeMode": "contain"
+        }
+      ]
     ]
   }
 }

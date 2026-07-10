@@ -10,11 +10,37 @@ Continue the deep, end-to-end audit of the entire Embezzle Studio application. R
 
 The continuation reached the locally provable boundary on 2026-07-10, after which the user authorized production signing, GitHub Secrets, tag/Release creation, workflow execution, and publication. Stable `v1.0.4` is now production-signed, immutable, Latest, attested, and available through the verified public Pages download chain. Historical interruption/evidence/action sections later in this file are retained only for traceability; this section supersedes their stale status.
 
-### Mobile runtime follow-up — current `1.0.5` working-tree candidate
+### Second Android follow-up — current `1.0.6` working-tree candidate
 
-After installing production `v1.0.4` on a real Android phone, the user reported four runtime defects: the IME covered the chat composer; a completed Seedance video could not be played in place and its action button was clipped; a selected image rendered as an oversized blank attachment card; and repeated Settings/Chat switching could stall or crash. The current working tree contains the following follow-up implementation and is authoritative over the earlier `v1.0.4` source snapshot:
+After the user confirmed that the four `1.0.5` runtime fixes worked on a real phone, two final UI problems remained: Android phones with a three-button navigation bar could cover the bottom of the model picker, and the Expo-template icon/splash plus three-dot pending animation looked unfinished. The current working tree now contains the following `1.0.6` / Android versionCode 6 follow-up:
 
-- Application metadata is now the local `1.0.5` / Android versionCode 5 candidate. Android uses `softwareKeyboardLayoutMode: resize`; the main shell and rename modal use Android `height` keyboard avoidance, and both Chat and Settings dismiss the IME on drag.
+- `ModelPickerModal` consumes `useSafeAreaInsets().bottom` at the sheet boundary, and its `ScrollView` has an explicit shrinkable/min-zero style. This preserves edge-to-edge globally while keeping model rows above the navigation-control inset without a hard-coded device height.
+- The selected double-ribbon S mark is the source for the opaque app icon, adaptive foreground/background, Android 13 monochrome icon, favicon, and splash artwork. `expo-splash-screen` is installed and explicitly configured with a `#F4F4F4` background matching the app background canvas; clean prebuild generated the new density-specific launcher and splash resources.
+- The three independently looping dots are replaced by one two-band `ThinkingGlyph`. One shared value rotates the mark while its axes exchange length, its endpoints are visually equivalent for a seamless loop, and `cancelAnimation` releases the infinite animation on unmount.
+
+Local evidence for `1.0.6`:
+
+- `npm.cmd run check`: 15 files / 252 tests, with TypeScript and ESLint zero errors/warnings. `npm.cmd run build:web`: 3137 modules and a 6.9 MB main bundle. Expo Doctor: 20/20. `expo install --check`: passed. The production dependency audit still exits zero at `--audit-level=high`; its 12 moderate `uuid -> xcode -> @expo/config-plugins` findings would require `npm audit fix --force` to install an incompatible Expo package version and were not blindly applied.
+- A clean 390×844 exported-Web session covered Chat, the model picker, Settings, and return navigation with zero console errors or warnings. A separate loopback proxy and delayed fake provider response visibly exercised the new single folding glyph and completed with the expected assistant text. This is Web evidence, not proof of Android Reanimated rendering.
+- The repository brand generator has direct development dependencies and is byte-idempotent from `assets/brand-mark.png`. The final adaptive foreground and monochrome alpha bounds are centered and contain zero effective pixels outside Android's 66dp safe circle; the generated splash art likewise stays inside its native safe circle. Opaque icon/background/favicon assets contain no transparent pixels, and the Expo template grid is absent.
+- All 3 workflow YAML files parsed, all 35 embedded Bash blocks passed Git Bash `bash -n`, and `git diff --check` passed.
+- Clean Expo Android prebuild generated the new launcher/themed/splash resources, `adjustResize`, version 1.0.6/code 6, and a `#F4F4F4` splash theme. After removing only the Release debug signing assignment, the clean `assembleRelease` tree produced `app-release-unsigned.apk`; the same production certificate as `v1.0.4` then signed the local acceptance candidate `D:\EmbezzleStudio-Releases\v1.0.6-candidate\Embezzle-Studio-v1.0.6-candidate-release.apk`.
+  - size: 96,682,256 bytes; SHA-256 `51186c1b746210ce60d0c79f84751785f2927766831b4d84566e1b0191baeea0`
+  - package `com.szdtzpj.embezzlestudio`; version `1.0.6`; versionCode 6; minSdk 24; targetSdk 36; final APK timestamp is later than every final source/icon edit
+  - exactly one signer; production certificate SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`; APK Signature Schemes v2 and v3 and zipalign pass
+  - permissions are INTERNET, legacy read/write storage capped at SDK 32, VIBRATE, ACCESS_NETWORK_STATE, WAKE_LOCK, biometric/fingerprint, and the app-scoped dynamic receiver permission; no `SYSTEM_ALERT_WINDOW`, `CAMERA`, or `RECORD_AUDIO`
+
+Current external/device boundary:
+
+- The user has confirmed on their Android phone that the four original `1.0.5` main paths are fixed: IME avoidance, Seedance preview/download, image preview sizing, and Settings/Chat switching. This is user-reported device acceptance rather than locally captured device evidence.
+- `adb devices -l` is empty for the current run. Three-button and gesture-navigation insets, last-row tapping, launcher/round/themed icon masks, native splash rendering, and native `ThinkingGlyph` smoothness remain real-device checks, alongside additional-device coverage, SAF cancellation/failure/low-space behavior, remote-media expiry, and sustained stress testing.
+- The local production-signed APK has not passed the protected GitHub publication workflow. Read-only remote checks confirm Latest is still stable `v1.0.4` and no `v1.0.6` tag exists. No Draft, tag, workflow dispatch, push, or GitHub Release was created in this follow-up.
+
+### Previous mobile runtime follow-up — superseded `1.0.5` candidate
+
+After installing production `v1.0.4` on a real Android phone, the user reported four runtime defects: the IME covered the chat composer; a completed Seedance video could not be played in place and its action button was clipped; a selected image rendered as an oversized blank attachment card; and repeated Settings/Chat switching could stall or crash. The superseded `1.0.5` candidate contained the following first follow-up implementation:
+
+- At that checkpoint, application metadata was the local `1.0.5` / Android versionCode 5 candidate. Android used `softwareKeyboardLayoutMode: resize`; the main shell and rename modal used Android `height` keyboard avoidance, and both Chat and Settings dismissed the IME on drag.
 - Pending attachments now resolve their durable display URI. Images render inside a 104-by-104 square card with a filename overlay and separate remove control. Native image picking no longer asks the picker to duplicate full-resolution images as Base64 in the JavaScript heap; Web retains Base64 only where its storage conversion path needs it.
 - Conversation video attachments use Expo SDK 57's `expo-video` `VideoView` with native controls, inline 16:9 playback, loading/error states, and fullscreen support. The filename and full-width Save/Share controls are in a separate footer instead of a clipped one-line overlay. Seedance task attachments now declare `video/mp4`.
 - `src/services/mediaExport.ts` prepares remote/data media as a durable local attachment, sanitizes filenames, and exports without broad media-library permission. Android requests a Storage Access Framework directory and streams the file in 4 MiB chunks, deleting an incomplete destination after a copy error; Web creates a browser download and other native platforms use the share sheet.
@@ -32,7 +58,7 @@ Local evidence for this candidate:
   - no `SYSTEM_ALERT_WINDOW`, `CAMERA`, or `RECORD_AUDIO`; the newly present `ACCESS_NETWORK_STATE` and `WAKE_LOCK` permissions come from the native video playback dependency
 - The browser and APK structure/signature runs do not exercise Android window insets, the native video decoder/controller, Android document providers, or native process memory.
 
-Still outside current proof:
+Outside proof at the `1.0.5` checkpoint:
 
 - No Android device/emulator is connected. The IME/composer position, Seedance playback/fullscreen and remote-media expiry behavior, Storage Access Framework save/cancel/failure paths, and repeated Settings/Chat switching without freeze or crash remain device acceptance items.
 - The production-signed APK above is only a local acceptance candidate; it has not passed through the protected GitHub publication workflow. No `v1.0.5` tag has been created or pushed, no Draft Release or Android production workflow has been started, and no `v1.0.5` GitHub Release or Pages download exists. Stable immutable Latest remains `v1.0.4`; the local candidate must not be described or distributed as the released update.

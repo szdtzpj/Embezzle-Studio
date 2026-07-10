@@ -30,21 +30,20 @@ import {
 } from 'react-native';
 import type { NativeScrollEvent, NativeSyntheticEvent, PressableProps, StyleProp, ViewStyle } from 'react-native';
 import Reanimated, {
+  cancelAnimation,
   Easing as ReanimatedEasing,
   Extrapolation,
   interpolate,
   runOnJS,
   useAnimatedStyle,
   useSharedValue,
-  withDelay,
   withRepeat,
-  withSequence,
   withSpring,
   withTiming,
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AnimatePresence, MotiView } from 'moti';
-import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Brain, Check, ChevronDown, Copy, Download, ExternalLink, FileText, Image as ImageIcon, Lightbulb, Menu, MessageSquare, MoreHorizontal, PenSquare, Pencil, Pin, Play, Plus, RefreshCw, Search, Share2, Settings, SlidersHorizontal, Square, Trash2, Video, X } from 'lucide-react-native';
 import { Bailian, ChatGLM, Claude, DeepSeek, Doubao, Gemini, Kimi, Minimax, NewAPI, OpenAI, Qwen, Volcengine, Zhipu } from '@lobehub/icons-rn';
 
@@ -460,44 +459,54 @@ function Toast({ message }: { message: string | null }) {
   );
 }
 
-/** 单个脉动圆点，交错的相位由 delay 控制。 */
-function ThinkingDot({ delay }: { delay: number }) {
+/**
+ * 单一折叠标记：两条圆角带在旋转中交换主次轴，首尾形态一致，
+ * 因此循环不会出现三个圆点那种跳动或复位感。
+ */
+function ThinkingGlyph() {
   const progress = useSharedValue(0);
 
   useEffect(() => {
-    progress.value = withDelay(
-      delay,
-      withRepeat(
-        withSequence(
-          withTiming(1, { duration: 380, easing: ReanimatedEasing.inOut(ReanimatedEasing.quad) }),
-          withTiming(0, { duration: 380, easing: ReanimatedEasing.inOut(ReanimatedEasing.quad) })
-        ),
-        -1,
-        false
-      )
+    progress.value = withRepeat(
+      withTiming(1, {
+        duration: 1450,
+        easing: ReanimatedEasing.inOut(ReanimatedEasing.cubic),
+      }),
+      -1,
+      false
     );
-  }, [delay, progress]);
 
-  const animatedStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(progress.value, [0, 1], [0.3, 1], Extrapolation.CLAMP),
+    return () => cancelAnimation(progress);
+  }, [progress]);
+
+  const glyphAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(progress.value, [0, 0.5, 1], [0.72, 1, 0.72], Extrapolation.CLAMP),
     transform: [
-      { translateY: interpolate(progress.value, [0, 1], [0, -5], Extrapolation.CLAMP) },
-      { scale: interpolate(progress.value, [0, 1], [0.85, 1], Extrapolation.CLAMP) },
+      { rotateZ: `${interpolate(progress.value, [0, 1], [0, 90], Extrapolation.CLAMP)}deg` },
+      { scale: interpolate(progress.value, [0, 0.5, 1], [0.94, 1, 0.94], Extrapolation.CLAMP) },
     ],
   }));
 
-  return <Reanimated.View style={[styles.thinkingDot, animatedStyle]} />;
-}
+  const horizontalBandAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [
+      { scaleX: interpolate(progress.value, [0, 0.5, 1], [1, 0.82, 0.64], Extrapolation.CLAMP) },
+    ],
+  }));
 
-/**
- * “正在思考”指示器：三个交错脉动的圆点，运行在 UI 线程。
- */
-function ThinkingDots() {
+  const verticalBandAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [
+      { rotateZ: '90deg' },
+      { scaleX: interpolate(progress.value, [0, 0.5, 1], [0.64, 0.82, 1], Extrapolation.CLAMP) },
+    ],
+  }));
+
   return (
-    <View style={styles.thinkingRow} accessibilityRole="text" accessibilityLabel="正在思考">
-      <ThinkingDot delay={0} />
-      <ThinkingDot delay={160} />
-      <ThinkingDot delay={320} />
+    <View style={styles.thinkingGlyphRow} accessibilityRole="text" accessibilityLabel="正在思考">
+      <Reanimated.View style={[styles.thinkingGlyph, glyphAnimatedStyle]}>
+        <Reanimated.View style={[styles.thinkingGlyphBand, horizontalBandAnimatedStyle]} />
+        <Reanimated.View style={[styles.thinkingGlyphBand, verticalBandAnimatedStyle]} />
+        <View style={styles.thinkingGlyphCenter} />
+      </Reanimated.View>
     </View>
   );
 }
@@ -3352,7 +3361,7 @@ export default function App() {
                           </View>
                         ) : null}
                         {showThinking ? (
-                          <ThinkingDots />
+                          <ThinkingGlyph />
                         ) : editingMessageId === message.id ? (
                           <MessageInlineEditor
                             role="assistant"
@@ -4583,6 +4592,7 @@ function ModelPickerModal({
 }: ModelPickerModalProps) {
   const [mounted, setMounted] = useState(visible);
   const unmountTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const insets = useSafeAreaInsets();
 
   useEffect(() => {
     if (unmountTimer.current) {
@@ -4638,7 +4648,7 @@ function ModelPickerModal({
               animate={{ opacity: 1, translateY: 0, scale: 1 }}
               exit={{ opacity: 0, translateY: 48, scale: 0.98 }}
               transition={{ type: 'timing', duration: 220 }}
-              style={styles.modelPickerSheet}
+              style={[styles.modelPickerSheet, { paddingBottom: insets.bottom }]}
             >
               <View style={styles.modelPickerHandle} />
               <View style={styles.modelPickerSheetHeader}>
@@ -4651,7 +4661,7 @@ function ModelPickerModal({
                 </AnimatedPressable>
               </View>
 
-              <ScrollView contentContainerStyle={styles.modelPickerList}>
+              <ScrollView style={styles.modelPickerScroll} contentContainerStyle={styles.modelPickerList}>
                 {groups.length ? (
                   groups.map((group) => (
                     <View key={group.provider.id} style={styles.modelPickerGroup}>
@@ -5805,6 +5815,10 @@ const styles = StyleSheet.create({
     elevation: 16,
     overflow: 'hidden',
   },
+  modelPickerScroll: {
+    flexShrink: 1,
+    minHeight: 0,
+  },
   modelPickerHandle: {
     alignSelf: 'center',
     width: 40,
@@ -6098,17 +6112,32 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 24,
   },
-  thinkingRow: {
-    flexDirection: 'row',
+  thinkingGlyphRow: {
     alignItems: 'center',
-    gap: 6,
-    paddingVertical: 6,
+    justifyContent: 'center',
+    width: 30,
+    height: 30,
   },
-  thinkingDot: {
-    width: 8,
-    height: 8,
+  thinkingGlyph: {
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  thinkingGlyphBand: {
+    position: 'absolute',
+    width: 22,
+    height: 5,
     borderRadius: radii.pill,
     backgroundColor: palette.accent,
+  },
+  thinkingGlyphCenter: {
+    width: 6,
+    height: 6,
+    borderRadius: radii.pill,
+    backgroundColor: palette.surface,
+    borderWidth: 1.5,
+    borderColor: palette.accent,
   },
   reasoningPanel: {
     borderLeftWidth: 2,
