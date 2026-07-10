@@ -79,7 +79,26 @@ describe('checkForAppUpdate', () => {
       apk,
     }), { status: 200 })));
 
-    await expect(checkForAppUpdate()).resolves.toMatchObject({ installAsset: undefined });
+    await expect(checkForAppUpdate()).resolves.toMatchObject({
+      updateAvailable: false,
+      installAsset: undefined,
+    });
+  });
+
+  it('does not announce a newer manifest version until a trusted APK is staged', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      schemaVersion: 1,
+      version: '1.0.5',
+      releaseName: 'Release pending',
+      releaseUrl: 'https://szdtzpj.github.io/Embezzle-Studio',
+      apk: null,
+    }), { status: 200 })));
+
+    await expect(checkForAppUpdate()).resolves.toMatchObject({
+      latestVersion: '1.0.5',
+      updateAvailable: false,
+      installAsset: undefined,
+    });
   });
 
   it('falls back to the fixed repository release page for an injected release URL', async () => {

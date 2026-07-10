@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+env:
+  ANDROID_BUILD_TOOLS_VERSION: 36.0.0
+  RELEASE_OWNER: szdtzpj
+
 concurrency:
   group: android-release-${{ inputs.release_tag }}
   cancel-in-progress: false
@@ -20,16 +24,29 @@ jobs:
     name: Validate and build unsigned APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      tag_commit: ${{ steps.release_contract.outputs.tag_commit }}
     env:
       CI: 1
       RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
+      - name: Require owner-triggered release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_ACTOR" != "$RELEASE_OWNER" || "$GITHUB_TRIGGERING_ACTOR" != "$RELEASE_OWNER" ]]; then
+            echo "::error::Only $RELEASE_OWNER may start or rerun the production Android release workflow."
+            exit 1
+          fi
+
       - name: Checkout repository
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
 
       - name: Validate release tag and checkout its commit
+        id: release_contract
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -46,18 +63,23 @@ jobs:
             exit 1
           fi
 
-          if ! release_json="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease 2>/dev/null)"; then
-            echo "::error::GitHub Release $RELEASE_TAG does not exist. Create it before running this workflow."
+          if ! release_json="$(gh release view "$RELEASE_TAG" --json author,isDraft,isImmutable,isPrerelease,tagName 2>/dev/null)"; then
+            echo "::error::GitHub Release draft $RELEASE_TAG does not exist. Create an owner-authored draft before running this workflow."
             exit 1
           fi
-          if [[ "$(jq -r '.isDraft or .isPrerelease' <<<"$release_json")" != "false" ]]; then
-            echo "::error::GitHub Release $RELEASE_TAG must be a published stable release, not a draft or prerelease."
+          if [[ "$(jq -r '.tagName' <<<"$release_json")" != "$RELEASE_TAG" ||
+                "$(jq -r '.author.login' <<<"$release_json")" != "$RELEASE_OWNER" ||
+                "$(jq -r '.isDraft' <<<"$release_json")" != "true" ||
+                "$(jq -r '.isPrerelease' <<<"$release_json")" != "false" ||
+                "$(jq -r '.isImmutable' <<<"$release_json")" != "false" ]]; then
+            echo "::error::GitHub Release $RELEASE_TAG must be a mutable draft authored by $RELEASE_OWNER and must not be a prerelease."
             exit 1
           fi
 
           tag_commit="$(git rev-list -n 1 "refs/tags/$RELEASE_TAG")"
-          if [[ -z "$tag_commit" ]] || ! git merge-base --is-ancestor "$tag_commit" origin/main; then
-            echo "::error::Tag $RELEASE_TAG must point to a commit reachable from origin/main."
+          main_commit="$(git rev-parse origin/main)"
+          if [[ -z "$tag_commit" || "$tag_commit" != "$main_commit" ]]; then
+            echo "::error::Tag $RELEASE_TAG must point to the exact current origin/main commit ($main_commit)."
             exit 1
           fi
 
@@ -102,17 +124,20 @@ jobs:
             fi
           fi
 
+          echo "tag_commit=$tag_commit" >> "$GITHUB_OUTPUT"
+
       - name: Setup Node
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 24
           cache: npm
 
       - name: Setup Java
-        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5.5.0
         with:
           distribution: temurin
           java-version: 17
+          verify-signature: true
 
       - name: Install dependencies
         run: npm ci
@@ -163,9 +188,9 @@ jobs:
           set -euo pipefail
 
           apk="android/app/build/outputs/apk/release/app-release-unsigned.apk"
-          aapt="$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -type f -name aapt | sort -V | tail -n 1)"
+          aapt="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS_VERSION/aapt"
           if [[ -z "$aapt" || ! -x "$aapt" ]]; then
-            echo "::error::aapt was not found under $ANDROID_HOME/build-tools."
+            echo "::error::Pinned aapt was not found at $aapt."
             exit 1
           fi
 
@@ -211,12 +236,13 @@ jobs:
           done
 
       - name: Upload unsigned APK for isolated signing
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Embezzle-Studio-${{ inputs.release_tag }}-unsigned
           path: android/app/build/outputs/apk/release/app-release-unsigned.apk
           if-no-files-found: error
           retention-days: 1
+          compression-level: 0
 
   sign:
     name: Sign and verify APK
@@ -227,6 +253,16 @@ jobs:
     env:
       RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
+      - name: Require owner-controlled signing
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_ACTOR" != "$RELEASE_OWNER" || "$GITHUB_TRIGGERING_ACTOR" != "$RELEASE_OWNER" ]]; then
+            echo "::error::Only $RELEASE_OWNER may start or rerun the production Android signing job."
+            exit 1
+          fi
+
       - name: Require stable Android signing secrets
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -257,13 +293,14 @@ jobs:
           fi
 
       - name: Setup Java
-        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        uses: actions/setup-java@0f481fcb613427c0f801b606911222b5b6f3083a # v5.5.0
         with:
           distribution: temurin
           java-version: 17
+          verify-signature: true
 
       - name: Download unsigned APK
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: Embezzle-Studio-${{ inputs.release_tag }}-unsigned
           path: unsigned
@@ -286,13 +323,13 @@ jobs:
             exit 1
           fi
 
-          apksigner="$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -type f -name apksigner | sort -V | tail -n 1)"
+          build_tools_dir="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS_VERSION"
+          apksigner="$build_tools_dir/apksigner"
           if [[ -z "$apksigner" || ! -x "$apksigner" ]]; then
-            echo "::error::apksigner was not found under $ANDROID_HOME/build-tools."
+            echo "::error::Pinned apksigner was not found at $apksigner."
             exit 1
           fi
 
-          build_tools_dir="$(dirname "$apksigner")"
           zipalign="$build_tools_dir/zipalign"
           if [[ ! -x "$zipalign" ]]; then
             echo "::error::zipalign was not found next to apksigner in $build_tools_dir."
@@ -317,6 +354,11 @@ jobs:
             -storepass:env ANDROID_KEYSTORE_PASSWORD \
             -alias "$ANDROID_KEY_ALIAS" >/dev/null
 
+          if "$apksigner" verify "$unsigned_apk" >/dev/null 2>&1; then
+            echo "::error::The purported unsigned APK already contains a verifiable signature."
+            exit 1
+          fi
+
           "$zipalign" -f -P 16 4 "$unsigned_apk" "$aligned_apk"
           "$apksigner" sign \
             --ks "$keystore" \
@@ -335,7 +377,12 @@ jobs:
             exit 1
           fi
 
-          actual_cert_sha256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$report" | head -n 1 | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')"
+          mapfile -t signer_digests < <(sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p' "$report")
+          if (( ${#signer_digests[@]} != 1 )); then
+            echo "::error::The release APK must contain exactly one signer; found ${#signer_digests[@]}."
+            exit 1
+          fi
+          actual_cert_sha256="$(printf '%s' "${signer_digests[0]}" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')"
           expected_cert_sha256="$(printf '%s' "$ANDROID_SIGNING_CERT_SHA256" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')"
           if [[ -z "$actual_cert_sha256" || "$actual_cert_sha256" != "$expected_cert_sha256" ]]; then
             echo "::error::Signing certificate SHA-256 does not match ANDROID_SIGNING_CERT_SHA256."
@@ -356,7 +403,7 @@ jobs:
         run: rm -rf "$RUNNER_TEMP/embezzle-android-signing"
 
       - name: Upload signed APK artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.signed_apk.outputs.artifact_name }}
           path: |
@@ -365,10 +412,13 @@ jobs:
             release/apksigner-report.txt
           if-no-files-found: error
           retention-days: 30
+          compression-level: 0
 
   publish:
-    name: Attach verified APK to GitHub Release
-    needs: sign
+    name: Publish immutable GitHub Release
+    needs:
+      - build
+      - sign
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -376,28 +426,204 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ inputs.release_tag }}
+      EXPECTED_TAG_COMMIT: ${{ needs.build.outputs.tag_commit }}
     steps:
+      - name: Require owner-triggered publication
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_ACTOR" != "$RELEASE_OWNER" || "$GITHUB_TRIGGERING_ACTOR" != "$RELEASE_OWNER" ]]; then
+            echo "::error::Only $RELEASE_OWNER may publish or rerun the production Android release workflow."
+            exit 1
+          fi
+
       - name: Download signed APK artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: Embezzle-Studio-${{ inputs.release_tag }}-signed
           path: release
 
-      - name: Attach APK and checksum to Release
+      - name: Validate empty owner-authored draft
+        id: draft_check
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets,author,isDraft,isImmutable,isPrerelease,tagName)"
+
+          if [[ "$(jq -r '.tagName' <<<"$release_json")" != "$RELEASE_TAG" ||
+                "$(jq -r '.author.login' <<<"$release_json")" != "$RELEASE_OWNER" ||
+                "$(jq -r '.isDraft' <<<"$release_json")" != "true" ||
+                "$(jq -r '.isPrerelease' <<<"$release_json")" != "false" ||
+                "$(jq -r '.isImmutable' <<<"$release_json")" != "false" ]]; then
+            echo "::error::Release $RELEASE_TAG is no longer the expected owner-authored mutable draft."
+            exit 1
+          fi
+
+          if (( $(jq '.assets | length' <<<"$release_json") != 0 )); then
+            echo "::error::Release draft $RELEASE_TAG must be empty before this workflow uploads its verified assets."
+            exit 1
+          fi
+
+          if [[ ! "$EXPECTED_TAG_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The validated build tag commit output is missing or malformed."
+            exit 1
+          fi
+          remote_tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq '.sha')"
+          remote_main_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq '.sha')"
+          if [[ "$remote_tag_commit" != "$EXPECTED_TAG_COMMIT" || "$remote_main_commit" != "$EXPECTED_TAG_COMMIT" ]]; then
+            echo "::error::Release refs changed after the build contract was validated. Expected tag and main at $EXPECTED_TAG_COMMIT; found tag=$remote_tag_commit main=$remote_main_commit."
+            exit 1
+          fi
+
+          echo "empty=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload verified assets to draft
         shell: bash
         run: |
           set -euo pipefail
           apk_name="Embezzle-Studio-${RELEASE_TAG}-release.apk"
-          existing_assets="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
-          for asset in "$apk_name" "$apk_name.sha256" "apksigner-report.txt"; do
-            if grep -Fxq "$asset" <<<"$existing_assets"; then
-              echo "::error::Release asset $asset already exists. Refusing to overwrite a published artifact."
-              exit 1
-            fi
-          done
 
           gh release upload "$RELEASE_TAG" \
-            "release/Embezzle-Studio-${RELEASE_TAG}-release.apk" \
-            "release/Embezzle-Studio-${RELEASE_TAG}-release.apk.sha256" \
+            "release/$apk_name" \
+            "release/$apk_name.sha256" \
             "release/apksigner-report.txt" \
             --repo "$GITHUB_REPOSITORY"
+
+      - name: Verify assets and publish immutable Release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          apk_name="Embezzle-Studio-${RELEASE_TAG}-release.apk"
+          expected_names=("$apk_name" "$apk_name.sha256" "apksigner-report.txt")
+
+          verify_remote_refs() {
+            local remote_tag_commit remote_main_commit
+            if [[ ! "$EXPECTED_TAG_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::The validated build tag commit output is missing or malformed."
+              return 1
+            fi
+            remote_tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq '.sha')"
+            remote_main_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq '.sha')"
+            if [[ "$remote_tag_commit" != "$EXPECTED_TAG_COMMIT" || "$remote_main_commit" != "$EXPECTED_TAG_COMMIT" ]]; then
+              echo "::error::Release refs no longer match the validated build commit $EXPECTED_TAG_COMMIT; found tag=$remote_tag_commit main=$remote_main_commit."
+              return 1
+            fi
+          }
+
+          verify_assets() {
+            local release_json="$1"
+            local name file matches local_digest remote_digest asset_api_url uploader
+
+            if (( $(jq '.assets | length' <<<"$release_json") != ${#expected_names[@]} )); then
+              echo "::error::Release contains an unexpected number of assets."
+              return 1
+            fi
+
+            for name in "${expected_names[@]}"; do
+              file="release/$name"
+              matches="$(jq -c --arg name "$name" '[.assets[] | select(.name == $name)]' <<<"$release_json")"
+              if (( $(jq 'length' <<<"$matches") != 1 )); then
+                echo "::error::Release must contain exactly one asset named $name."
+                return 1
+              fi
+
+              if [[ "$(jq -r '.[0].state' <<<"$matches")" != "uploaded" ]]; then
+                echo "::error::Release asset $name is not in the uploaded state."
+                return 1
+              fi
+
+              local_digest="sha256:$(sha256sum "$file" | awk '{print $1}')"
+              remote_digest="$(jq -r '.[0].digest // ""' <<<"$matches" | tr '[:upper:]' '[:lower:]')"
+              if [[ -z "$remote_digest" || "$remote_digest" != "$local_digest" ]]; then
+                echo "::error::GitHub digest for $name does not match the local verified file."
+                return 1
+              fi
+
+              asset_api_url="$(jq -r '.[0].apiUrl' <<<"$matches")"
+              uploader="$(gh api "$asset_api_url" --jq '.uploader.login')"
+              if [[ "$uploader" != "github-actions[bot]" ]]; then
+                echo "::error::Release asset $name was uploaded by unexpected actor $uploader."
+                return 1
+              fi
+            done
+          }
+
+          if ! (cd release && sha256sum --check --strict --status "$apk_name.sha256"); then
+            echo "::error::The signed APK does not match its workflow-generated checksum file."
+            exit 1
+          fi
+
+          verify_remote_refs
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets,author,isDraft,isImmutable,isPrerelease,tagName)"
+
+          if [[ "$(jq -r '.author.login' <<<"$release_json")" != "$RELEASE_OWNER" ||
+                "$(jq -r '.isDraft' <<<"$release_json")" != "true" ||
+                "$(jq -r '.isImmutable' <<<"$release_json")" != "false" ||
+                "$(jq -r '.isPrerelease' <<<"$release_json")" != "false" ||
+                "$(jq -r '.tagName' <<<"$release_json")" != "$RELEASE_TAG" ]]; then
+            echo "::error::Release draft state changed while assets were uploading."
+            exit 1
+          fi
+
+          verify_assets "$release_json"
+
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --prerelease=false \
+            --latest \
+            --verify-tag
+
+          published_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets,author,isDraft,isImmutable,isPrerelease,tagName)"
+          if [[ "$(jq -r '.isDraft' <<<"$published_json")" != "false" ||
+                "$(jq -r '.isPrerelease' <<<"$published_json")" != "false" ||
+                "$(jq -r '.isImmutable' <<<"$published_json")" != "true" ||
+                "$(jq -r '.author.login' <<<"$published_json")" != "$RELEASE_OWNER" ||
+                "$(jq -r '.tagName' <<<"$published_json")" != "$RELEASE_TAG" ]]; then
+            echo "::error::Published Release is not the expected immutable stable release."
+            exit 1
+          fi
+
+          verify_remote_refs
+          verify_assets "$published_json"
+
+          latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')"
+          if [[ "$latest_tag" != "$RELEASE_TAG" ]]; then
+            echo "::error::GitHub latest Release is $latest_tag, not $RELEASE_TAG."
+            exit 1
+          fi
+
+      - name: Clean workflow-owned partial draft assets after failure
+        if: ${{ failure() && steps.draft_check.outputs.empty == 'true' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets,author,isDraft,isImmutable)"
+          if [[ "$(jq -r '.author.login' <<<"$release_json")" != "$RELEASE_OWNER" ||
+                "$(jq -r '.isDraft' <<<"$release_json")" != "true" ||
+                "$(jq -r '.isImmutable' <<<"$release_json")" != "false" ]]; then
+            echo "Release is no longer the mutable owner-authored draft; skipping cleanup."
+            exit 0
+          fi
+
+          apk_name="Embezzle-Studio-${RELEASE_TAG}-release.apk"
+          for name in "$apk_name" "$apk_name.sha256" "apksigner-report.txt"; do
+            asset_api_url="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .apiUrl' <<<"$release_json" | head -n 1)"
+            [[ -n "$asset_api_url" ]] || continue
+            uploader="$(gh api "$asset_api_url" --jq '.uploader.login')"
+            if [[ "$uploader" == "github-actions[bot]" ]]; then
+              gh api --method DELETE "$asset_api_url"
+              echo "Removed workflow-owned partial asset $name from the draft."
+            else
+              echo "Skipping partial asset $name uploaded by $uploader."
+            fi
+          done

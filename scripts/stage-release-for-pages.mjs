@@ -83,6 +83,13 @@ function checksumAssetFor(assets, apkName) {
   return assets.find((asset) => typeof asset?.name === 'string' && expectedNames.has(asset.name));
 }
 
+function hasTrustedAssetMetadata(asset) {
+  return asset?.state === 'uploaded'
+    && asset?.uploader?.login === 'github-actions[bot]'
+    && typeof asset?.digest === 'string'
+    && /^sha256:[a-f0-9]{64}$/i.test(asset.digest);
+}
+
 function checksumForApk(checksumText, apkName, checksumName) {
   const isChecksumList = checksumName === 'SHA256SUMS';
   for (const line of checksumText.split(/\r?\n/)) {
@@ -225,7 +232,7 @@ function renderReleasePage({
     <article>
       <p class="eyebrow">Checksum-matched Android release</p>
       <h1>${safeReleaseName}</h1>
-      <p class="intro">此页面中的 APK 已在部署时与 Release 同时发布的 SHA-256 校验文件逐字节核对。</p>
+      <p class="intro">此页面中的 APK 来自仓库所有者发布的 GitHub Immutable Release，并已在部署时与 Actions 上传的 SHA-256 校验文件及 GitHub asset digest 逐字节核对。</p>
       <dl>
         <div><dt>版本</dt><dd>${escapeHtml(version)}</dd></div>
         ${publication}
@@ -236,7 +243,7 @@ function renderReleasePage({
       <a class="download" href="${escapeHtml(downloadUrl)}" download="${escapeHtml(apkName)}">下载已校验摘要的 APK</a>
       <h2 class="notes-title">发布说明</h2>
       <div class="notes">${notes}</div>
-      <p class="trust">SHA-256 一致只证明下载字节与 Release 校验文件一致，不等同于生产签名验证。生产发布还必须使用 apksigner 对照正式证书指纹；Android 能否覆盖安装也取决于新旧 APK 签名是否一致。</p>
+      <p class="trust">Immutable Release、GitHub asset digest 与校验文件的一致性共同保护发布字节，但仍不等同于生产签名验证。生产发布还必须使用 apksigner 对照正式证书指纹；Android 能否覆盖安装也取决于新旧 APK 签名是否一致。</p>
     </article>
   </main>
 </body>
@@ -331,6 +338,22 @@ export async function stageReleaseForPages(options = {}) {
   const release = await releaseResponse.json();
   const fields = releaseFields(release, packageVersion);
   const assets = Array.isArray(release?.assets) ? release.assets : [];
+  if (
+    release?.immutable !== true
+    || release?.draft !== false
+    || release?.prerelease !== false
+    || release?.author?.login !== owner
+  ) {
+    const manifest = {
+      schemaVersion: 1,
+      ...fields,
+      releaseUrl: publicBaseUrl,
+      releaseNotes: '最新 Release 不是由仓库所有者发布的 GitHub Immutable Release，因此不会公开为应用内更新。',
+      apk: null,
+    };
+    await writeManifest(outputDir, manifest);
+    return manifest;
+  }
   const expectedApkName = `Embezzle-Studio-${typeof release?.tag_name === 'string' ? release.tag_name.trim() : ''}-release.apk`;
   const apkAsset = assets.find((asset) => asset?.name === expectedApkName);
   const apkName = safeApkName(apkAsset?.name);
@@ -338,7 +361,15 @@ export async function stageReleaseForPages(options = {}) {
   const apkAssetUrl = safeAssetApiUrl(apkAsset?.url, repository);
   const checksumAssetUrl = safeAssetApiUrl(checksumAsset?.url, repository);
 
-  if (!apkAsset || !apkName || !checksumAsset || !apkAssetUrl || !checksumAssetUrl) {
+  if (
+    !apkAsset
+    || !apkName
+    || !checksumAsset
+    || !apkAssetUrl
+    || !checksumAssetUrl
+    || !hasTrustedAssetMetadata(apkAsset)
+    || !hasTrustedAssetMetadata(checksumAsset)
+  ) {
     const manifest = {
       schemaVersion: 1,
       ...fields,
@@ -362,6 +393,10 @@ export async function stageReleaseForPages(options = {}) {
     throw new Error(`Unable to download the release checksum asset: ${checksumResponse.status}`);
   }
   const checksumBytes = await readBoundedResponse(checksumResponse, maxChecksumBytes, 'Release checksum asset');
+  const checksumAssetSha256 = createHash('sha256').update(checksumBytes).digest('hex');
+  if (checksumAsset.digest.toLowerCase() !== `sha256:${checksumAssetSha256}`) {
+    throw new Error('Release checksum bytes do not match the GitHub asset digest.');
+  }
   const checksumText = checksumBytes.toString('utf8');
   const expectedSha256 = checksumForApk(checksumText, apkName, checksumAsset.name);
   if (!expectedSha256) {
@@ -374,6 +409,9 @@ export async function stageReleaseForPages(options = {}) {
   }
   const apkBytes = await readBoundedResponse(apkResponse, maxApkBytes, 'Release APK asset');
   const actualSha256 = createHash('sha256').update(apkBytes).digest('hex');
+  if (apkAsset.digest.toLowerCase() !== `sha256:${actualSha256}`) {
+    throw new Error('Release APK bytes do not match the GitHub asset digest.');
+  }
   if (expectedSha256 !== actualSha256) {
     throw new Error('Release APK SHA-256 does not match its checksum asset.');
   }

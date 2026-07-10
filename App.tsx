@@ -685,6 +685,9 @@ function conversationShareText(conversation: ChatConversation): string {
 
 function formatUpdateStatusTitle(updateInfo: AppUpdateInfo | null, updateNotice: string) {
   if (updateInfo) {
+    if (!updateInfo.installAsset) {
+      return '暂无可用的可信更新';
+    }
     return updateInfo.updateAvailable
       ? `可更新到 v${updateInfo.latestVersion}`
       : `最新版本 v${updateInfo.latestVersion}`;
@@ -2417,7 +2420,13 @@ export default function App() {
     try {
       const result = await checkForAppUpdate();
       setUpdateInfo(result);
-      setUpdateNotice(result.updateAvailable ? `发现新版本 v${result.latestVersion}` : '当前已是最新版本。');
+      setUpdateNotice(
+        result.updateAvailable
+          ? `发现新版本 v${result.latestVersion}`
+          : result.installAsset
+            ? '当前已是最新版本。'
+            : '当前没有通过完整信任链校验的 Android 更新包。'
+      );
     } catch (error) {
       setUpdateInfo(null);
       setUpdateNotice(error instanceof Error ? error.message : '更新检查失败。');
@@ -3042,7 +3051,7 @@ export default function App() {
                       <ExternalLink size={16} color={palette.textOnAccent} strokeWidth={2} />
                     )}
                     <Text style={styles.primaryButtonText}>
-                      前往发布页
+                      {updateInfo?.installAsset ? '前往发布页' : '查看发布状态'}
                     </Text>
                   </AnimatedPressable>
                 </View>
