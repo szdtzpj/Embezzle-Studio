@@ -1,6 +1,6 @@
 {
   "name": "embezzlestudio",
-  "version": "1.0.4",
+  "version": "1.0.6",
   "main": "index.ts",
   "dependencies": {
     "@lobehub/icons-rn": "^2.8.1",
@@ -15,8 +15,10 @@
     "expo-linear-gradient": "^57.0.0",
     "expo-secure-store": "~57.0.0",
     "expo-sharing": "~57.0.3",
+    "expo-splash-screen": "~57.0.2",
     "expo-status-bar": "~57.0.0",
     "expo-system-ui": "~57.0.0",
+    "expo-video": "~57.0.0",
     "lucide-react-native": "^1.23.0",
     "moti": "^0.30.0",
     "react": "19.2.3",
@@ -35,6 +37,8 @@
     "eslint": "^9.39.4",
     "eslint-config-expo": "^57.0.0",
     "fake-indexeddb": "^6.2.4",
+    "jimp-compact": "0.16.1",
+    "pngjs": "3.4.0",
     "typescript": "~6.0.3",
     "vitest": "^4.1.10",
     "yaml": "^2.9.0"

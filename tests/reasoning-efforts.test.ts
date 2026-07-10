@@ -195,6 +195,7 @@ describe('Ark video task protocol', () => {
       image_url: { url: reference.uri },
     });
     expect(result.attachments?.[0].uri).toBe('https://videos.example.com/result.mp4');
+    expect(result.attachments?.[0].mimeType).toBe('video/mp4');
     await expect(queryGenerationTask(ark, {
       providerId: ark.id,
       modelId: 'doubao-seedance-2-0-260128',

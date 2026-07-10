@@ -13,6 +13,8 @@ Embezzle Studio is an Android-focused mobile AI chat client. The project is stil
 - Reasoning settings: reasoning effort is saved per exact model family, with distinct support for `off`, `none`, `minimal`, `xhigh`, and `max`, and is mapped separately to the OpenAI, Volcengine Ark, and Bailian protocols.
 - Parameter tuning: only provider/model parameters and ranges implemented on the wire are shown. Active reasoning or fixed-parameter models display an explicit notice or hide ineffective controls; disabling tuning leaves values to provider defaults.
 - Multimodal entry points: image, video, and file pickers are shown according to model capabilities. Images can be sent to vision models; Bailian compatible mode supports bounded local-video `video_url` input; file input is available only to explicitly `file-input`-capable official OpenAI models. The app also supports text-to-image generation and submitting and later querying Volcengine Ark video tasks with reference images or videos.
+- Media preview and export: pending images render as square thumbnails. Videos in conversations use native `expo-video` controls for inline playback and fullscreen. The video filename and Save/Share controls live in a separate action area; Android saves through the system Storage Access Framework directory picker, Web uses a browser download, and other native platforms fall back to the system share sheet.
+- Android layout and navigation: the main chat surface and rename dialog avoid the software keyboard, while Android uses `resize` window behavior. Chat stays mounted when Settings opens, Settings is reused after its first mount, and remote model candidates render in bounded batches to reduce page-switch and large-list pressure.
 - Conversation history: historical conversations are saved locally, with search across user and model responses, plus pin, rename, share, and delete actions.
 - Message actions: supports native/Web copy, sharing, stopping generation, retaining partial streamed content, regenerating, editing, and causal-branch deletion.
 - Update checks: checks a fixed public Pages manifest for version and verified APK metadata, then opens a trusted release page. The app does not present itself as an APK verifier or installer.
@@ -21,6 +23,7 @@ Embezzle Studio is an Android-focused mobile AI chat client. The project is stil
 ## Still Being Improved
 
 - Chat video attachments currently implement `video_url` transport only for Bailian compatible mode; other providers still require their own upload, transcoding, or reference protocols.
+- The user has confirmed on one Android phone that the main IME-avoidance, Seedance preview/download, image-sizing, and Chat/Settings-switching paths are fixed. Additional devices, system-directory cancellation/failure/low-space behavior, remote-media expiry, and sustained stress still require acceptance; Web evidence does not replace those extended native checks.
 - MCP, the plugin system, and web-search providers have not yet been integrated as stable features.
 - The official OpenAI API does not return the original hidden chain of thought; the app can only display returned reasoning summaries, `reasoning_content`, or token usage.
 - Building an Android installation package requires a local Android toolchain, or a CI/EAS-based build flow.
@@ -40,6 +43,7 @@ Embezzle Studio is an Android-focused mobile AI chat client. The project is stil
 - TypeScript 6
 - React Native Reanimated
 - React Native Gesture Handler
+- Expo Video
 - AsyncStorage
 - SecureStore
 
@@ -69,6 +73,12 @@ Pull Requests and pushes to `main` trigger `.github/workflows/quality.yml`. Chan
 `.github/workflows/android-apk.yml` permits only the repository owner to sign from `main` with a stable production key. The `contents: write` permission needed to inspect an owner-authored Draft exists only in the short `release_contract` preflight job; preflight and publication are both constrained by the main-only `android-release` Environment, while the npm/Expo/Gradle build retains the repository-wide `contents: read` permission and does not persist checkout credentials. Before signing, pinned Android Build Tools 36.0.0 verifies the APK identity, version, SDK levels, forbidden permissions, and absence of a pre-existing valid signature. After signing, exactly one non-debug signer must match the pinned fingerprint. Missing secrets or any artifact, toolchain, or certificate mismatch fails closed. Every official Action uses a GitHub-verified latest-stable full SHA on the Node 24 generation.
 
 The first production-signed release, [`v1.0.4`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.0.4), was published on 2026-07-10 as the immutable Latest Release. The public [trusted download page](https://szdtzpj.github.io/Embezzle-Studio/release.html) serves a 93,087,208-byte APK with SHA-256 `187f4a90daed7c7d05d423890419d1c4fe1d705674bf1d4955075c8d725b63f0` and production certificate SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`. The GitHub release attestation, all three downloaded assets, and the anonymous Pages APK bytes were independently verified.
+
+The current working tree is a local `1.0.6` / Android versionCode 6 candidate containing the earlier `1.0.5` keyboard, image/video preview, export, and page-switch fixes. The model-picker `Modal` now consumes the real bottom safe-area inset and lets its list shrink, keeping the last model row above three-button navigation controls. The Expo template icon and construction grid are replaced by one double-ribbon S identity across the app, adaptive and monochrome Android icons, favicon, and an explicit `expo-splash-screen` launch screen. The three bouncing pending dots are replaced by one folding glyph.
+
+The candidate passes `npm.cmd run check` (15 test files, 252 tests, with zero TypeScript or ESLint errors/warnings), the Web export (3137 modules, 6.9 MB main bundle), Expo Doctor 20/20, and `expo install --check`. A clean 390×844 exported-Web session covered Chat, the model picker, Settings, and return navigation with zero console errors or warnings. A separate delayed loopback response exercised the new folding glyph and completed with the expected assistant text. All 3 workflow YAML files and 35 embedded Bash blocks also pass parsing/`bash -n`.
+
+A clean Expo prebuild and unsigned `assembleRelease` pass. The resulting bytes were signed locally with the same production certificate used for `v1.0.4`, producing the acceptance-only candidate `D:\EmbezzleStudio-Releases\v1.0.6-candidate\Embezzle-Studio-v1.0.6-candidate-release.apk`: 96,682,256 bytes, SHA-256 `51186c1b746210ce60d0c79f84751785f2927766831b4d84566e1b0191baeea0`. `aapt` identifies `com.szdtzpj.embezzlestudio` version `1.0.6`/versionCode 6 with minSdk 24 and targetSdk 36. `apksigner` reports exactly one signer with production certificate SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`; APK Signature Schemes v2/v3 and zipalign pass, with no overlay, camera, or microphone permission. The user has confirmed on an Android phone that the four earlier main paths (IME avoidance, Seedance preview/download, image preview sizing, and Settings/Chat switching) are fixed; this is user acceptance rather than local automation evidence. No device is connected to this run, so the new system-bar inset, launcher/themed icon masks, splash rendering, native animation smoothness, additional devices, SAF cancellation/failure/low-space paths, and sustained stress remain open. No `v1.0.6` tag, Draft, workflow publication, or GitHub Release exists; public Latest remains `v1.0.4`.
 
 This repository now has the `android-release` environment under `Settings -> Environments`, restricts its deployment branch policy to `main`, and has the five Environment secrets below configured; the table and commands also serve as the environment-rebuild or key-rotation runbook. The [official GitHub Environments limitations](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) require at least Pro/Team for private-repository Environment secrets and deployment branch/tag policies, make required reviewers public-only on Free/Pro/Team, and require Enterprise for that reviewer gate on a private repository. A direct collaborator on a private personal repository also has no read-only role to downgrade to. By maintainer decision, `BlueOcean223` remains an explicitly trusted write collaborator, accepting the residual lack of two-person approval. Do not describe the `main` restriction and owner workflow gate as equivalent to two-person approval.
 
@@ -102,7 +112,7 @@ For each release, follow this order:
 
 1. Update `expo.version` in `app.json`, increment `android.versionCode`, and update the versions in `package.json`, `package-lock.json`, and `src/data/appInfo.ts` together.
 2. Pass the same quality checks locally as CI, merge through a Pull Request into `main`, and wait for both Quality and the push-triggered Pages workflow on that merge commit to succeed.
-3. Pause other `main` merges and newer-version Releases. Create and push a tag matching the application version, such as the next release `v1.0.5`, from the exact latest `origin/main` commit.
+3. Pause other `main` merges and newer-version Releases. Create and push a tag matching the application version, such as the next release `v1.0.6`, from the exact latest `origin/main` commit.
 4. Confirm Immutable Releases is enabled, then have `szdtzpj` create an empty same-name draft that is not a prerelease. Run the Android workflow from the default `main` branch; never publish an empty Release first.
 5. The workflow requires the tag to equal the exact current `origin/main`, builds and signs the APK, and rechecks the tag/main commit plus every GitHub asset digest, state, and uploader both before and after freezing the draft as the latest immutable Release. End the freeze only after Android, the automatically triggered Pages deployment, the Release attestation, and the public APK byte checks all succeed.
 
@@ -111,11 +121,11 @@ Example:
 ```powershell
 git fetch origin
 $mergeSha = git rev-parse origin/main
-git tag -a v1.0.5 $mergeSha -m "Embezzle Studio v1.0.5"
-git push origin v1.0.5
+git tag -a v1.0.6 $mergeSha -m "Embezzle Studio v1.0.6"
+git push origin v1.0.6
 gh api --method PUT repos/szdtzpj/Embezzle-Studio/immutable-releases
-gh release create v1.0.5 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.0.5" --notes "Android production release v1.0.5."
-gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.0.5
+gh release create v1.0.6 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.0.6" --notes "Android production release v1.0.6."
+gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.0.6
 ```
 
 The Release title, body, and publication time are copied into the public Pages manifest and download page. Review them as public content before creating the draft, never include private repository, account, customer, or secret information, and do not use automatically generated release notes without inspecting them first.
