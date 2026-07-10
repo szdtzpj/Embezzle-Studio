@@ -99,19 +99,20 @@ keytool -list -v -keystore $keystore -alias embezzle-studio | Select-String 'SHA
 每次发布按以下顺序操作：
 
 1. 同步更新 `app.json` 的 `expo.version` 和递增的 `android.versionCode`、`package.json`/`package-lock.json` 的版本，以及 `src/data/appInfo.ts` 的版本。
-2. 在本地通过与 CI 相同的质量检查并提交改动。
-3. 创建并推送与应用版本一致的 tag，例如 `v1.0.4`。
-4. 先创建同名 GitHub Release，再手动运行 Android 工作流。
-5. 工作流会检出 tag 对应的提交，生成未签名 APK，使用正式 keystore 执行 `zipalign` 和 `apksigner`，验证证书指纹，生成 `.sha256`，最后把 APK 和校验文件附加到 Release。
+2. 在本地通过与 CI 相同的质量检查，通过 Pull Request 合并到 `main`，再等待该合并提交的 Quality 与 push-triggered Pages 工作流都成功。
+3. 暂停其它 `main` 合并和新版本 Release；从最新 `origin/main` 的精确提交创建并推送与应用版本一致的 tag，例如 `v1.0.4`。
+4. 先创建同名、非 draft、非 prerelease 的 GitHub Release，再从默认分支 `main` 手动运行 Android 工作流。
+5. 工作流会检出 tag 对应的提交，生成未签名 APK，使用正式 keystore 执行 `zipalign` 和 `apksigner`，验证证书指纹，生成 `.sha256`，最后把 APK 和校验文件附加到 Release。等该工作流和随后自动触发的 Pages 工作流都成功并完成公开字节校验后，才结束发布冻结。
 
 示例：
 
 ```powershell
-git tag -a v1.0.4 -m "Embezzle Studio v1.0.4"
-git push origin main
+git fetch origin
+$mergeSha = git rev-parse origin/main
+git tag -a v1.0.4 $mergeSha -m "Embezzle Studio v1.0.4"
 git push origin v1.0.4
-gh release create v1.0.4 --verify-tag --title "Embezzle Studio v1.0.4" --generate-notes
-gh workflow run android-apk.yml -f release_tag=v1.0.4
+gh release create v1.0.4 --repo szdtzpj/Embezzle-Studio --verify-tag --title "Embezzle Studio v1.0.4" --generate-notes
+gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.0.4
 ```
 
 `v1.0.3` 及更早的现有 APK 使用生成的 debug 签名，只能作为测试安装包，不能作为正式发布签名的信任起点。Android 不允许用新的正式证书直接覆盖安装这些 debug-signed APK；迁移时需要卸载测试包（会清除应用本地数据），或在正式发布前另行设计数据迁移方案。
