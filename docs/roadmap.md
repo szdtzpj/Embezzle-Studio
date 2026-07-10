@@ -50,3 +50,5 @@
 当前个人私有仓库在 GitHub Free、Pro 或 Team 方案下不能为 Environment 启用 required reviewers；私有仓库的 Environment secrets 与 deployment branch/tag 限制又至少需要 Pro/Team。若不迁移到 GitHub Enterprise Cloud 或把仓库公开，`android-release` 在 Pro/Team 上只能限制为由 `main` 部署而没有独立人工审批；这属于明确的保护降级，写入正式密钥前还必须确认账号方案，并审计、信任所有具有仓库写权限的协作者。
 
 2026-07-10 本机验证：12 个测试文件/183 个测试、Web export、Expo Doctor 20/20、workflow YAML/8 段 Bash/15 个 Action SHA、桌面与 390×844 导出 Web 冒烟均通过；clean Android 1.0.4/code 4 APK 的 aapt、权限、apksigner v2、zipalign 和 SHA-256 也已复核。该 APK 仍为本机 Android Debug 证书，且没有连接 Android 设备或真实服务商账号，因此这些证据不会把 M4 提前标记为完成。
+
+2026-07-10 远端验证：审计修复已通过 PR #1 合并；首轮 main Pages 暴露并证明了 `configure-pages` 缺少 `pages: read` 的真实集成问题，随后 PR #2 以最小 job 权限和 GitHub-verified Node 24 Pages Action SHA 修复。Pages 修复合并提交 `a7bfe09bf7f57b5341f594093bb2f2b85efebf70` 的 Quality 与 Pages build/deploy 均成功；匿名请求可读取 fail-closed 清单，但旧 v1.0.3 debug APK 没有校验文件，因而没有 `release.html` 或公开下载。main/`v*` Ruleset 与仓库级 Action 完整 SHA 强制已生效，`android-release` 也已限制为仅由 `main` 部署；正式密钥、Environment secrets、v1.0.4 正式资产和真机/真实账号矩阵仍未完成。

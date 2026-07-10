@@ -8,7 +8,7 @@ Continue the deep, end-to-end audit of the entire Embezzle Studio application. R
 
 ## Continuation completion — current authoritative state
 
-The continuation reached the locally provable boundary on 2026-07-10. The historical interruption/evidence/action sections later in this file are retained for traceability, but this section supersedes their stale status.
+The continuation reached the locally provable boundary on 2026-07-10, after which the user authorized the GitHub continuation. The historical interruption/evidence/action sections later in this file are retained for traceability, but this section and the remote evidence below supersede their stale status.
 
 ### Closed implementation and audit items
 
@@ -35,14 +35,22 @@ The continuation reached the locally provable boundary on 2026-07-10. The histor
   - permissions: INTERNET, legacy read/write storage with maxSdk 32, VIBRATE, biometric/fingerprint, and the app-scoped dynamic receiver permission; no SYSTEM_ALERT_WINDOW, CAMERA, or RECORD_AUDIO
   - `apksigner` verifies APK Signature Scheme v2; `zipalign -c -P 16 -v 4` succeeds
   - signer is intentionally local-only `CN=Android Debug`; certificate SHA-256 `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c`. This artifact must not be published as the production release.
-- Final status/diff scope, untracked sizes, common secret patterns, and keystore/private-key file extensions were inspected; no generated source artifact or secret material was found. No push, tag, Release, secret configuration, or remote protection change was performed.
+- At the local-boundary snapshot, final status/diff scope, untracked sizes, common secret patterns, and keystore/private-key file extensions were inspected; no generated source artifact or secret material was found. GitHub changes described below happened only after the user subsequently authorized them.
+
+### GitHub continuation evidence
+
+- PR [#1](https://github.com/szdtzpj/Embezzle-Studio/pull/1) merged the audited implementation as `9d87de076e4f58d2ae1b4e77d12cf21c893a0644`; its final head Quality run `29062677804` and the exact merge-SHA Quality run `29062764033` succeeded.
+- The first merge-SHA Pages run `29062764034` exposed a real integration gap: the build job's `configure-pages` call could not read the Pages site with a contents-only token. PR [#2](https://github.com/szdtzpj/Embezzle-Studio/pull/2) added only `contents: read` plus `pages: read` to that job, retained `pages: write`/`id-token: write` only in deploy, upgraded the three Pages actions to their GitHub-verified Node 24 stable SHAs, and explicitly included `.nojekyll` in the v5 artifact. It merged as `a7bfe09bf7f57b5341f594093bb2f2b85efebf70`.
+- On that Pages-fix merge SHA, Quality run `29063138324` succeeded and Pages run `29063138326` completed both build and deploy. Anonymous HTTPS checks returned `200` for the site root and `release-manifest.json`, and `404` for `release.html` and the old v1.0.3 download path. The published manifest identifies v1.0.3 but has `apk: null`, so the existing debug-signed asset was not exposed as a trusted update.
+- Active remote protection now includes main ruleset `18749435` (no deletion/force-push and strict required `Typecheck, test, lint, and build web` from GitHub Actions), `v*` tag ruleset `18749437` (no deletion or ref movement), and repository-wide full-SHA enforcement for Actions.
+- Environment `android-release` exists with a custom deployment branch policy allowing only `main`; it still has no production secrets or reviewer. GitHub does not offer required Environment reviewers for this private personal repository without Enterprise. `BlueOcean223` still has write access, so the user must explicitly trust that release authority or reduce the collaborator's access before production secrets are installed.
 
 ### Not locally verified
 
 - `adb devices -l` is empty. Android install, launch, permission prompts, sharing/export, attachment picker, back handling, update-link handoff, and upgrade/uninstall behavior remain unverified on a real device/emulator.
 - No real OpenAI, Volcengine Ark, or Alibaba Bailian account/key was used. Live entitlement, billing, provider-side model availability, long-running generation, media upload, and error-shape smoke remain unverified.
 - Browser verification is complete for the exported Web artifact; there is no remaining “browser unavailable” gap.
-- Production signing and the public GitHub Release/Pages chain cannot be proved until the user supplies the protected GitHub environment, stable signing identity, remote protections, tag/Release, and real published assets.
+- The fail-closed public Pages pre-release state is now proved remotely. Production signing and the valid `release.html`/public APK path remain unproved until a stable signing identity is safely backed up, installed as Environment secrets, and used for the v1.0.4 Release assets.
 
 ## Historical interruption point (resolved)
 
@@ -160,16 +168,16 @@ Start with the release page/stager closure; do not begin by re-auditing complete
 
 ## External/manual release boundary
 
-These are not locally solvable without the user's GitHub/security choices:
+These are the remaining user/security boundaries after the remote work above:
 
-- Create GitHub Environment `android-release`, restrict its deployment branch policy to `main`, and decide the repository-plan boundary explicitly. [GitHub's environment limits](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) make required reviewers public-only on Free/Pro/Team; private Environment secrets and deployment branch/tag restrictions need at least Pro/Team. Keeping this personal repository private without Enterprise therefore means either accepting a no-reviewer downgrade after auditing all write collaborators (on Pro/Team), upgrading/migrating, or changing visibility as a separate user decision.
-- Configure and offline-back up the five production secrets:
+- Decide whether to trust the existing write collaborator with no-reviewer release authority, reduce that access, or move to a repository/plan that supports required reviewers. [GitHub's environment limits](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) make required reviewers public-only on Free/Pro/Team.
+- Connect suitable encrypted removable storage, generate and test at least one offline recovery copy of the stable signing identity, then configure the five production secrets:
   - `ANDROID_KEYSTORE_BASE64`
   - `ANDROID_KEY_ALIAS`
   - `ANDROID_KEYSTORE_PASSWORD`
   - `ANDROID_KEY_PASSWORD`
   - `ANDROID_SIGNING_CERT_SHA256`
-- Add `main` branch protection/required Quality check and tag/ruleset protection.
+- After the signing boundary is resolved, create the immutable v1.0.4 tag and stable Release from the exact final `origin/main`, dispatch the Android workflow from `main`, and verify all Release/Pages assets and hashes. Do not create the Release early because the stager always selects the latest stable Release.
 - The existing `v1.0.3` APK is debug-signed; the first production-signed release cannot update over it without uninstall/data migration.
 - Run representative real-device and real-provider-account smoke tests before calling the production release complete.
 
