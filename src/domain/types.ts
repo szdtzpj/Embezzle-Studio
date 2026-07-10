@@ -22,11 +22,20 @@ export type Capability =
 
 export type MessageRole = 'system' | 'user' | 'assistant';
 
-export type MessageStatus = 'ready' | 'pending' | 'error';
+export type MessageStatus = 'ready' | 'pending' | 'error' | 'cancelled';
 
 export type AttachmentKind = 'image' | 'video' | 'file';
 
-export type ReasoningEffort = 'default' | 'off' | 'low' | 'medium' | 'high' | 'max';
+export type ReasoningEffort =
+  | 'default'
+  | 'off'
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max';
 
 export type ModelTask = 'chat' | 'image-generation' | 'video-generation' | 'embedding' | 'rerank';
 
@@ -42,6 +51,7 @@ export interface ModelInfo {
   id: string;
   name?: string;
   capabilities: Capability[];
+  capabilityOverrides?: Partial<Record<Capability, boolean>>;
   supportedReasoningEfforts?: ReasoningEffort[];
   contextWindow?: number;
   task?: ModelTask;

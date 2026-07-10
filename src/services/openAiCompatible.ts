@@ -10,15 +10,25 @@ import type {
   ReasoningEffort,
 } from '../domain/types';
 import { Platform } from 'react-native';
+import { isVolcengineArkProvider } from '../data/arkModels';
 import {
   createModelInfoFromId,
   enrichDiscoveredModel,
+  getBailianThinkingProfile,
   inferModelTask,
+  isReasoningModel,
   isVideoInputModel,
   isVisionModel,
   type RemoteModelMetadata,
 } from './modelCapabilities';
 import { normalizeReasoningEffort } from './reasoningEfforts';
+import { materializeAttachment, persistAttachment } from './mediaStorage';
+import {
+  buildOpenAiResponsesRequest,
+  isOpenAiResponsesOnlyModel,
+  openAiResponsesLimits,
+  parseOpenAiResponsesResponse,
+} from './openAiResponses';
 
 interface ChatCompletionArgs {
   provider: ProviderProfile;
@@ -28,6 +38,7 @@ interface ChatCompletionArgs {
   reasoningEffort: ReasoningEffort;
   parameterSettings?: ModelParameterSettings;
   onStreamUpdate?: (update: ChatStreamUpdate) => void;
+  signal?: AbortSignal;
 }
 
 interface ChatStreamUpdate {
@@ -63,6 +74,57 @@ interface ArkVideoTaskResponse {
 }
 
 const webDevProxyUrl = 'http://127.0.0.1:8787/proxy';
+const defaultRequestTimeoutMs = 120_000;
+const openAiProRequestTimeoutMs = 10 * 60_000;
+const discoveryRequestTimeoutMs = 30_000;
+const maxJsonResponseBytes = 5 * 1024 * 1024;
+const maxErrorResponseBytes = 64 * 1024;
+const maxGeneratedImageResponseBytes = 30 * 1024 * 1024;
+const maxStreamEventBytes = 1024 * 1024;
+const maxStreamOutputCharacters = 2_000_000;
+const bailianMaxInlineVideoDataUrlBytes = 10 * 1024 * 1024;
+const responseAbortCleanups = new WeakMap<Response, () => void>();
+
+function createAbortError(message = '请求已取消。'): Error {
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+}
+
+export function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
+}
+
+function parseProviderBaseUrl(rawBaseUrl: string): URL {
+  const value = rawBaseUrl.trim();
+  if (!value) {
+    throw new Error('请先填写当前服务商的 Base URL。');
+  }
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('Base URL 不是有效网址，请填写完整的 https:// 地址。');
+  }
+
+  if (url.username || url.password) {
+    throw new Error('Base URL 不能包含用户名或密码。');
+  }
+  if (url.hash || url.search) {
+    throw new Error('Base URL 不能包含查询参数或片段。');
+  }
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopbackHostname(url.hostname))) {
+    throw new Error('Base URL 必须使用 HTTPS；仅本机 localhost/127.0.0.1 调试服务可使用 HTTP。');
+  }
+
+  return url;
+}
 
 function shouldAppendOpenAiVersion(baseUrl: string, provider: ProviderProfile): boolean {
   if (!['custom', 'new-api-relay', 'openai-compatible'].includes(provider.kind)) {
@@ -70,7 +132,7 @@ function shouldAppendOpenAiVersion(baseUrl: string, provider: ProviderProfile): 
   }
 
   try {
-    const url = new URL(baseUrl);
+    const url = parseProviderBaseUrl(baseUrl);
     const path = url.pathname.replace(/\/+$/, '').toLowerCase();
     return path === '';
   } catch {
@@ -79,10 +141,11 @@ function shouldAppendOpenAiVersion(baseUrl: string, provider: ProviderProfile): 
 }
 
 function normalizeBaseUrl(baseUrl: string, provider: ProviderProfile): string {
-  const normalized = baseUrl
-    .trim()
+  const url = parseProviderBaseUrl(baseUrl);
+  url.pathname = url.pathname
     .replace(/\/+$/, '')
-    .replace(/\/(?:chat\/completions|models)$/i, '');
+    .replace(/\/(?:chat\/completions|models)$/i, '') || '/';
+  const normalized = url.toString().replace(/\/+$/, '');
 
   if (normalized && shouldAppendOpenAiVersion(normalized, provider)) {
     return `${normalized}/v1`;
@@ -92,23 +155,67 @@ function normalizeBaseUrl(baseUrl: string, provider: ProviderProfile): string {
 }
 
 function authHeaders(provider: ProviderProfile): HeadersInit {
-  if (!provider.apiKey?.trim()) {
-    throw new Error('请先填写当前服务商的 API Key。');
-  }
-
-  return {
-    Authorization: `Bearer ${provider.apiKey.trim()}`,
+  const headers: Record<string, string> = {
     Accept: 'application/json',
     'Content-Type': 'application/json',
   };
+  const apiKey = provider.apiKey?.trim();
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+  return headers;
 }
 
 function assertBaseUrl(provider: ProviderProfile): string {
   const baseUrl = normalizeBaseUrl(provider.baseUrl, provider);
-  if (!baseUrl) {
-    throw new Error('请先填写当前服务商的 Base URL。');
-  }
   return baseUrl;
+}
+
+async function readLimitedResponseText(
+  response: Response,
+  maxBytes: number,
+  label: string
+): Promise<string> {
+  try {
+    const contentLength = Number(response.headers.get('content-length'));
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      throw new Error(`${label}响应过大（上限 ${Math.round(maxBytes / 1024 / 1024)} MB）。`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      const body = await response.text();
+      if (new TextEncoder().encode(body).byteLength > maxBytes) {
+        throw new Error(`${label}响应过大（上限 ${Math.round(maxBytes / 1024 / 1024)} MB）。`);
+      }
+      return body;
+    }
+
+    const decoder = new TextDecoder();
+    let totalBytes = 0;
+    let body = '';
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        totalBytes += value?.byteLength ?? 0;
+        if (totalBytes > maxBytes) {
+          await reader.cancel();
+          throw new Error(`${label}响应过大（上限 ${Math.round(maxBytes / 1024 / 1024)} MB）。`);
+        }
+        body += decoder.decode(value, { stream: true });
+      }
+      body += decoder.decode();
+      return body;
+    } finally {
+      reader.releaseLock();
+    }
+  } finally {
+    responseAbortCleanups.get(response)?.();
+    responseAbortCleanups.delete(response);
+  }
 }
 
 function compactResponseText(body: string): string {
@@ -122,7 +229,7 @@ function looksLikeHtmlResponse(body: string, contentType: string): boolean {
 
 async function readJsonResponse<T>(response: Response, requestUrl: string, label: string): Promise<T> {
   const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
-  const body = await response.text();
+  const body = await readLimitedResponseText(response, maxJsonResponseBytes, label);
 
   if (!response.ok) {
     throw new Error(`${label}失败：${response.status} ${compactResponseText(body)}`);
@@ -159,26 +266,67 @@ function headersToObject(headers: HeadersInit | undefined): Record<string, strin
   return headers as Record<string, string>;
 }
 
-async function providerFetch(url: string, init: RequestInit): Promise<Response> {
-  if (Platform.OS !== 'web') {
-    return fetch(url, init);
+async function providerFetch(
+  url: string,
+  init: RequestInit,
+  timeoutMs = defaultRequestTimeoutMs
+): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const abortFromCaller = () => controller.abort(init.signal?.reason ?? createAbortError());
+  if (init.signal?.aborted) {
+    throw createAbortError();
   }
+  init.signal?.addEventListener('abort', abortFromCaller, { once: true });
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort(createAbortError('请求超时。'));
+  }, timeoutMs);
+  const cleanup = () => {
+    clearTimeout(timeout);
+    init.signal?.removeEventListener('abort', abortFromCaller);
+  };
 
   try {
-    return await fetch(webDevProxyUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        url,
-        method: init.method ?? 'GET',
-        headers: headersToObject(init.headers),
-        body: typeof init.body === 'string' ? init.body : undefined,
-      }),
-    });
-  } catch {
-    throw new Error('Web 调试代理未启动或不可访问。请用 npm run web 启动应用，或确认 127.0.0.1:8787 可访问。');
+    let response: Response;
+    if (Platform.OS !== 'web') {
+      response = await fetch(url, { ...init, signal: controller.signal });
+    } else {
+      try {
+        response = await fetch(webDevProxyUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            url,
+            method: init.method ?? 'GET',
+            headers: headersToObject(init.headers),
+            body: typeof init.body === 'string' ? init.body : undefined,
+          }),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (isAbortError(error) || controller.signal.aborted) {
+          throw error;
+        }
+        throw new Error('Web 调试代理未启动或不可访问。请用 npm run web 启动应用，或确认 127.0.0.1:8787 可访问。');
+      }
+    }
+
+    responseAbortCleanups.set(response, cleanup);
+    return response;
+  } catch (error) {
+    cleanup();
+    if (timedOut) {
+      const timeoutError = createAbortError(`请求超过 ${Math.round(timeoutMs / 1000)} 秒，已自动停止。`);
+      timeoutError.name = 'TimeoutError';
+      throw timeoutError;
+    }
+    if (init.signal?.aborted) {
+      throw createAbortError();
+    }
+    throw error;
   }
 }
 
@@ -194,6 +342,10 @@ function imageContent(attachment: MediaAttachment) {
       ? `data:${mimeType};base64,${attachment.base64}`
       : attachment.uri;
 
+  if (!url.startsWith('data:') && !safeExternalMediaUrl(url)) {
+    throw new Error(`图片「${attachment.name}」只有本地地址，无法发送给远程模型。请通过“图片”入口重新选择。`);
+  }
+
   return {
     type: 'image_url',
     image_url: {
@@ -202,8 +354,87 @@ function imageContent(attachment: MediaAttachment) {
   };
 }
 
-function toOpenAiMessage(message: ChatMessage) {
-  if (message.role === 'user' && message.attachments?.length) {
+function bailianInlineVideoPrefix(attachment: MediaAttachment): string {
+  return `data:${attachment.mimeType || 'video/mp4'};base64,`;
+}
+
+function bailianMaxInlineVideoSourceBytes(attachment: MediaAttachment): number {
+  const prefixBytes = new TextEncoder().encode(bailianInlineVideoPrefix(attachment)).byteLength;
+  const availableBase64Bytes = Math.max(0, bailianMaxInlineVideoDataUrlBytes - prefixBytes);
+  return Math.floor(availableBase64Bytes / 4) * 3;
+}
+
+function assertBailianInlineVideoSize(url: string, attachment: MediaAttachment): void {
+  if (!url.toLowerCase().startsWith('data:')) {
+    return;
+  }
+  const encodedBytes = new TextEncoder().encode(url).byteLength;
+  if (encodedBytes > bailianMaxInlineVideoDataUrlBytes) {
+    throw new Error(
+      `视频「${attachment.name}」的 Base64 Data URL 编码后超过 10 MB；请改用公网 HTTPS URL。`
+    );
+  }
+}
+
+function videoContent(attachment: MediaAttachment, enforceBailianInlineLimit = false) {
+  if (attachment.kind !== 'video') {
+    throw new Error('当前附件不是视频，无法转换为 video_url。');
+  }
+
+  const mimeType = attachment.mimeType || 'video/mp4';
+  const url = attachment.base64?.startsWith('data:')
+    ? attachment.base64
+    : attachment.base64
+      ? `data:${mimeType};base64,${attachment.base64}`
+      : attachment.uri;
+
+  if (!url.startsWith('data:') && !safeExternalMediaUrl(url)) {
+    throw new Error(`视频「${attachment.name}」只有本地地址，无法发送给远程模型。请重新选择或使用公网 URL。`);
+  }
+  if (enforceBailianInlineLimit) {
+    assertBailianInlineVideoSize(url, attachment);
+  }
+
+  return {
+    type: 'video_url',
+    video_url: {
+      url,
+    },
+  };
+}
+
+function fileContent(attachment: MediaAttachment) {
+  if (attachment.kind !== 'file') {
+    throw new Error('当前附件不是文件，无法转换为 file 内容。');
+  }
+  const inline = attachment.base64?.trim() || (attachment.uri.startsWith('data:') ? attachment.uri : '');
+  if (!inline) {
+    throw new Error(`文件「${attachment.name}」缺少 Base64 数据，无法发送给 OpenAI。`);
+  }
+  const match = inline.match(/^data:([^;,]+);base64,([\s\S]*)$/i);
+  const mimeType = (match?.[1] || attachment.mimeType || 'application/octet-stream').trim().toLowerCase();
+  const payload = (match?.[2] ?? inline).replace(/\s+/g, '');
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(payload) || payload.length % 4 === 1) {
+    throw new Error(`文件「${attachment.name}」的 Base64 数据无效。`);
+  }
+  const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0;
+  const estimatedBytes = Math.floor((payload.length * 3) / 4) - padding;
+  if (estimatedBytes > openAiResponsesLimits.maxInlineFileBytes) {
+    throw new Error(`文件「${attachment.name}」超过 20 MB 内联上限。`);
+  }
+  return {
+    type: 'file',
+    file: {
+      filename: attachment.name || 'attachment',
+      file_data: `data:${mimeType};base64,${payload}`,
+    },
+  };
+}
+
+function toOpenAiMessage(message: ChatMessage, provider?: ProviderProfile) {
+  const mediaAttachments =
+    message.attachments?.filter((attachment) => ['image', 'video', 'file'].includes(attachment.kind)) ?? [];
+  if (message.role === 'user' && mediaAttachments.length) {
     return {
       role: message.role,
       content: [
@@ -211,7 +442,11 @@ function toOpenAiMessage(message: ChatMessage) {
           type: 'text',
           text: message.content || '请分析附件。',
         },
-        ...message.attachments.map(imageContent),
+        ...mediaAttachments.map((attachment) => {
+          if (attachment.kind === 'image') return imageContent(attachment);
+          if (attachment.kind === 'video') return videoContent(attachment, provider?.kind === 'bailian-compatible');
+          return fileContent(attachment);
+        }),
       ],
     };
   }
@@ -220,6 +455,34 @@ function toOpenAiMessage(message: ChatMessage) {
     role: message.role,
     content: message.content,
   };
+}
+
+async function materializeMessagesForRequest(
+  messages: ChatMessage[],
+  provider?: ProviderProfile
+): Promise<ChatMessage[]> {
+  return Promise.all(
+    messages.map(async (message) => {
+      if (message.role !== 'user' || !message.attachments?.length) {
+        return message;
+      }
+      const attachments = await Promise.all(
+        message.attachments.map((attachment) =>
+          materializeAttachment(
+            attachment,
+            provider?.kind === 'bailian-compatible' &&
+              attachment.kind === 'video' &&
+              !attachment.base64 &&
+              !attachment.uri.toLowerCase().startsWith('data:') &&
+              !/^https?:\/\//i.test(attachment.uri)
+              ? { maxSourceBytes: bailianMaxInlineVideoSourceBytes(attachment) }
+              : undefined
+          )
+        )
+      );
+      return { ...message, attachments };
+    })
+  );
 }
 
 function readAssistantText(payload: any): string {
@@ -330,11 +593,16 @@ function readDeltaText(value: unknown): string | undefined {
   return text || undefined;
 }
 
-function readStreamContentDelta(payload: any): string | undefined {
+function readStreamContentUpdate(payload: any): { text: string; snapshot: boolean } | undefined {
   const choice = payload?.choices?.[0];
   const delta = choice?.delta;
+  const deltaText = readDeltaText(delta?.content);
+  if (typeof deltaText === 'string') {
+    return { text: deltaText, snapshot: false };
+  }
 
-  return readDeltaText(delta?.content) ?? readDeltaText(choice?.message?.content);
+  const snapshotText = readDeltaText(choice?.message?.content);
+  return typeof snapshotText === 'string' ? { text: snapshotText, snapshot: true } : undefined;
 }
 
 function readStreamReasoningDelta(payload: any): string | undefined {
@@ -374,12 +642,12 @@ function applyStreamPayload(
   state.sawStreamPayload = true;
   state.lastPayload = payload;
 
-  const contentDelta = readStreamContentDelta(payload);
+  const contentUpdate = readStreamContentUpdate(payload);
   const reasoningDelta = readStreamReasoningDelta(payload);
   const usage = readTokenUsage(payload);
 
-  if (typeof contentDelta === 'string') {
-    state.content += contentDelta;
+  if (contentUpdate) {
+    state.content = contentUpdate.snapshot ? contentUpdate.text : state.content + contentUpdate.text;
   }
 
   if (typeof reasoningDelta === 'string') {
@@ -390,7 +658,11 @@ function applyStreamPayload(
     state.usage = usage;
   }
 
-  if (contentDelta || reasoningDelta || usage) {
+  if (state.content.length + state.reasoningContent.length > maxStreamOutputCharacters) {
+    throw new Error('模型输出过长，已停止接收以保护应用内存。');
+  }
+
+  if (contentUpdate?.text || reasoningDelta || usage) {
     onStreamUpdate?.({
       content: state.content,
       reasoningContent: state.reasoningContent || undefined,
@@ -428,7 +700,16 @@ function processSseBlock(
     return;
   }
 
-  const payload = JSON.parse(data);
+  if (new TextEncoder().encode(data).byteLength > maxStreamEventBytes) {
+    throw new Error('模型返回的单个流事件过大，已停止接收。');
+  }
+
+  let payload: any;
+  try {
+    payload = JSON.parse(data);
+  } catch (error) {
+    throw new Error(`无法解析模型流事件：${error instanceof Error ? error.message : String(error)}`);
+  }
   if (payload?.error) {
     const message =
       typeof payload.error?.message === 'string'
@@ -446,19 +727,17 @@ function finalizeStreamResult(
     usage?: ChatTokenUsage;
     lastPayload?: unknown;
     sawStreamPayload: boolean;
-  },
-  fullText: string
+  }
 ): ChatCompletionResult {
   if (!state.sawStreamPayload) {
-    const payload = JSON.parse(fullText);
-    return readFinalChatPayload(payload);
+    throw new Error('模型没有返回有效的流式事件。');
   }
 
   return {
     content: state.content || (state.reasoningContent ? '' : '模型返回了空内容。'),
     reasoningContent: state.reasoningContent || undefined,
     usage: state.usage,
-    raw: state.lastPayload ?? fullText,
+    raw: state.lastPayload,
   };
 }
 
@@ -466,6 +745,19 @@ async function readStreamingChatCompletion(
   response: Response,
   onStreamUpdate?: (update: ChatStreamUpdate) => void
 ): Promise<ChatCompletionResult> {
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+  if (contentType.includes('application/json')) {
+    const body = await readLimitedResponseText(response, maxJsonResponseBytes, '对话');
+    if (looksLikeHtmlResponse(body, contentType)) {
+      throw new Error('对话接口返回了 HTML 页面，请检查 Base URL。');
+    }
+    try {
+      return readFinalChatPayload(JSON.parse(body));
+    } catch (error) {
+      throw new Error(`对话接口返回的 JSON 无法解析：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   const state = {
     content: '',
     reasoningContent: '',
@@ -476,11 +768,13 @@ async function readStreamingChatCompletion(
   };
   const decoder = new TextDecoder();
   let buffer = '';
-  let fullText = '';
 
   const consumeText = (text: string) => {
-    fullText += text;
     buffer += text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+    if (new TextEncoder().encode(buffer).byteLength > maxStreamEventBytes) {
+      throw new Error('模型流缓冲区过大或事件分隔符无效，已停止接收。');
+    }
 
     let separatorIndex = buffer.indexOf('\n\n');
     while (separatorIndex >= 0) {
@@ -493,24 +787,33 @@ async function readStreamingChatCompletion(
 
   const reader = response.body?.getReader();
 
-  if (!reader) {
-    consumeText(await response.text());
-  } else {
-    while (!state.done) {
-      const { value, done } = await reader.read();
-      if (done) {
-        break;
+  try {
+    if (!reader) {
+      consumeText(await response.text());
+    } else {
+      while (!state.done) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        consumeText(decoder.decode(value, { stream: true }));
       }
-      consumeText(decoder.decode(value, { stream: true }));
+      if (state.done) {
+        await reader.cancel();
+      }
+      consumeText(decoder.decode());
     }
-    consumeText(decoder.decode());
-  }
 
-  if (buffer.trim()) {
-    processSseBlock(buffer, state, onStreamUpdate);
-  }
+    if (buffer.trim() && !state.done) {
+      processSseBlock(buffer, state, onStreamUpdate);
+    }
 
-  return finalizeStreamResult(state, fullText);
+    return finalizeStreamResult(state);
+  } finally {
+    reader?.releaseLock();
+    responseAbortCleanups.get(response)?.();
+    responseAbortCleanups.delete(response);
+  }
 }
 
 function optionalNumber(value: unknown): number | undefined {
@@ -543,21 +846,19 @@ function modelText(modelId: string): string {
 }
 
 function isOpenAiBaseUrl(provider: ProviderProfile): boolean {
-  return provider.baseUrl.toLowerCase().includes('api.openai.com');
+  try {
+    return parseProviderBaseUrl(provider.baseUrl).hostname.toLowerCase() === 'api.openai.com';
+  } catch {
+    return false;
+  }
 }
 
-function isQwenLikeModel(modelId: string): boolean {
-  const text = modelText(modelId);
-  return text.includes('qwen') || text.includes('qwq') || text.includes('qvq');
+export function isOfficialOpenAiProvider(provider: ProviderProfile): boolean {
+  return isOpenAiBaseUrl(provider);
 }
 
 function isDoubaoSeedModel(modelId: string): boolean {
   return modelText(modelId).includes('doubao-seed');
-}
-
-function isBailianReasoningEffortModel(modelId: string): boolean {
-  const text = modelText(modelId);
-  return text.includes('deepseek-v4') || text.includes('glm-5');
 }
 
 function supportsOpenAiNoneReasoning(modelId: string): boolean {
@@ -571,12 +872,19 @@ function supportsOpenAiNoneReasoning(modelId: string): boolean {
   return Number(match[1] ?? '0') >= 1;
 }
 
+function supportsOpenAiMaxReasoning(modelId: string): boolean {
+  const text = modelText(modelId).replace(/[:/_.\s]+/g, '-');
+  const match = text.match(/(?:^|-)gpt-?5(?:-(\d+))?(?:\b|-)/);
+
+  return Boolean(match && Number(match[1] ?? '0') >= 6);
+}
+
 function isDeepSeekV4Model(modelId: string): boolean {
   const text = modelText(modelId);
   return text.includes('deepseek-v4');
 }
 
-function qwenThinkingBudget(effort: ReasoningEffort): number | undefined {
+function bailianThinkingBudget(effort: ReasoningEffort): number | undefined {
   if (effort === 'low') {
     return 1024;
   }
@@ -596,13 +904,28 @@ function qwenThinkingBudget(effort: ReasoningEffort): number | undefined {
   return undefined;
 }
 
-function arkReasoningEffort(effort: ReasoningEffort): string | undefined {
-  if (effort === 'default') {
+function bailianReasoningEffort(
+  family: ReturnType<typeof getBailianThinkingProfile>['reasoningEffortFamily'],
+  effort: ReasoningEffort
+): string | undefined {
+  if (!family || effort === 'default' || effort === 'off') {
     return undefined;
   }
 
-  if (effort === 'max') {
-    return 'high';
+  if (family === 'deepseek-v4') {
+    return effort === 'max' ? 'max' : 'high';
+  }
+
+  if (family === 'glm-5.1-or-5' && effort === 'max') {
+    return 'xhigh';
+  }
+
+  return effort;
+}
+
+function arkReasoningEffort(effort: ReasoningEffort): string | undefined {
+  if (effort === 'default') {
+    return undefined;
   }
 
   return effort;
@@ -626,7 +949,7 @@ function openAiReasoningEffort(effort: ReasoningEffort, modelId: string): string
   }
 
   if (effort === 'max') {
-    return 'xhigh';
+    return supportsOpenAiMaxReasoning(modelId) ? 'max' : 'xhigh';
   }
 
   return effort;
@@ -660,15 +983,46 @@ function roundedParameter(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
-function applyModelParameterOptions(body: Record<string, unknown>, settings?: ModelParameterSettings) {
+function applyModelParameterOptions(
+  body: Record<string, unknown>,
+  settings: ModelParameterSettings | undefined,
+  provider: ProviderProfile,
+  model: ModelInfo,
+  effort: ReasoningEffort
+) {
   if (!settings?.enabled) {
     return;
   }
 
-  body.temperature = roundedParameter(boundedNumber(settings.temperature, 0, 2));
-  body.top_p = roundedParameter(boundedNumber(settings.topP, 0, 1));
-  body.presence_penalty = roundedParameter(boundedNumber(settings.presencePenalty, -2, 2));
-  body.frequency_penalty = roundedParameter(boundedNumber(settings.frequencyPenalty, -2, 2));
+  const reasoningModel = isReasoningModel(model);
+  if (reasoningModel && effort !== 'off' && effort !== 'none') {
+    return;
+  }
+
+  // Bailian documents half-open sampling bounds: temperature must be below 2
+  // and top_p must be greater than 0. Keep the shared UI range while ensuring
+  // its two inclusive endpoints never produce a provider-side 400 response.
+  const bailian = provider.kind === 'bailian-compatible';
+  const temperature = roundedParameter(
+    boundedNumber(settings.temperature, 0, bailian ? 1.99 : 2)
+  );
+  const topP = roundedParameter(
+    boundedNumber(settings.topP, bailian ? 0.01 : 0, 1)
+  );
+  if (temperature !== 1) {
+    body.temperature = temperature;
+  } else if (topP !== 1) {
+    body.top_p = topP;
+  }
+
+  // Official GPT reasoning models do not document penalty parameters even
+  // when effort=none, so keep those fields off the wire.
+  if (!reasoningModel || !isOpenAiBaseUrl(provider)) {
+    const presencePenalty = roundedParameter(boundedNumber(settings.presencePenalty, -2, 2));
+    const frequencyPenalty = roundedParameter(boundedNumber(settings.frequencyPenalty, -2, 2));
+    if (presencePenalty !== 0) body.presence_penalty = presencePenalty;
+    if (frequencyPenalty !== 0) body.frequency_penalty = frequencyPenalty;
+  }
 }
 
 function applyReasoningOptions(
@@ -681,7 +1035,7 @@ function applyReasoningOptions(
     return;
   }
 
-  if (provider.kind === 'volcengine-ark') {
+  if (isVolcengineArkProvider(provider)) {
     if (effort === 'off') {
       body.thinking = { type: 'disabled' };
       return;
@@ -696,23 +1050,30 @@ function applyReasoningOptions(
   }
 
   if (provider.kind === 'bailian-compatible') {
+    const profile = getBailianThinkingProfile(modelId);
+    if (profile.mode === 'none') {
+      return;
+    }
+
     if (effort === 'off') {
-      body.enable_thinking = false;
-      return;
-    }
-
-    body.enable_thinking = true;
-
-    if (isBailianReasoningEffortModel(modelId)) {
-      body.reasoning_effort = effort === 'max' ? 'max' : 'high';
-      return;
-    }
-
-    if (isQwenLikeModel(modelId)) {
-      const budget = qwenThinkingBudget(effort);
-      if (budget) {
-        body.thinking_budget = budget;
+      if (profile.mode === 'mixed') {
+        body.enable_thinking = false;
       }
+      return;
+    }
+
+    if (profile.mode === 'mixed') {
+      body.enable_thinking = true;
+    }
+
+    const nativeEffort = bailianReasoningEffort(profile.reasoningEffortFamily, effort);
+    if (nativeEffort) {
+      body.reasoning_effort = nativeEffort;
+    }
+
+    if (profile.supportsThinkingBudget) {
+      const budget = bailianThinkingBudget(effort);
+      if (budget) body.thinking_budget = budget;
     }
     return;
   }
@@ -754,18 +1115,63 @@ function applyReasoningOptions(
   }
 }
 
-export async function fetchOpenAiCompatibleModels(provider: ProviderProfile): Promise<ModelInfo[]> {
+export async function fetchOpenAiCompatibleModels(
+  provider: ProviderProfile,
+  signal?: AbortSignal
+): Promise<ModelInfo[]> {
   const baseUrl = assertBaseUrl(provider);
   const requestUrl = `${baseUrl}/models`;
   const response = await providerFetch(requestUrl, {
     method: 'GET',
     headers: authHeaders(provider),
-  });
+    signal,
+  }, discoveryRequestTimeoutMs);
 
-  const payload = await readJsonResponse<{ data?: RemoteModel[] }>(response, requestUrl, '模型列表获取');
+  let payload: { data?: RemoteModel[]; error?: unknown };
+  try {
+    payload = await readJsonResponse<{ data?: RemoteModel[]; error?: unknown }>(response, requestUrl, '模型列表获取');
+  } catch (error) {
+    if (
+      provider.kind !== 'bailian-compatible' ||
+      isAbortError(error) ||
+      (error instanceof Error && error.name === 'TimeoutError')
+    ) {
+      throw error;
+    }
+
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `百炼的 OpenAI 兼容 /models 接口当前不可用。请在百炼模型目录或控制台确认 Model ID 后，使用“手动添加模型”继续。详情：${detail}`
+    );
+  }
+
+  if ((payload as { error?: unknown }).error) {
+    const detail = compactResponseText(JSON.stringify((payload as { error: unknown }).error));
+    if (provider.kind === 'bailian-compatible') {
+      throw new Error(
+        `百炼的 OpenAI 兼容 /models 接口返回错误。请在百炼模型目录或控制台确认 Model ID 后，使用“手动添加模型”继续。详情：${detail}`
+      );
+    }
+    throw new Error(`模型列表接口返回错误：${detail}`);
+  }
+  if (provider.kind === 'bailian-compatible' && !Array.isArray(payload.data)) {
+    throw new Error(
+      '百炼的 OpenAI 兼容 /models 响应未包含模型列表。请在百炼模型目录或控制台确认 Model ID 后，使用“手动添加模型”继续。'
+    );
+  }
   const remoteModels = Array.isArray(payload.data) ? payload.data : [];
+  const seen = new Set<string>();
 
   return remoteModels
+    .slice(0, 5000)
+    .map((model) => ({ ...model, id: typeof model.id === 'string' ? model.id.trim() : model.id }))
+    .filter((model) => {
+      if (!model.id || seen.has(model.id)) {
+        return false;
+      }
+      seen.add(model.id);
+      return true;
+    })
     .map((model) => enrichDiscoveredModel(provider, model))
     .filter((model): model is ModelInfo => Boolean(model));
 }
@@ -773,6 +1179,10 @@ export async function fetchOpenAiCompatibleModels(provider: ProviderProfile): Pr
 function latestUserPrompt(messages: ChatMessage[]): string {
   const message = [...messages].reverse().find((item) => item.role === 'user' && item.content.trim());
   return message?.content.trim() ?? '';
+}
+
+function isDallEModel(modelId: string): boolean {
+  return /(?:^|[/_-])dall[·._-]?e[._-]?(?:2|3)(?:$|[/_.-])/i.test(modelId);
 }
 
 function generatedImageUrls(payload: any): string[] {
@@ -785,9 +1195,21 @@ function generatedImageUrls(payload: any): string[] {
     .filter((url: string | undefined): url is string => Boolean(url));
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(createAbortError());
+      return;
+    }
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(createAbortError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
 
@@ -802,19 +1224,40 @@ function videoTaskUrl(task: ArkVideoTaskResponse): string | undefined {
     nonEmptyText(task.data?.content?.url);
 }
 
-async function retrieveArkVideoTask(provider: ProviderProfile, taskId: string): Promise<ArkVideoTaskResponse> {
+function safeExternalMediaUrl(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'https:' || (url.protocol === 'http:' && isLoopbackHostname(url.hostname))) {
+      return url.toString();
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+async function retrieveArkVideoTask(
+  provider: ProviderProfile,
+  taskId: string,
+  signal?: AbortSignal
+): Promise<ArkVideoTaskResponse> {
   const baseUrl = assertBaseUrl(provider);
-  const response = await providerFetch(`${baseUrl}/contents/generations/tasks/${taskId}`, {
+  const response = await providerFetch(`${baseUrl}/contents/generations/tasks/${encodeURIComponent(taskId)}`, {
     method: 'GET',
     headers: authHeaders(provider),
+    signal,
   });
 
   if (!response.ok) {
-    const body = await response.text();
+    const body = await readLimitedResponseText(response, maxErrorResponseBytes, '视频生成任务查询');
     throw new Error(`视频生成任务查询失败：${response.status} ${body.slice(0, 240)}`);
   }
 
-  return (await response.json()) as ArkVideoTaskResponse;
+  const body = await readLimitedResponseText(response, maxJsonResponseBytes, '视频生成任务查询');
+  return JSON.parse(body) as ArkVideoTaskResponse;
 }
 
 function videoTaskAttachment(taskId: string, modelId: string, videoUrl: string): MediaAttachment {
@@ -826,34 +1269,62 @@ function videoTaskAttachment(taskId: string, modelId: string, videoUrl: string):
   };
 }
 
+async function persistGeneratedAttachmentSafely(
+  attachment: MediaAttachment
+): Promise<{ attachment: MediaAttachment; durable: boolean }> {
+  try {
+    const persisted = await persistAttachment(attachment, { downloadRemote: true });
+    return {
+      attachment: persisted,
+      durable: !/^https?:\/\//i.test(persisted.uri),
+    };
+  } catch {
+    // Keep the provider URL usable when CORS, connectivity, or storage quota
+    // prevents a durable copy; the caller must surface the expiry warning.
+    return { attachment, durable: false };
+  }
+}
+
 export async function queryGenerationTask(
   provider: ProviderProfile,
-  task: GenerationTaskInfo
+  task: GenerationTaskInfo,
+  signal?: AbortSignal
 ): Promise<ChatCompletionResult> {
   if (task.kind !== 'video') {
     throw new Error('当前只支持查询视频生成任务。');
   }
 
-  if (provider.kind !== 'volcengine-ark') {
+  if (!isVolcengineArkProvider(provider)) {
     throw new Error('当前只适配了火山 Ark 的视频生成任务查询。');
   }
 
-  const payload = await retrieveArkVideoTask(provider, task.taskId);
-  const status = videoTaskStatus(payload) ?? task.status ?? 'submitted';
-  const videoUrl = videoTaskUrl(payload);
+  const payload = await retrieveArkVideoTask(provider, task.taskId, signal);
+  const status = (videoTaskStatus(payload) ?? task.status ?? 'submitted').toLowerCase();
+  const videoUrl = safeExternalMediaUrl(videoTaskUrl(payload));
   const generationTask: GenerationTaskInfo = {
     ...task,
     status,
   };
 
+  if (status === 'expired') {
+    throw new Error(`视频生成任务已过期，请重新提交。任务 ID：${task.taskId}`);
+  }
+  if (status === 'cancelled' || status === 'canceled') {
+    throw new Error(`视频生成任务已取消。任务 ID：${task.taskId}`);
+  }
   if (status === 'failed') {
     throw new Error(`视频生成任务失败：${payload.error?.message ?? task.taskId}`);
   }
 
   if (videoUrl) {
+    const persistedVideo = await persistGeneratedAttachmentSafely(
+      videoTaskAttachment(task.taskId, task.modelId, videoUrl)
+    );
     return {
-      content: `视频生成完成。任务 ID：${task.taskId}`,
-      attachments: [videoTaskAttachment(task.taskId, task.modelId, videoUrl)],
+      content: persistedVideo.durable
+        ? `视频生成完成。任务 ID：${task.taskId}`
+        : `视频生成完成，但未能复制到本地；该下载链接可能在 24 小时后失效，请尽快导出。任务 ID：${task.taskId}`,
+      attachments: [persistedVideo.attachment],
       generationTask,
       raw: payload,
     };
@@ -869,7 +1340,8 @@ export async function queryGenerationTask(
 async function sendImageGenerationRequest(
   provider: ProviderProfile,
   modelId: string,
-  messages: ChatMessage[]
+  messages: ChatMessage[],
+  signal?: AbortSignal
 ): Promise<ChatCompletionResult> {
   const baseUrl = assertBaseUrl(provider);
   const prompt = latestUserPrompt(messages);
@@ -877,33 +1349,56 @@ async function sendImageGenerationRequest(
   if (!prompt) {
     throw new Error('请先输入图片生成提示词。');
   }
+  if (messages.some((message) => message.attachments?.length)) {
+    throw new Error('当前图片生成适配器只支持文本生图，尚未接入参考图编辑接口。');
+  }
+
+  const requestBody: Record<string, unknown> = {
+    model: modelId,
+    prompt,
+    size: '1024x1024',
+  };
+  if (isDallEModel(modelId)) {
+    // DALL-E download URLs expire quickly; base64 lets the native client move
+    // the image into durable app storage before saving the conversation.
+    requestBody.response_format = 'b64_json';
+  } else if (/gpt[._-]?image/i.test(modelId)) {
+    // GPT Image 系列固定返回 base64，不支持 response_format。
+    requestBody.output_format = 'png';
+  }
 
   const response = await providerFetch(`${baseUrl}/images/generations`, {
     method: 'POST',
     headers: authHeaders(provider),
-    body: JSON.stringify({
-      model: modelId,
-      prompt,
-      response_format: 'url',
-      size: '1024x1024',
-    }),
+    body: JSON.stringify(requestBody),
+    signal,
   });
 
   if (!response.ok) {
-    const body = await response.text();
+    const body = await readLimitedResponseText(response, maxErrorResponseBytes, '图片生成');
     throw new Error(`图片生成请求失败：${response.status} ${body.slice(0, 320)}`);
   }
 
-  const payload = await response.json();
-  const attachments: MediaAttachment[] = generatedImageUrls(payload).map((imageUrl, index) => ({
-    id: `generated-image-${Date.now()}-${index}`,
-    kind: 'image',
-    uri: imageUrl.startsWith('data:') ? imageUrl : imageUrl.startsWith('http') ? imageUrl : `data:image/png;base64,${imageUrl}`,
-    name: `${modelId}-${index + 1}.png`,
-  }));
+  const responseBody = await readLimitedResponseText(response, maxGeneratedImageResponseBytes, '图片生成');
+  const payload = JSON.parse(responseBody);
+  const persistedImages = await Promise.all(
+    generatedImageUrls(payload).map((imageUrl, index) => persistGeneratedAttachmentSafely({
+      id: `generated-image-${Date.now()}-${index}`,
+      kind: 'image',
+      uri: imageUrl.startsWith('data:') ? imageUrl : imageUrl.startsWith('http') ? imageUrl : `data:image/png;base64,${imageUrl}`,
+      name: `${modelId}-${index + 1}.png`,
+      mimeType: 'image/png',
+    }))
+  );
+  const attachments = persistedImages.map((item) => item.attachment);
+  const hasTemporaryImage = persistedImages.some((item) => !item.durable);
 
   return {
-    content: attachments.length ? '图片生成完成。' : '图片生成完成，但响应中没有可展示的图片 URL。',
+    content: attachments.length
+      ? hasTemporaryImage
+        ? '图片生成完成，但部分远程图片未能复制到本地，请尽快导出。'
+        : '图片生成完成。'
+      : '图片生成完成，但响应中没有可展示的图片 URL。',
     usage: readTokenUsage(payload),
     attachments,
     raw: payload,
@@ -913,7 +1408,8 @@ async function sendImageGenerationRequest(
 async function sendArkVideoGenerationRequest(
   provider: ProviderProfile,
   modelId: string,
-  messages: ChatMessage[]
+  messages: ChatMessage[],
+  signal?: AbortSignal
 ): Promise<ChatCompletionResult> {
   const baseUrl = assertBaseUrl(provider);
   const prompt = latestUserPrompt(messages);
@@ -921,6 +1417,14 @@ async function sendArkVideoGenerationRequest(
   if (!prompt) {
     throw new Error('请先输入视频生成提示词。');
   }
+
+  const requestMessages = await materializeMessagesForRequest(messages, provider);
+  const latestUserMessage = [...requestMessages].reverse().find((message) => message.role === 'user');
+  const referenceContent = (latestUserMessage?.attachments ?? []).map((attachment) => {
+    if (attachment.kind === 'image') return imageContent(attachment);
+    if (attachment.kind === 'video') return videoContent(attachment);
+    throw new Error(`视频生成暂不支持附件「${attachment.name}」的文件类型。`);
+  });
 
   const response = await providerFetch(`${baseUrl}/contents/generations/tasks`, {
     method: 'POST',
@@ -932,16 +1436,19 @@ async function sendArkVideoGenerationRequest(
           type: 'text',
           text: prompt,
         },
+        ...referenceContent,
       ],
     }),
+    signal,
   });
 
   if (!response.ok) {
-    const body = await response.text();
+    const body = await readLimitedResponseText(response, maxErrorResponseBytes, '视频生成任务提交');
     throw new Error(`视频生成任务提交失败：${response.status} ${body.slice(0, 320)}`);
   }
 
-  const payload = (await response.json()) as ArkVideoTaskResponse;
+  const responseBody = await readLimitedResponseText(response, maxJsonResponseBytes, '视频生成任务提交');
+  const payload = JSON.parse(responseBody) as ArkVideoTaskResponse;
   const taskId = payload.id;
 
   if (!taskId) {
@@ -961,30 +1468,47 @@ async function sendArkVideoGenerationRequest(
 
   let task = payload;
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    const status = videoTaskStatus(task);
-    if (status === 'succeeded' || status === 'failed' || status === 'cancelled') {
+    const status = videoTaskStatus(task)?.toLowerCase();
+    if (
+      status === 'succeeded' ||
+      status === 'failed' ||
+      status === 'cancelled' ||
+      status === 'canceled' ||
+      status === 'expired'
+    ) {
       break;
     }
 
-    await sleep(2500);
-    task = await retrieveArkVideoTask(provider, taskId);
+    await sleep(2500, signal);
+    task = await retrieveArkVideoTask(provider, taskId, signal);
   }
 
-  const status = videoTaskStatus(task) ?? 'submitted';
-  const videoUrl = videoTaskUrl(task);
+  const status = (videoTaskStatus(task) ?? 'submitted').toLowerCase();
+  const videoUrl = safeExternalMediaUrl(videoTaskUrl(task));
   const updatedTask: GenerationTaskInfo = {
     ...generationTask,
     status,
   };
 
+  if (status === 'expired') {
+    throw new Error(`视频生成任务已过期，请重新提交。任务 ID：${taskId}`);
+  }
+  if (status === 'cancelled' || status === 'canceled') {
+    throw new Error(`视频生成任务已取消。任务 ID：${taskId}`);
+  }
   if (status === 'failed') {
     throw new Error(`视频生成任务失败：${task.error?.message ?? taskId}`);
   }
 
   if (videoUrl) {
+    const persistedVideo = await persistGeneratedAttachmentSafely(
+      videoTaskAttachment(taskId, modelId, videoUrl)
+    );
     return {
-      content: `视频生成完成。任务 ID：${taskId}`,
-      attachments: [videoTaskAttachment(taskId, modelId, videoUrl)],
+      content: persistedVideo.durable
+        ? `视频生成完成。任务 ID：${taskId}`
+        : `视频生成完成，但未能复制到本地；该下载链接可能在 24 小时后失效，请尽快导出。任务 ID：${taskId}`,
+      attachments: [persistedVideo.attachment],
       generationTask: updatedTask,
       raw: task,
     };
@@ -997,8 +1521,11 @@ async function sendArkVideoGenerationRequest(
   };
 }
 
-function assertChatAttachmentsSupported(messages: ChatMessage[], model: ModelInfo): void {
-  const attachments = messages.flatMap((message) => message.attachments ?? []);
+export function assertChatAttachmentsSupported(
+  attachments: MediaAttachment[],
+  model: ModelInfo,
+  provider?: ProviderProfile
+): void {
   const hasImage = attachments.some((attachment) => attachment.kind === 'image');
   const hasVideo = attachments.some((attachment) => attachment.kind === 'video');
   const hasFile = attachments.some((attachment) => attachment.kind === 'file');
@@ -1011,12 +1538,18 @@ function assertChatAttachmentsSupported(messages: ChatMessage[], model: ModelInf
     if (!isVideoInputModel(model)) {
       throw new Error(`当前模型「${model.name ?? model.id}」未标记为支持视频输入，请切换视频模型。`);
     }
-
-    throw new Error('当前通用 OpenAI 兼容适配器尚未支持视频附件上传，需要 provider-specific 视频适配器。');
+    if (provider?.kind !== 'bailian-compatible') {
+      throw new Error('当前只在阿里百炼兼容模式中实现了 video_url 对话附件。');
+    }
   }
 
   if (hasFile) {
-    throw new Error('当前通用 OpenAI 兼容适配器尚未支持文件附件上传。');
+    if (!model.capabilities.includes('file-input')) {
+      throw new Error(`当前模型「${model.name ?? model.id}」未标记为支持文件输入。`);
+    }
+    if (!provider || !isOpenAiBaseUrl(provider)) {
+      throw new Error('文件附件只在 OpenAI 官方 API 中启用；兼容中转的文件协议需要单独适配。');
+    }
   }
 }
 
@@ -1028,6 +1561,7 @@ export async function sendOpenAiCompatibleChat({
   reasoningEffort,
   parameterSettings,
   onStreamUpdate,
+  signal,
 }: ChatCompletionArgs): Promise<ChatCompletionResult> {
   if (!modelId) {
     throw new Error('请先选择一个模型。');
@@ -1037,34 +1571,66 @@ export async function sendOpenAiCompatibleChat({
   const task = inferModelTask(requestModel);
 
   if (task === 'image-generation') {
-    return sendImageGenerationRequest(provider, modelId, messages);
+    return sendImageGenerationRequest(provider, modelId, messages, signal);
   }
 
   if (task === 'video-generation') {
-    if (provider.kind !== 'volcengine-ark') {
+    if (!isVolcengineArkProvider(provider)) {
       throw new Error('当前只适配了火山 Ark 的视频生成任务接口。');
     }
 
-    return sendArkVideoGenerationRequest(provider, modelId, messages);
+    return sendArkVideoGenerationRequest(provider, modelId, messages, signal);
   }
 
   if (task === 'embedding' || task === 'rerank') {
     throw new Error('当前模型不是对话模型，不能在聊天窗口中调用。请切换到文本/多模态对话模型。');
   }
 
-  assertChatAttachmentsSupported(messages, requestModel);
+  const chatAttachments = messages.flatMap((message) => message.attachments ?? []);
+  assertChatAttachmentsSupported(chatAttachments, requestModel, provider);
+
+  if (isOpenAiResponsesOnlyModel(provider, modelId)) {
+    const requestMessages = await materializeMessagesForRequest(messages, provider);
+    const request = buildOpenAiResponsesRequest({
+      provider,
+      modelId,
+      messages: requestMessages,
+      reasoningEffort: normalizeReasoningEffort(provider, requestModel, reasoningEffort),
+    });
+    const response = await providerFetch(
+      request.url,
+      {
+        method: 'POST',
+        headers: authHeaders(provider),
+        body: JSON.stringify(request.body),
+        signal,
+      },
+      openAiProRequestTimeoutMs
+    );
+    const responseBody = await readLimitedResponseText(
+      response,
+      response.ok ? openAiResponsesLimits.maxResponseJsonBytes : maxErrorResponseBytes,
+      'OpenAI Responses'
+    );
+    if (!response.ok) {
+      throw new Error(`OpenAI Responses 请求失败：${response.status} ${compactResponseText(responseBody)}`);
+    }
+    return parseOpenAiResponsesResponse(responseBody);
+  }
 
   const baseUrl = assertBaseUrl(provider);
+  const requestMessages = await materializeMessagesForRequest(messages, provider);
   const body: Record<string, unknown> = {
     model: modelId,
-    messages: messages.map(toOpenAiMessage),
+    messages: requestMessages.map((message) => toOpenAiMessage(message, provider)),
     stream: true,
     stream_options: {
       include_usage: true,
     },
   };
-  applyModelParameterOptions(body, parameterSettings);
-  applyReasoningOptions(body, provider, modelId, normalizeReasoningEffort(provider, requestModel, reasoningEffort));
+  const normalizedEffort = normalizeReasoningEffort(provider, requestModel, reasoningEffort);
+  applyModelParameterOptions(body, parameterSettings, provider, requestModel, normalizedEffort);
+  applyReasoningOptions(body, provider, modelId, normalizedEffort);
 
   const response = await providerFetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
@@ -1073,10 +1639,11 @@ export async function sendOpenAiCompatibleChat({
       Accept: 'text/event-stream, application/json',
     },
     body: JSON.stringify(body),
+    signal,
   });
 
   if (!response.ok) {
-    const body = await response.text();
+    const body = await readLimitedResponseText(response, maxErrorResponseBytes, '对话请求');
     if (response.status === 404 && body.includes('InvalidEndpointOrModel.NotFound')) {
       throw new Error(
         `对话请求失败：当前模型 ID「${modelId}」不存在或当前 API Key 无权调用。请在配置页点击“获取模型”，选择接口返回的可用模型；如果火山控制台显示的是专属 Endpoint ID，请手动添加那个 ID。`

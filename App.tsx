@@ -1,10 +1,15 @@
 import { StatusBar } from 'expo-status-bar';
 import { BlurView } from 'expo-blur';
+import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
+import * as Sharing from 'expo-sharing';
 import { createElement, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import {
   ActivityIndicator,
+  Alert,
+  AppState,
+  BackHandler,
   Image,
   KeyboardAvoidingView,
   Linking,
@@ -20,7 +25,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import type { PressableProps, StyleProp, ViewStyle } from 'react-native';
+import type { NativeScrollEvent, NativeSyntheticEvent, PressableProps, StyleProp, ViewStyle } from 'react-native';
 import Reanimated, {
   Easing as ReanimatedEasing,
   Extrapolation,
@@ -37,7 +42,7 @@ import Reanimated, {
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AnimatePresence, MotiView } from 'moti';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { Brain, Camera, Check, ChevronDown, Copy, Download, ExternalLink, Image as ImageIcon, Lightbulb, Menu, MessageSquare, MoreHorizontal, Paperclip, PenSquare, Pencil, Pin, Plus, RefreshCw, Search, Share2, Settings, SlidersHorizontal, Trash2, X } from 'lucide-react-native';
+import { Brain, Check, ChevronDown, Copy, Download, ExternalLink, FileText, Image as ImageIcon, Lightbulb, Menu, MessageSquare, MoreHorizontal, PenSquare, Pencil, Pin, Plus, RefreshCw, Search, Share2, Settings, SlidersHorizontal, Square, Trash2, Video, X } from 'lucide-react-native';
 import { Bailian, ChatGLM, Claude, DeepSeek, Doubao, Gemini, Kimi, Minimax, NewAPI, OpenAI, Qwen, Volcengine, Zhipu } from '@lobehub/icons-rn';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/arkModels';
@@ -45,6 +50,7 @@ import { appInfo } from './src/data/appInfo';
 import { createDefaultWorkspace, defaultParameterSettings } from './src/data/providerCatalog';
 import type {
   AppWorkspace,
+  Capability,
   ChatCompletionResult,
   ChatTokenUsage,
   ChatConversation,
@@ -58,17 +64,23 @@ import type {
   ReasoningEffort,
   ModelParameterSettings,
 } from './src/domain/types';
-import { pickFiles, pickImages, pickVideos } from './src/services/mediaPicker';
-import { queryGenerationTask, sendOpenAiCompatibleChat } from './src/services/openAiCompatible';
+import { pickFiles, pickImages, pickVideos, validateAttachments } from './src/services/mediaPicker';
+import { deletePersistedAttachments, discardUncommittedAttachments, resolveAttachmentDisplayUri } from './src/services/mediaStorage';
+import {
+  assertChatAttachmentsSupported,
+  isAbortError,
+  isOfficialOpenAiProvider,
+  queryGenerationTask,
+  sendOpenAiCompatibleChat,
+} from './src/services/openAiCompatible';
 import { refreshProviderModels } from './src/services/modelDiscovery';
+import { buildChatTranscript } from './src/services/conversationContext';
 import { createId } from './src/services/id';
-import { loadWorkspace, saveWorkspace } from './src/services/storage';
+import { consumeStorageRecoveryNotice, loadWorkspace, saveWorkspace } from './src/services/storage';
 import { checkForAppUpdate, type AppUpdateInfo } from './src/services/updateChecker';
 import {
   createModelInfoFromId,
   inferModelTask,
-  isVideoInputModel,
-  isVisionModel,
   modelMatchesCapabilityFilter,
   modelSearchText,
   type ModelCapabilityFilter,
@@ -77,8 +89,11 @@ import {
   getReasoningEffortOptions,
   normalizeReasoningEffort,
   reasoningEffortLabels,
-  type ReasoningEffortOption,
 } from './src/services/reasoningEfforts';
+import {
+  isWorkspaceReadOnly,
+  resolveMessageProvider,
+} from './src/services/workspaceRuntime';
 
 /**
  * Anthropic / Claude 风格视觉令牌。
@@ -171,6 +186,34 @@ type AnimatedPressableProps = PressableProps & {
   /** 按下瞬间的触觉反馈类型，默认 'light'；传 'none' 可关闭。 */
   haptic?: HapticStyle;
 };
+
+function confirmDestructiveAction(title: string, message: string): Promise<boolean> {
+  if (Platform.OS === 'web' && typeof globalThis.confirm === 'function') {
+    return Promise.resolve(globalThis.confirm(`${title}\n\n${message}`));
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    Alert.alert(
+      title,
+      message,
+      [
+        { text: '取消', style: 'cancel', onPress: () => finish(false) },
+        { text: '继续', style: 'destructive', onPress: () => finish(true) },
+      ],
+      { cancelable: true, onDismiss: () => finish(false) }
+    );
+  });
+}
+
+type AssistantRequestOutcome =
+  | { status: 'success' }
+  | { status: 'cancelled' }
+  | { status: 'error'; error: string };
 
 const AnimatedPressableView = Reanimated.createAnimatedComponent(Pressable);
 const webInteractiveStyle =
@@ -388,22 +431,6 @@ function ThinkingDots() {
   );
 }
 
-const capabilityLabel: Record<string, string> = {
-  text: '文本',
-  'image-input': '图片',
-  'video-input': '视频',
-  'file-input': '文件',
-  'tool-calling': '工具',
-  reasoning: '推理',
-  'web-search': '联网',
-  'image-generation': '生图',
-  'video-generation': '生视频',
-  embedding: '嵌入',
-  rerank: '重排',
-  streaming: '流式',
-  mcp: 'MCP',
-};
-
 const candidateModelFilters: Array<{ key: ModelCapabilityFilter; label: string }> = [
   { key: 'all', label: '全部' },
   { key: 'reasoning', label: '推理' },
@@ -465,6 +492,19 @@ const modelTaskLabel: Record<ModelTask, string> = {
   embedding: '嵌入',
   rerank: '重排',
 };
+const configurableModelCapabilities: Array<{ key: Capability; label: string }> = [
+  { key: 'image-input', label: '图片输入' },
+  { key: 'video-input', label: '视频输入' },
+  { key: 'reasoning', label: '深度思考' },
+  { key: 'tool-calling', label: '工具调用' },
+];
+const configurableModelTasks: ModelTask[] = [
+  'chat',
+  'image-generation',
+  'video-generation',
+  'embedding',
+  'rerank',
+];
 
 function parameterRuntimeSummary(settings: ModelParameterSettings): string {
   if (!settings.enabled) {
@@ -525,6 +565,10 @@ function isConversationMessage(message: ChatMessage): boolean {
 
 function hasConversationHistory(conversation: ChatConversation): boolean {
   return conversation.messages.some(isConversationMessage);
+}
+
+function messageAttachments(messages: ChatMessage[]): MediaAttachment[] {
+  return messages.flatMap((message) => message.attachments ?? []);
 }
 
 function conversationSearchText(conversation: ChatConversation): string {
@@ -660,6 +704,8 @@ function formatUpdateStatusTitle(updateInfo: AppUpdateInfo | null, updateNotice:
 export default function App() {
   const [workspace, setWorkspace] = useState<AppWorkspace>(() => createDefaultWorkspace());
   const [booting, setBooting] = useState(true);
+  const [persistenceReady, setPersistenceReady] = useState(false);
+  const [persistenceLoadError, setPersistenceLoadError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
@@ -681,6 +727,7 @@ export default function App() {
   const [conversationActionMenuTop, setConversationActionMenuTop] = useState(16);
   const [renamingConversationId, setRenamingConversationId] = useState<string | null>(null);
   const [deleteConfirmConversationId, setDeleteConfirmConversationId] = useState<string | null>(null);
+  const [deleteConfirmProviderId, setDeleteConfirmProviderId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [sidebarPanelHeight, setSidebarPanelHeight] = useState(0);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
@@ -692,18 +739,51 @@ export default function App() {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const workspaceRef = useRef(workspace);
+  const pendingAttachmentsRef = useRef(attachments);
+  const persistenceReadyRef = useRef(false);
+  const persistenceDirtyRef = useRef(false);
+  const suppressNextSaveRef = useRef(false);
+  const mountedRef = useRef(true);
+  const activeRequestRef = useRef<{ controller: AbortController; label: string } | null>(null);
+  const generationTaskControllersRef = useRef(new Map<string, AbortController>());
+  const chatScrollRef = useRef<ScrollView>(null);
+  const shouldAutoScrollRef = useRef(true);
 
   useEffect(() => {
-    // 卸载时清理提示定时器，避免在已卸载组件上 setState。
+    const taskControllers = generationTaskControllersRef.current;
+    // 卸载时清理定时器和网络请求，避免后台继续更新已卸载组件。
     return () => {
+      mountedRef.current = false;
       if (toastTimer.current) {
         clearTimeout(toastTimer.current);
       }
       if (copiedTimer.current) {
         clearTimeout(copiedTimer.current);
       }
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+      }
+      activeRequestRef.current?.controller.abort();
+      void deletePersistedAttachments(pendingAttachmentsRef.current);
+      for (const controller of taskControllers.values()) {
+        controller.abort();
+      }
+      taskControllers.clear();
+      if (persistenceReadyRef.current && persistenceDirtyRef.current) {
+        void saveWorkspace(workspaceRef.current);
+      }
     };
   }, []);
+
+  useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
+
+  useEffect(() => {
+    pendingAttachmentsRef.current = attachments;
+  }, [attachments]);
 
   /** 豆包风格轻提示：浮出一个圆角框，1.6s 后自动淡出。 */
   function showToast(message: string) {
@@ -717,17 +797,95 @@ export default function App() {
     }, 1600);
   }
 
+  function ensureWorkspaceWritable(): boolean {
+    if (persistenceReadyRef.current) {
+      return true;
+    }
+
+    setNotice('工作区加载失败，当前为只读模式，无法保存更改。');
+    return false;
+  }
+
+  function beginActiveRequest(label: string): AbortController | null {
+    if (activeRequestRef.current) {
+      setNotice(`${activeRequestRef.current.label}仍在进行中，请先停止或等待完成。`);
+      return null;
+    }
+
+    const controller = new AbortController();
+    activeRequestRef.current = { controller, label };
+    setBusy(true);
+    return controller;
+  }
+
+  function finishActiveRequest(controller: AbortController) {
+    if (activeRequestRef.current?.controller === controller) {
+      activeRequestRef.current = null;
+      if (mountedRef.current) {
+        setBusy(false);
+      }
+    }
+  }
+
+  function stopActiveRequest() {
+    const request = activeRequestRef.current;
+    if (!request || request.controller.signal.aborted) {
+      return;
+    }
+
+    request.controller.abort();
+    setNotice(`正在停止${request.label}…`);
+  }
+
+  async function flushWorkspace() {
+    if (!persistenceReadyRef.current || !persistenceDirtyRef.current) {
+      return;
+    }
+
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    persistenceDirtyRef.current = false;
+
+    try {
+      await saveWorkspace(workspaceRef.current);
+    } catch (error) {
+      persistenceDirtyRef.current = true;
+      if (mountedRef.current) {
+        setNotice(error instanceof Error ? error.message : '工作区保存失败。');
+      }
+    }
+  }
+
   useEffect(() => {
     let mounted = true;
 
     loadWorkspace()
       .then((snapshot) => {
-        if (snapshot && mounted) {
-          setWorkspace(snapshot);
+        if (mounted) {
+          if (snapshot) {
+            workspaceRef.current = snapshot;
+            suppressNextSaveRef.current = true;
+            setWorkspace(snapshot);
+          }
+          const recoveryMessage = consumeStorageRecoveryNotice();
+          if (recoveryMessage) {
+            setNotice(recoveryMessage);
+          }
+          setPersistenceLoadError(null);
+          persistenceReadyRef.current = true;
+          setPersistenceReady(true);
         }
       })
       .catch((error) => {
-        setNotice(error instanceof Error ? error.message : '工作区加载失败。');
+        if (mounted) {
+          const message = error instanceof Error ? error.message : '工作区加载失败。';
+          persistenceReadyRef.current = false;
+          setPersistenceReady(false);
+          setPersistenceLoadError(message);
+          setNotice('');
+        }
       })
       .finally(() => {
         if (mounted) {
@@ -741,14 +899,41 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (booting) {
+    if (booting || !persistenceReady) {
       return;
     }
 
-    saveWorkspace(workspace).catch((error) => {
-      setNotice(error instanceof Error ? error.message : '工作区保存失败。');
+    if (suppressNextSaveRef.current) {
+      suppressNextSaveRef.current = false;
+      return;
+    }
+
+    persistenceDirtyRef.current = true;
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+    }
+    saveTimer.current = setTimeout(() => {
+      saveTimer.current = null;
+      void flushWorkspace();
+    }, 450);
+
+    return () => {
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+    };
+  }, [booting, persistenceReady, workspace]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState !== 'active') {
+        void flushWorkspace();
+      }
     });
-  }, [booting, workspace]);
+
+    return () => subscription.remove();
+  }, []);
 
   useEffect(() => {
     if (!sidebarOpen) {
@@ -763,10 +948,66 @@ export default function App() {
     }
   }, [deleteConfirmConversationId, renamingConversationId]);
 
+  useEffect(() => {
+    if (Platform.OS !== 'android') {
+      return;
+    }
+
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (renamingConversationId) {
+        setRenamingConversationId(null);
+        setRenameDraft('');
+        return true;
+      }
+      if (deleteConfirmConversationId) {
+        setDeleteConfirmConversationId(null);
+        return true;
+      }
+      if (deleteConfirmProviderId) {
+        setDeleteConfirmProviderId(null);
+        return true;
+      }
+      if (modelPickerOpen) {
+        setModelPickerOpen(false);
+        return true;
+      }
+      if (sidebarOpen) {
+        setSidebarOpen(false);
+        return true;
+      }
+      if (settingsOpen) {
+        setSettingsOpen(false);
+        return true;
+      }
+      if (attachMenuOpen || reasoningMenuOpen || parameterMenuOpen || messageActionMenuId) {
+        setAttachMenuOpen(false);
+        setReasoningMenuOpen(false);
+        setParameterMenuOpen(false);
+        setMessageActionMenuId(null);
+        return true;
+      }
+      return false;
+    });
+
+    return () => subscription.remove();
+  }, [
+    attachMenuOpen,
+    deleteConfirmConversationId,
+    deleteConfirmProviderId,
+    messageActionMenuId,
+    modelPickerOpen,
+    parameterMenuOpen,
+    reasoningMenuOpen,
+    renamingConversationId,
+    settingsOpen,
+    sidebarOpen,
+  ]);
+
   const activeProvider = useMemo(
     () => workspace.providers.find((provider) => provider.id === workspace.activeProviderId) ?? workspace.providers[0],
     [workspace.activeProviderId, workspace.providers]
   );
+  const workspaceReadOnly = isWorkspaceReadOnly(booting, persistenceReady);
 
   const addedModels = useMemo(() => {
     if (!activeProvider) {
@@ -784,6 +1025,14 @@ export default function App() {
 
   const activeModel = addedModels.find((model) => model.id === activeModelId);
   const activeModelTask = activeModel ? inferModelTask(activeModel) : 'chat';
+  const activeModelSupportsComposer = ['chat', 'image-generation', 'video-generation'].includes(activeModelTask);
+  const canConfigureParameters = activeModelTask === 'chat';
+  const canAttachImage = Boolean(activeModel?.capabilities.includes('image-input'));
+  const canAttachVideo = Boolean(activeModel?.capabilities.includes('video-input'));
+  const canAttachFile = Boolean(
+    activeModel?.capabilities.includes('file-input') && activeProvider && isOfficialOpenAiProvider(activeProvider)
+  );
+  const canAttachAny = canAttachImage || canAttachVideo || canAttachFile;
   const activeModelKey = activeProvider && activeModelId ? `${activeProvider.id}:${activeModelId}` : '';
   const activeReasoningOptions = useMemo(
     () => getReasoningEffortOptions(activeProvider, activeModel),
@@ -799,13 +1048,30 @@ export default function App() {
     ...(workspace.parameterSettings ?? {}),
   };
   const parametersActive = parameterSettings.enabled;
-  const modelCandidates = activeProvider
-    ? (workspace.modelCandidatesByProvider[activeProvider.id] ?? []).filter(
-        (model) =>
-          model.source !== 'preset' &&
-          !(isVolcengineArkProvider(activeProvider) && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
-      )
-    : [];
+  useEffect(() => {
+    if (!canConfigureParameters) {
+      setParameterMenuOpen(false);
+    }
+    if (!activeModelSupportsComposer || !canAttachAny) {
+      setAttachMenuOpen(false);
+    }
+    if (!activeModelSupportsComposer) {
+      setReasoningMenuOpen(false);
+    }
+  }, [activeModelSupportsComposer, canAttachAny, canConfigureParameters]);
+  const modelCandidates = useMemo(
+    () =>
+      activeProvider
+        ? (workspace.modelCandidatesByProvider[activeProvider.id] ?? []).filter(
+            (model) =>
+              model.source !== 'preset' &&
+              !(isVolcengineArkProvider(activeProvider) &&
+                model.source !== 'remote' &&
+                isArkStaticDoubaoModelId(model.id))
+          )
+        : [],
+    [activeProvider, workspace.modelCandidatesByProvider]
+  );
   const addedModelIds = useMemo(
     () => new Set(addedModels.map((model) => model.id)),
     [addedModels]
@@ -841,6 +1107,9 @@ export default function App() {
   const deleteConfirmConversation = deleteConfirmConversationId
     ? workspace.conversations.find((conversation) => conversation.id === deleteConfirmConversationId) ?? null
     : null;
+  const deleteConfirmProvider = deleteConfirmProviderId
+    ? workspace.providers.find((provider) => provider.id === deleteConfirmProviderId) ?? null
+    : null;
   const conversationActionConversation = conversationActionId
     ? workspace.conversations.find((conversation) => conversation.id === conversationActionId) ?? null
     : null;
@@ -864,7 +1133,7 @@ export default function App() {
   }, [canConfigureReasoning, reasoningMenuOpen]);
 
   function updateActiveProvider(patch: Partial<ProviderProfile>) {
-    if (!activeProvider) {
+    if (!ensureWorkspaceWritable() || !activeProvider) {
       return;
     }
 
@@ -877,16 +1146,21 @@ export default function App() {
   }
 
   function selectProvider(providerId: string) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
     setWorkspace((current) => ({
       ...current,
       activeProviderId: providerId,
     }));
     setModelSearchQuery('');
     setModelCapabilityFilter('all');
+    clearPendingAttachments();
   }
 
   function selectModel(modelId: string) {
-    if (!activeProvider) {
+    if (!ensureWorkspaceWritable() || !activeProvider) {
       return;
     }
 
@@ -897,9 +1171,14 @@ export default function App() {
         [activeProvider.id]: modelId,
       },
     }));
+    clearPendingAttachments();
   }
 
   function selectProviderModel(providerId: string, modelId: string) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
     setWorkspace((current) => ({
       ...current,
       activeProviderId: providerId,
@@ -908,11 +1187,12 @@ export default function App() {
         [providerId]: modelId,
       },
     }));
+    clearPendingAttachments();
     setModelPickerOpen(false);
   }
 
   function setActiveReasoningEffort(effort: ReasoningEffort) {
-    if (!activeModelKey) {
+    if (!ensureWorkspaceWritable() || !activeModelKey) {
       return;
     }
 
@@ -934,6 +1214,10 @@ export default function App() {
   }
 
   function updateParameterSettings(patch: Partial<ModelParameterSettings>) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
     setWorkspace((current) => ({
       ...current,
       parameterSettings: {
@@ -950,15 +1234,27 @@ export default function App() {
       return;
     }
 
-    updateParameterSettings({
-      [key]: snapParameterValue(
-        clampParameterValue(value, control.min, control.max),
-        control.step
-      ),
-    } as Partial<ModelParameterSettings>);
+    const nextValue = snapParameterValue(
+      clampParameterValue(value, control.min, control.max),
+      control.step
+    );
+    const patch: Partial<ModelParameterSettings> = { [key]: nextValue };
+    // OpenAI recommends changing temperature or top_p, not both. Keeping the
+    // other sampler at its neutral value also avoids incompatible combinations
+    // on stricter compatible providers.
+    if (key === 'temperature') {
+      patch.topP = 1;
+    } else if (key === 'topP') {
+      patch.temperature = 1;
+    }
+    updateParameterSettings(patch);
   }
 
   function resetParameterSettings() {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
     setWorkspace((current) => ({
       ...current,
       parameterSettings: {
@@ -969,6 +1265,10 @@ export default function App() {
   }
 
   function addCustomProvider() {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
     const providerId = createId('provider');
     const provider: ProviderProfile = {
       id: providerId,
@@ -997,8 +1297,53 @@ export default function App() {
     setModelCapabilityFilter('all');
   }
 
+  function deleteProvider(providerId: string) {
+    if (!ensureWorkspaceWritable()) {
+      setDeleteConfirmProviderId(null);
+      return;
+    }
+
+    if (workspace.providers.length <= 1) {
+      setNotice('至少需要保留一个服务商。');
+      setDeleteConfirmProviderId(null);
+      return;
+    }
+
+    setWorkspace((current) => {
+      const providers = current.providers.filter((provider) => provider.id !== providerId);
+      if (!providers.length) {
+        return current;
+      }
+      const activeProviderId = current.activeProviderId === providerId
+        ? providers[0].id
+        : current.activeProviderId;
+      const activeModelIdByProvider = { ...current.activeModelIdByProvider };
+      const modelCandidatesByProvider = { ...current.modelCandidatesByProvider };
+      delete activeModelIdByProvider[providerId];
+      delete modelCandidatesByProvider[providerId];
+      const reasoningEffortByModel = Object.fromEntries(
+        Object.entries(current.reasoningEffortByModel).filter(([key]) => !key.startsWith(`${providerId}:`))
+      );
+
+      return {
+        ...current,
+        providers,
+        activeProviderId,
+        activeModelIdByProvider,
+        modelCandidatesByProvider,
+        reasoningEffortByModel,
+      };
+    });
+    setDeleteConfirmProviderId(null);
+    setManualModelId('');
+    setModelSearchQuery('');
+    setModelCapabilityFilter('all');
+    clearPendingAttachments();
+    setNotice('已删除服务商及其本地 API Key。');
+  }
+
   function addManualModel() {
-    if (!activeProvider) {
+    if (!ensureWorkspaceWritable() || !activeProvider) {
       return;
     }
 
@@ -1032,7 +1377,7 @@ export default function App() {
   }
 
   function addCandidateModel(model: ModelInfo) {
-    if (!activeProvider) {
+    if (!ensureWorkspaceWritable() || !activeProvider) {
       return;
     }
 
@@ -1062,7 +1407,7 @@ export default function App() {
   }
 
   function removeModel(modelId: string) {
-    if (!activeProvider) {
+    if (!ensureWorkspaceWritable() || !activeProvider) {
       return;
     }
 
@@ -1086,16 +1431,84 @@ export default function App() {
     setNotice('已移除模型。');
   }
 
+  function updateActiveModel(patch: Partial<ModelInfo>) {
+    if (!ensureWorkspaceWritable() || !activeProvider || !activeModel) {
+      return;
+    }
+    setWorkspace((current) => ({
+      ...current,
+      providers: current.providers.map((provider) =>
+        provider.id === activeProvider.id
+          ? {
+              ...provider,
+              models: provider.models.map((model) =>
+                model.id === activeModel.id ? { ...model, ...patch, source: 'manual' as const } : model
+              ),
+            }
+          : provider
+      ),
+    }));
+  }
+
+  function setActiveModelTask(task: ModelTask) {
+    if (!ensureWorkspaceWritable() || !activeModel) {
+      return;
+    }
+    const taskCapabilities: Partial<Record<ModelTask, Capability>> = {
+      'image-generation': 'image-generation',
+      'video-generation': 'video-generation',
+      embedding: 'embedding',
+      rerank: 'rerank',
+    };
+    const taskCapabilitySet = new Set(
+      Object.values(taskCapabilities).filter((value): value is Capability => Boolean(value))
+    );
+    const selectedCapability = taskCapabilities[task];
+    const capabilities = activeModel.capabilities.filter((capability) => !taskCapabilitySet.has(capability));
+    if (selectedCapability) {
+      capabilities.push(selectedCapability);
+    }
+    const capabilityOverrides = { ...activeModel.capabilityOverrides };
+    for (const capability of taskCapabilitySet) {
+      capabilityOverrides[capability] = capability === selectedCapability;
+    }
+    updateActiveModel({ task, capabilities, capabilityOverrides });
+    clearPendingAttachments();
+  }
+
+  function toggleActiveModelCapability(capability: Capability) {
+    if (!ensureWorkspaceWritable() || !activeModel) {
+      return;
+    }
+    const enabled = !activeModel.capabilities.includes(capability);
+    const capabilities = enabled
+      ? [...activeModel.capabilities, capability]
+      : activeModel.capabilities.filter((value) => value !== capability);
+    updateActiveModel({
+      capabilities,
+      capabilityOverrides: {
+        ...activeModel.capabilityOverrides,
+        [capability]: enabled,
+      },
+    });
+    if ((capability === 'image-input' || capability === 'video-input') && !enabled) {
+      clearPendingAttachments();
+    }
+  }
+
   async function refreshModels() {
-    if (!activeProvider) {
+    if (!ensureWorkspaceWritable() || !activeProvider) {
       return;
     }
 
-    setBusy(true);
+    const controller = beginActiveRequest('模型列表刷新');
+    if (!controller) {
+      return;
+    }
     setNotice('');
 
     try {
-      const result = await refreshProviderModels(activeProvider);
+      const result = await refreshProviderModels(activeProvider, controller.signal);
       setWorkspace((current) => ({
         ...current,
         modelCandidatesByProvider: {
@@ -1107,6 +1520,10 @@ export default function App() {
       setModelCapabilityFilter('all');
       setNotice(result.notice);
     } catch (error) {
+      if (isAbortError(error) || controller.signal.aborted) {
+        setNotice('已停止刷新模型列表。');
+        return;
+      }
       setWorkspace((current) => ({
         ...current,
         modelCandidatesByProvider: {
@@ -1116,20 +1533,48 @@ export default function App() {
       }));
       setNotice(error instanceof Error ? error.message : '模型列表获取失败。');
     } finally {
-      setBusy(false);
+      finishActiveRequest(controller);
     }
   }
 
+  function resetComposerForConversationChange() {
+    setInput('');
+    clearPendingAttachments();
+    setAttachMenuOpen(false);
+    setReasoningMenuOpen(false);
+    setParameterMenuOpen(false);
+    setEditingMessageId(null);
+    setEditingMessageDraft('');
+    setMessageActionMenuId(null);
+  }
+
+  function restoreConversationMessages(conversationId: string, messages: ChatMessage[]) {
+    setWorkspace((current) => {
+      const conversations = upsertConversation(
+        current.conversations,
+        conversationId,
+        messages,
+        Date.now()
+      );
+      return current.activeConversationId === conversationId
+        ? { ...current, messages, conversations }
+        : { ...current, conversations };
+    });
+  }
+
   function startNewConversation() {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
     const conversationId = createId('conversation');
-    const now = Date.now();
 
     setWorkspace((current) => ({
       ...current,
       activeConversationId: conversationId,
-      conversations: upsertConversation(current.conversations, conversationId, [], now),
       messages: [],
     }));
+    resetComposerForConversationChange();
     setExpandedReasoningByMessageId({});
     setQueryingTaskByMessageId({});
     setNotice('');
@@ -1148,6 +1593,7 @@ export default function App() {
         messages: conversation.messages,
       };
     });
+    resetComposerForConversationChange();
     setExpandedReasoningByMessageId({});
     setQueryingTaskByMessageId({});
     setSidebarOpen(false);
@@ -1169,6 +1615,10 @@ export default function App() {
   }
 
   function requestDeleteConversation(conversationId: string) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
     setConversationActionId(null);
     setRenamingConversationId(null);
     setRenameDraft('');
@@ -1177,6 +1627,16 @@ export default function App() {
   }
 
   function deleteConversation(conversationId: string) {
+    if (!ensureWorkspaceWritable()) {
+      setDeleteConfirmConversationId(null);
+      return;
+    }
+
+    const deletingActiveConversation = workspace.activeConversationId === conversationId;
+    const deletedConversation = workspace.conversations.find((conversation) => conversation.id === conversationId);
+    if (deletedConversation) {
+      void deletePersistedAttachments(messageAttachments(deletedConversation.messages));
+    }
     setWorkspace((current) => {
       const conversations = current.conversations.filter((conversation) => conversation.id !== conversationId);
       const deletedActive = current.activeConversationId === conversationId;
@@ -1189,6 +1649,9 @@ export default function App() {
         messages: deletedActive ? nextActive?.messages ?? [] : current.messages,
       };
     });
+    if (deletingActiveConversation) {
+      resetComposerForConversationChange();
+    }
     setExpandedReasoningByMessageId({});
     setQueryingTaskByMessageId({});
     setConversationActionId(null);
@@ -1197,6 +1660,11 @@ export default function App() {
   }
 
   function togglePinConversation(conversationId: string) {
+    if (!ensureWorkspaceWritable()) {
+      setConversationActionId(null);
+      return;
+    }
+
     setWorkspace((current) => ({
       ...current,
       conversations: sortConversations(
@@ -1221,6 +1689,11 @@ export default function App() {
   }
 
   function beginRenameConversation(conversation: ChatConversation) {
+    if (!ensureWorkspaceWritable()) {
+      setConversationActionId(null);
+      return;
+    }
+
     setDeleteConfirmConversationId(null);
     setRenamingConversationId(conversation.id);
     setRenameDraft(conversation.title);
@@ -1229,7 +1702,7 @@ export default function App() {
   }
 
   function saveConversationTitle() {
-    if (!renamingConversationId) {
+    if (!ensureWorkspaceWritable() || !renamingConversationId) {
       return;
     }
 
@@ -1290,6 +1763,10 @@ export default function App() {
   }
 
   async function addAttachments(kind: 'image' | 'video' | 'file') {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
     setNotice('');
 
     if (!activeModel) {
@@ -1297,27 +1774,47 @@ export default function App() {
       return;
     }
 
-    if (kind === 'image' && !isVisionModel(activeModel)) {
-      setNotice('当前模型未标记为支持图片输入，请先切换视觉模型。');
+    if (activeModelTask === 'image-generation') {
+      setNotice('当前图片生成适配器只支持文本生图，尚未接入参考图编辑。');
       return;
     }
 
-    if (kind === 'video' && !isVideoInputModel(activeModel)) {
-      setNotice('当前模型未标记为支持视频输入，请先切换视频模型。');
+    const capability = kind === 'image' ? 'image-input' : kind === 'video' ? 'video-input' : 'file-input';
+    if (!activeModel.capabilities.includes(capability)) {
+      setNotice(`当前模型未标记为支持${kind === 'image' ? '图片' : kind === 'video' ? '视频' : '文件'}输入。`);
       return;
     }
 
+    let picked: MediaAttachment[] = [];
     try {
-      const picked =
-        kind === 'image' ? await pickImages() : kind === 'video' ? await pickVideos() : await pickFiles();
-      setAttachments((current) => [...current, ...picked]);
+      picked = kind === 'image' ? await pickImages() : kind === 'video' ? await pickVideos() : await pickFiles();
+      const nextAttachments = [...attachments, ...picked];
+      validateAttachments(nextAttachments);
+      assertChatAttachmentsSupported(nextAttachments, activeModel, activeProvider);
+      setAttachments(nextAttachments);
     } catch (error) {
+      await discardUncommittedAttachments(picked);
       setNotice(error instanceof Error ? error.message : '附件选择失败。');
     }
   }
 
   function removeAttachment(attachmentId: string) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
+    const removed = attachments.find((attachment) => attachment.id === attachmentId);
+    if (removed) {
+      void discardUncommittedAttachments([removed]);
+    }
     setAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
+  }
+
+  function clearPendingAttachments() {
+    if (attachments.length) {
+      void discardUncommittedAttachments(attachments);
+    }
+    setAttachments([]);
   }
 
   function updateAssistantMessage(messageId: string, patch: Partial<ChatMessage>) {
@@ -1352,9 +1849,11 @@ export default function App() {
   }
 
   function resolveMessageRuntime(message?: ChatMessage | null) {
-    const provider =
-      workspace.providers.find((item) => item.id === message?.providerId) ??
-      activeProvider;
+    const provider = resolveMessageProvider(
+      message?.providerId,
+      workspace.providers,
+      activeProvider
+    );
     const modelId =
       message?.modelId ??
       (provider ? workspace.activeModelIdByProvider[provider.id] : '') ??
@@ -1382,6 +1881,17 @@ export default function App() {
     };
   }
 
+  function messageRuntimeUnavailableNotice(message?: ChatMessage | null): string {
+    if (
+      message?.providerId &&
+      !workspace.providers.some((provider) => provider.id === message.providerId)
+    ) {
+      return '这条消息对应的服务商已被删除，请恢复服务商配置后再试。';
+    }
+
+    return '找不到这条消息对应的模型配置。';
+  }
+
   function applyAssistantResult(messageId: string, result: ChatCompletionResult) {
     updateAssistantMessage(messageId, {
       content: result.content,
@@ -1398,11 +1908,30 @@ export default function App() {
     assistantMessage,
     transcript,
     runtime,
+    controller,
   }: {
     assistantMessage: ChatMessage;
     transcript: ChatMessage[];
     runtime: NonNullable<ReturnType<typeof resolveMessageRuntime>>;
-  }) {
+    controller: AbortController;
+  }): Promise<AssistantRequestOutcome> {
+    let latestUpdate:
+      | Pick<ChatCompletionResult, 'content' | 'reasoningContent' | 'usage'>
+      | undefined;
+    let streamTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const publishLatestUpdate = () => {
+      if (!latestUpdate) {
+        return;
+      }
+      updateAssistantMessage(assistantMessage.id, {
+        content: latestUpdate.content,
+        reasoningContent: latestUpdate.reasoningContent,
+        usage: latestUpdate.usage,
+        status: 'pending',
+      });
+    };
+
     try {
       const result = await sendOpenAiCompatibleChat({
         provider: runtime.provider,
@@ -1412,25 +1941,52 @@ export default function App() {
         reasoningEffort: runtime.reasoningEffort,
         parameterSettings,
         onStreamUpdate: (update) => {
-          updateAssistantMessage(assistantMessage.id, {
-            content: update.content,
-            reasoningContent: update.reasoningContent,
-            usage: update.usage,
-            status: 'pending',
-          });
+          latestUpdate = update;
+          if (!streamTimer) {
+            streamTimer = setTimeout(() => {
+              streamTimer = null;
+              publishLatestUpdate();
+            }, 60);
+          }
         },
+        signal: controller.signal,
       });
 
+      if (streamTimer) {
+        clearTimeout(streamTimer);
+        streamTimer = null;
+      }
       applyAssistantResult(assistantMessage.id, result);
+      return { status: 'success' };
     } catch (error) {
+      if (streamTimer) {
+        clearTimeout(streamTimer);
+        streamTimer = null;
+      }
+
+      if (isAbortError(error) || controller.signal.aborted) {
+        updateAssistantMessage(assistantMessage.id, {
+          content: latestUpdate?.content || '生成已停止。',
+          reasoningContent: latestUpdate?.reasoningContent,
+          usage: latestUpdate?.usage,
+          status: 'cancelled',
+          error: undefined,
+        });
+        setNotice('已停止生成，已保留收到的内容。');
+        return { status: 'cancelled' };
+      }
+
       const message = error instanceof Error ? error.message : '对话请求失败。';
       updateAssistantMessage(assistantMessage.id, {
-        content: message,
+        content: latestUpdate?.content || message,
+        reasoningContent: latestUpdate?.reasoningContent,
+        usage: latestUpdate?.usage,
         status: 'error',
         error: message,
       });
+      return { status: 'error', error: message };
     } finally {
-      setBusy(false);
+      finishActiveRequest(controller);
     }
   }
 
@@ -1456,7 +2012,9 @@ export default function App() {
         showToast('已复制');
         return;
       }
-      showToast('当前环境暂未接入剪贴板');
+      await Clipboard.setStringAsync(text);
+      markCopied(message.id);
+      showToast('已复制');
     } catch {
       showToast('复制失败，请稍后再试');
     }
@@ -1476,6 +2034,10 @@ export default function App() {
   }
 
   function beginEditUserMessage(message: ChatMessage) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
     if (message.role === 'system') {
       setNotice('系统消息暂不支持编辑。');
       return;
@@ -1552,14 +2114,18 @@ export default function App() {
       return;
     }
 
-    if (busy) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
+    if (activeRequestRef.current) {
       setNotice('当前仍有请求进行中，稍后再重新生成。');
       return;
     }
 
     const runtime = resolveMessageRuntime(message);
     if (!runtime) {
-      setNotice('找不到这条回答对应的模型配置。');
+      setNotice(messageRuntimeUnavailableNotice(message));
       return;
     }
 
@@ -1570,11 +2136,27 @@ export default function App() {
       return;
     }
 
-    const transcript = messages.slice(0, messageIndex).slice(-12);
-    setBusy(true);
-    setNotice('');
-    setMessageActionMenuId(null);
-    updateAssistantMessage(message.id, {
+    const baseMessages = messages.slice(0, messageIndex);
+    const transcript = buildChatTranscript(baseMessages, runtime.model.contextWindow);
+    if (!transcript.some((item) => item.role === 'user')) {
+      setNotice('找不到可用于重新生成的用户消息。');
+      return;
+    }
+    if (
+      messages.length - messageIndex > 1 &&
+      !(await confirmDestructiveAction(
+        '重新生成此分支？',
+        `这会在成功后替换当前回答及其后的 ${messages.length - messageIndex - 1} 条消息。请求失败时会自动恢复原分支。`
+      ))
+    ) {
+      return;
+    }
+    const controller = beginActiveRequest('回答生成');
+    if (!controller) {
+      return;
+    }
+    const pendingMessage: ChatMessage = {
+      ...message,
       content: '',
       reasoningContent: undefined,
       usage: undefined,
@@ -1585,18 +2167,37 @@ export default function App() {
       modelId: runtime.modelId,
       providerId: runtime.provider.id,
       providerName: runtime.provider.name,
+    };
+    const conversationId = workspace.activeConversationId || createId('conversation');
+    const removedAttachments = messageAttachments(messages.slice(messageIndex));
+    setNotice('');
+    setMessageActionMenuId(null);
+    setWorkspace((current) => {
+      const nextMessages = [...baseMessages, pendingMessage];
+      return {
+        ...current,
+        activeConversationId: conversationId,
+        messages: nextMessages,
+        conversations: upsertConversation(current.conversations, conversationId, nextMessages, Date.now()),
+      };
     });
 
-    await runAssistantRequest({
-      assistantMessage: {
-        ...message,
-        modelId: runtime.modelId,
-        providerId: runtime.provider.id,
-        providerName: runtime.provider.name,
-      },
+    const outcome = await runAssistantRequest({
+      assistantMessage: pendingMessage,
       transcript,
       runtime,
+      controller,
     });
+    if (outcome.status === 'success') {
+      void deletePersistedAttachments(removedAttachments);
+      return;
+    }
+    restoreConversationMessages(conversationId, messages);
+    setNotice(
+      outcome.status === 'error'
+        ? `重新生成失败，已恢复原分支：${outcome.error}`
+        : '已取消重新生成，并恢复原分支。'
+    );
   }
 
   async function rerunFromUserMessage(message: ChatMessage, nextContent?: string) {
@@ -1604,7 +2205,11 @@ export default function App() {
       return;
     }
 
-    if (busy) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
+    if (activeRequestRef.current) {
       setNotice('当前仍有请求进行中，稍后再重新生成。');
       return;
     }
@@ -1621,13 +2226,32 @@ export default function App() {
       .find((item) => item.role === 'assistant');
     const runtime = resolveMessageRuntime(followingAssistant ?? null);
     if (!runtime) {
-      setNotice('请先选择可用模型。');
+      setNotice(messageRuntimeUnavailableNotice(followingAssistant));
       return;
     }
 
     const content = typeof nextContent === 'string' ? nextContent.trim() : message.content.trim();
     if (!content && !message.attachments?.length) {
       setNotice('消息内容不能为空。');
+      return;
+    }
+
+    try {
+      validateAttachments(message.attachments ?? []);
+      assertChatAttachmentsSupported(message.attachments ?? [], runtime.model, runtime.provider);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '附件不受当前模型支持。');
+      return;
+    }
+
+    const laterMessageCount = messages.length - messageIndex - 1;
+    if (
+      laterMessageCount > 1 &&
+      !(await confirmDestructiveAction(
+        typeof nextContent === 'string' ? '编辑并重跑此分支？' : '从这里重跑分支？',
+        `这会在成功后替换后续 ${laterMessageCount} 条消息。请求失败时会自动恢复原分支。`
+      ))
+    ) {
       return;
     }
 
@@ -1643,9 +2267,13 @@ export default function App() {
       editedMessage,
     ];
     const nextMessages = [...baseMessages, assistantMessage];
-    const transcript = baseMessages.slice(-12);
+    const transcript = buildChatTranscript(baseMessages, runtime.model.contextWindow);
+    const controller = beginActiveRequest('回答生成');
+    if (!controller) {
+      return;
+    }
+    const removedAttachments = messageAttachments(messages.slice(messageIndex + 1));
 
-    setBusy(true);
     setNotice('');
     setMessageActionMenuId(null);
     cancelEditUserMessage();
@@ -1656,14 +2284,29 @@ export default function App() {
       conversations: upsertConversation(current.conversations, conversationId, nextMessages, Date.now()),
     }));
 
-    await runAssistantRequest({
+    const outcome = await runAssistantRequest({
       assistantMessage,
       transcript,
       runtime,
+      controller,
     });
+    if (outcome.status === 'success') {
+      void deletePersistedAttachments(removedAttachments);
+      return;
+    }
+    restoreConversationMessages(conversationId, messages);
+    setNotice(
+      outcome.status === 'error'
+        ? `重新运行失败，已恢复原分支：${outcome.error}`
+        : '已取消重新运行，并恢复原分支。'
+    );
   }
 
   async function saveEditedUserMessage() {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
     if (!editingMessage) {
       cancelEditUserMessage();
       return;
@@ -1680,40 +2323,39 @@ export default function App() {
       return;
     }
 
+    const editingIndex = workspace.messages.findIndex((message) => message.id === editingMessage.id);
+    const laterMessageCount = editingIndex >= 0 ? workspace.messages.length - editingIndex - 1 : 0;
+    if (
+      laterMessageCount > 0 &&
+      !(await confirmDestructiveAction(
+        '保存并截断分支？',
+        `编辑这条消息会删除其后的 ${laterMessageCount} 条消息。此操作无法自动撤销。`
+      ))
+    ) {
+      return;
+    }
+    const removedAttachments = editingIndex >= 0
+      ? messageAttachments(workspace.messages.slice(editingIndex + 1))
+      : [];
+
     setWorkspace((current) => {
-      const now = Date.now();
-      const updateMessages = (messages: ChatMessage[]) =>
-        messages.map((item) =>
-          item.id === editingMessage.id
-            ? {
-                ...item,
-                content,
-                status: 'ready' as const,
-                error: undefined,
-              }
-            : item,
-        );
-      const messages = updateMessages(current.messages);
-      const conversations = current.conversations.map((conversation) => {
-        if (!conversation.messages.some((item) => item.id === editingMessage.id)) {
-          return conversation;
-        }
-
-        const updatedMessages = updateMessages(conversation.messages);
-        return {
-          ...conversation,
-          title: conversation.customTitle ? conversation.title : conversationTitleFromMessages(updatedMessages),
-          updatedAt: now,
-          messages: updatedMessages,
-        };
-      });
-
+      const messageIndex = current.messages.findIndex((item) => item.id === editingMessage.id);
+      if (messageIndex < 0) {
+        return current;
+      }
+      const messages = current.messages.slice(0, messageIndex + 1).map((item) =>
+        item.id === editingMessage.id
+          ? { ...item, content, status: 'ready' as const, error: undefined }
+          : item
+      );
+      const conversationId = current.activeConversationId || 'conversation-default';
       return {
         ...current,
         messages,
-        conversations,
+        conversations: upsertConversation(current.conversations, conversationId, messages, Date.now()),
       };
     });
+    void deletePersistedAttachments(removedAttachments);
     cancelEditUserMessage();
     setMessageActionMenuId(null);
     setNotice('已更新消息。');
@@ -1728,10 +2370,35 @@ export default function App() {
     void rerunFromUserMessage(message);
   }
 
-  function removeMessage(message: ChatMessage) {
+  async function removeMessage(message: ChatMessage) {
+    if (!ensureWorkspaceWritable()) {
+      setMessageActionMenuId(null);
+      return;
+    }
+
     setMessageActionMenuId(null);
+    const messageIndex = workspace.messages.findIndex((item) => item.id === message.id);
+    if (messageIndex < 0) {
+      return;
+    }
+    const removedCount = workspace.messages.length - messageIndex;
+    if (
+      !(await confirmDestructiveAction(
+        '删除消息分支？',
+        `将删除这条消息及其后的 ${Math.max(0, removedCount - 1)} 条消息。此操作无法自动撤销。`
+      ))
+    ) {
+      return;
+    }
+    if (messageIndex >= 0) {
+      void deletePersistedAttachments(messageAttachments(workspace.messages.slice(messageIndex)));
+    }
     setWorkspace((current) => {
-      const messages = current.messages.filter((item) => item.id !== message.id);
+      const messageIndex = current.messages.findIndex((item) => item.id === message.id);
+      if (messageIndex < 0) {
+        return current;
+      }
+      const messages = current.messages.slice(0, messageIndex);
       const conversationId = current.activeConversationId || 'conversation-default';
 
       return {
@@ -1740,7 +2407,7 @@ export default function App() {
         conversations: upsertConversation(current.conversations, conversationId, messages, Date.now()),
       };
     });
-    setNotice('已删除该条消息。');
+    setNotice('已删除该条消息及其后的分支内容。');
   }
 
   async function checkUpdates() {
@@ -1759,13 +2426,8 @@ export default function App() {
     }
   }
 
-  function openUpdateTarget(kind: 'release' | 'install') {
-    const target =
-      kind === 'install'
-        ? updateInfo?.installAsset?.downloadUrl ?? updateInfo?.releaseUrl ?? appInfo.releasesUrl
-        : updateInfo?.releaseUrl ?? appInfo.releasesUrl;
-
-    void Linking.openURL(target);
+  function openUpdateTarget() {
+    void Linking.openURL(updateInfo?.releaseUrl ?? appInfo.releasesUrl);
   }
 
   function inferMessageGenerationTask(message: ChatMessage): GenerationTaskInfo | undefined {
@@ -1786,12 +2448,19 @@ export default function App() {
   }
 
   async function refreshGenerationTask(message: ChatMessage, task: GenerationTaskInfo) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
     const provider = workspace.providers.find((item) => item.id === task.providerId);
     if (!provider) {
       setNotice('找不到这个生成任务对应的服务商。');
       return;
     }
 
+    generationTaskControllersRef.current.get(message.id)?.abort();
+    const controller = new AbortController();
+    generationTaskControllersRef.current.set(message.id, controller);
     setQueryingTaskByMessageId((current) => ({
       ...current,
       [message.id]: true,
@@ -1799,7 +2468,7 @@ export default function App() {
     setNotice('');
 
     try {
-      const result = await queryGenerationTask(provider, task);
+      const result = await queryGenerationTask(provider, task, controller.signal);
       updateAssistantMessage(message.id, {
         content: result.content,
         attachments: result.attachments ?? message.attachments,
@@ -1809,21 +2478,31 @@ export default function App() {
         error: undefined,
       });
     } catch (error) {
+      if (isAbortError(error) || controller.signal.aborted) {
+        return;
+      }
       const content = error instanceof Error ? error.message : '生成任务查询失败。';
       updateAssistantMessage(message.id, {
-        content,
+        content: message.content,
         status: 'error',
         error: content,
       });
     } finally {
-      setQueryingTaskByMessageId((current) => ({
-        ...current,
-        [message.id]: false,
-      }));
+      if (generationTaskControllersRef.current.get(message.id) === controller) {
+        generationTaskControllersRef.current.delete(message.id);
+        setQueryingTaskByMessageId((current) => ({
+          ...current,
+          [message.id]: false,
+        }));
+      }
     }
   }
 
   async function sendMessage() {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
     const content = input.trim();
     if (!content && attachments.length === 0) {
       return;
@@ -1836,6 +2515,32 @@ export default function App() {
 
     if (!activeModel) {
       setNotice('请先添加并选择模型。');
+      return;
+    }
+
+    if (activeModelTask === 'embedding' || activeModelTask === 'rerank') {
+      setNotice('当前模型不是对话模型，请切换到聊天或生成模型。');
+      return;
+    }
+    if (activeModelTask === 'image-generation' && attachments.length) {
+      setNotice('当前图片生成适配器只支持文本生图，请先移除参考图。');
+      return;
+    }
+    if (activeModelTask === 'video-generation' && activeProvider.kind !== 'volcengine-ark') {
+      setNotice('当前只适配了火山方舟的视频生成任务接口。');
+      return;
+    }
+
+    try {
+      validateAttachments(attachments);
+      assertChatAttachmentsSupported(attachments, activeModel, activeProvider);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '附件不受当前模型支持。');
+      return;
+    }
+
+    const controller = beginActiveRequest('回答生成');
+    if (!controller) {
       return;
     }
 
@@ -1858,11 +2563,14 @@ export default function App() {
       providerId: activeProvider.id,
       providerName: activeProvider.name,
     };
-    const transcript = [...workspace.messages.filter((message) => message.id !== 'welcome'), userMessage].slice(-12);
+    const transcript = buildChatTranscript(
+      [...workspace.messages, userMessage],
+      activeModel.contextWindow
+    );
 
     setInput('');
     setAttachments([]);
-    setBusy(true);
+    shouldAutoScrollRef.current = true;
     setNotice('');
     setWorkspace((current) => {
       const messages = [
@@ -1879,41 +2587,28 @@ export default function App() {
       };
     });
 
-    try {
-      const result = await sendOpenAiCompatibleChat({
+    await runAssistantRequest({
+      assistantMessage,
+      transcript,
+      runtime: {
         provider: activeProvider,
-        modelId: activeModelId,
         model: activeModel,
-        messages: transcript,
+        modelId: activeModelId,
         reasoningEffort: activeReasoningEffort,
-        parameterSettings,
-        onStreamUpdate: (update) => {
-          updateAssistantMessage(assistantMessage.id, {
-            content: update.content,
-            reasoningContent: update.reasoningContent,
-            usage: update.usage,
-            status: 'pending',
-          });
-        },
-      });
+      },
+      controller,
+    });
+  }
 
-      updateAssistantMessage(assistantMessage.id, {
-        content: result.content,
-        reasoningContent: result.reasoningContent,
-        usage: result.usage,
-        attachments: result.attachments,
-        generationTask: result.generationTask,
-        status: 'ready',
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '对话请求失败。';
-      updateAssistantMessage(assistantMessage.id, {
-        content: message,
-        status: 'error',
-        error: message,
-      });
-    } finally {
-      setBusy(false);
+  function handleChatScroll(event: NativeSyntheticEvent<NativeScrollEvent>) {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
+    shouldAutoScrollRef.current = distanceFromBottom < 120;
+  }
+
+  function handleChatContentSizeChange() {
+    if (shouldAutoScrollRef.current) {
+      chatScrollRef.current?.scrollToEnd({ animated: true });
     }
   }
 
@@ -1942,11 +2637,12 @@ export default function App() {
           <View style={styles.topBar}>
             <View style={styles.topHeaderRow}>
               <View style={styles.topLeft}>
-                <AnimatedPressable accessibilityRole="button" onPress={() => setSidebarOpen(true)} style={styles.iconButton}>
+                <AnimatedPressable accessibilityRole="button" accessibilityLabel="打开聊天记录" onPress={() => setSidebarOpen(true)} style={styles.iconButton}>
                   <Menu size={20} color={palette.text} strokeWidth={2} />
                 </AnimatedPressable>
                 <AnimatedPressable
                   accessibilityRole="button"
+                  accessibilityLabel="选择模型"
                   testID="model-picker-trigger"
                   onPress={() => setModelPickerOpen(true)}
                   style={styles.modelPickerPill}
@@ -1968,6 +2664,7 @@ export default function App() {
               </View>
               <AnimatedPressable
                 accessibilityRole="button"
+                accessibilityLabel={settingsOpen ? '返回聊天' : '打开设置'}
                 onPress={() => setSettingsOpen((current) => !current)}
                 style={styles.iconButton}
               >
@@ -1977,6 +2674,24 @@ export default function App() {
               </AnimatedPressable>
             </View>
           </View>
+
+          {workspaceReadOnly ? (
+            <View
+              accessible
+              accessibilityLiveRegion="assertive"
+              accessibilityRole="alert"
+              testID="workspace-read-only-banner"
+              style={styles.persistenceErrorBanner}
+            >
+              <Text style={styles.persistenceErrorTitle}>工作区处于只读模式</Text>
+              <Text style={styles.persistenceErrorText}>
+                {persistenceLoadError ?? '工作区存储未能完成初始化。'}
+              </Text>
+              <Text style={styles.persistenceErrorHint}>
+                为避免覆盖原数据，发送、新建、删除、编辑、重试和设置修改均已停用。
+              </Text>
+            </View>
+          ) : null}
 
           <ModelPickerModal
             visible={modelPickerOpen}
@@ -2029,8 +2744,9 @@ export default function App() {
                 <Text style={styles.settingsCardTitle}>连接配置</Text>
                 <View style={styles.fieldGroup}>
                   <Text style={styles.fieldLabel}>名称</Text>
-                  <TextInput
+                   <TextInput
                     value={activeProvider.name}
+                    editable={!workspaceReadOnly}
                     onChangeText={(name) => updateActiveProvider({ name })}
                     style={styles.input}
                   />
@@ -2040,6 +2756,7 @@ export default function App() {
                   <TextInput
                     autoCapitalize="none"
                     value={activeProvider.baseUrl}
+                    editable={!workspaceReadOnly}
                     onChangeText={(baseUrl) => updateActiveProvider({ baseUrl })}
                     style={styles.input}
                   />
@@ -2050,19 +2767,37 @@ export default function App() {
                     autoCapitalize="none"
                     secureTextEntry
                     value={activeProvider.apiKey ?? ''}
-                    onChangeText={(apiKey) => updateActiveProvider({ apiKey })}
-                    style={styles.input}
-                  />
+                    editable={!workspaceReadOnly}
+                   onChangeText={(apiKey) => updateActiveProvider({ apiKey })}
+                   style={styles.input}
+                 />
+                  {Platform.OS === 'web' ? (
+                    <Text style={styles.modelOverrideHint}>
+                      Web 端仅在当前标签页会话中保存密钥，关闭标签页后会清除；Android 使用系统安全存储。
+                    </Text>
+                  ) : null}
                 </View>
 
                 <AnimatedPressable
                   accessibilityRole="button"
-                  disabled={busy}
+                  disabled={busy || workspaceReadOnly}
                   onPress={refreshModels}
-                  style={[styles.primaryButton, busy && styles.buttonDisabled]}
+                  style={[styles.primaryButton, (busy || workspaceReadOnly) && styles.buttonDisabled]}
                 >
                   <Text style={styles.primaryButtonText}>{busy ? '请求中...' : '获取模型'}</Text>
                 </AnimatedPressable>
+                {workspace.providers.length > 1 ? (
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`删除服务商 ${activeProvider.name}`}
+                    disabled={busy || workspaceReadOnly}
+                    onPress={() => setDeleteConfirmProviderId(activeProvider.id)}
+                    style={[styles.providerDeleteButton, (busy || workspaceReadOnly) && styles.buttonDisabled]}
+                  >
+                    <Trash2 size={15} color={palette.danger} strokeWidth={2.2} />
+                    <Text style={styles.providerDeleteButtonText}>删除此服务商</Text>
+                  </AnimatedPressable>
+                ) : null}
               </View>
 
               {notice ? <Text style={styles.settingsNotice}>{notice}</Text> : null}
@@ -2073,7 +2808,11 @@ export default function App() {
                   {modelCandidates.length ? (
                     <AnimatedPressable
                       accessibilityRole="button"
+                      accessibilityLabel="清空可添加模型列表"
                       onPress={() => {
+                        if (!ensureWorkspaceWritable()) {
+                          return;
+                        }
                         setWorkspace((current) => ({
                           ...current,
                           modelCandidatesByProvider: {
@@ -2180,6 +2919,7 @@ export default function App() {
                     placeholder="手动模型 ID"
                     placeholderTextColor={palette.placeholder}
                     value={manualModelId}
+                    editable={!workspaceReadOnly}
                     onChangeText={setManualModelId}
                     style={[styles.input, styles.inlineInput]}
                   />
@@ -2203,6 +2943,51 @@ export default function App() {
                     />
                   ))}
                 </View>
+                {activeModel ? (
+                  <View style={styles.modelOverridePanel}>
+                    <Text style={styles.fieldLabel}>当前模型用途</Text>
+                    <View style={styles.capabilityRow}>
+                      {configurableModelTasks.map((task) => {
+                        const selected = inferModelTask(activeModel) === task;
+                        return (
+                          <AnimatedPressable
+                            key={task}
+                            accessibilityRole="button"
+                            accessibilityState={{ selected }}
+                            onPress={() => setActiveModelTask(task)}
+                            style={[styles.capabilityChip, selected && styles.capabilityChipActive]}
+                          >
+                            <Text style={[styles.capabilityText, selected && styles.capabilityTextActive]}>
+                              {modelTaskLabel[task]}
+                            </Text>
+                          </AnimatedPressable>
+                        );
+                      })}
+                    </View>
+                    <Text style={styles.fieldLabel}>能力覆盖</Text>
+                    <View style={styles.capabilityRow}>
+                      {configurableModelCapabilities.map((capability) => {
+                        const selected = activeModel.capabilities.includes(capability.key);
+                        return (
+                          <AnimatedPressable
+                            key={capability.key}
+                            accessibilityRole="checkbox"
+                            accessibilityState={{ checked: selected }}
+                            onPress={() => toggleActiveModelCapability(capability.key)}
+                            style={[styles.capabilityChip, selected && styles.capabilityChipActive]}
+                          >
+                            <Text style={[styles.capabilityText, selected && styles.capabilityTextActive]}>
+                              {capability.label}
+                            </Text>
+                          </AnimatedPressable>
+                        );
+                      })}
+                    </View>
+                    <Text style={styles.modelOverrideHint}>
+                      自动识别不准确时可手动覆盖；设置会随模型保存。
+                    </Text>
+                  </View>
+                ) : null}
               </View>
 
               <View style={styles.settingsCard}>
@@ -2211,7 +2996,7 @@ export default function App() {
                     <Text style={styles.settingsCardTitle}>版本更新</Text>
                     <Text style={styles.updateVersionText}>当前 v{appInfo.version}</Text>
                   </View>
-                  <Text style={styles.updateSourceBadge}>GitHub Releases</Text>
+                  <Text style={styles.updateSourceBadge}>可信公开更新源</Text>
                 </View>
 
                 <View style={styles.updateStatusPanel}>
@@ -2224,9 +3009,14 @@ export default function App() {
                     </Text>
                   ) : null}
                   {updateInfo?.installAsset ? (
-                    <Text numberOfLines={1} style={styles.updateStatusMeta}>
-                      安装包 {updateInfo.installAsset.name}
-                    </Text>
+                    <>
+                      <Text numberOfLines={1} style={styles.updateStatusMeta}>
+                        安装包 {updateInfo.installAsset.name}
+                      </Text>
+                      <Text numberOfLines={1} style={styles.updateStatusMeta}>
+                        SHA-256 {updateInfo.installAsset.sha256}
+                      </Text>
+                    </>
                   ) : null}
                   {updateNotice ? <Text style={styles.updateNotice}>{updateNotice}</Text> : null}
                 </View>
@@ -2243,7 +3033,7 @@ export default function App() {
                   </AnimatedPressable>
                   <AnimatedPressable
                     accessibilityRole="button"
-                    onPress={() => openUpdateTarget(updateInfo?.updateAvailable ? 'install' : 'release')}
+                    onPress={openUpdateTarget}
                     style={[styles.primaryButton, styles.updateActionButton]}
                   >
                     {updateInfo?.updateAvailable ? (
@@ -2252,7 +3042,7 @@ export default function App() {
                       <ExternalLink size={16} color={palette.textOnAccent} strokeWidth={2} />
                     )}
                     <Text style={styles.primaryButtonText}>
-                      {updateInfo?.updateAvailable ? '打开更新' : 'Release'}
+                      前往发布页
                     </Text>
                   </AnimatedPressable>
                 </View>
@@ -2262,7 +3052,15 @@ export default function App() {
             </ScreenFade>
           ) : (
             <ScreenFade>
-              <ScrollView style={styles.content} contentContainerStyle={styles.chatContent}>
+              <ScrollView
+                ref={chatScrollRef}
+                style={styles.content}
+                contentContainerStyle={styles.chatContent}
+                keyboardShouldPersistTaps="handled"
+                onScroll={handleChatScroll}
+                onContentSizeChange={handleChatContentSizeChange}
+                scrollEventThrottle={32}
+              >
                 {workspace.messages.map((message) => {
                   const generationTask =
                     message.role === 'assistant'
@@ -2365,8 +3163,15 @@ export default function App() {
                             onSave={() => { void saveEditedUserMessage(); }}
                           />
                         ) : (
-                          <Text style={styles.messageText}>{message.content}</Text>
+                          <Text accessibilityLiveRegion="polite" style={styles.messageText}>{message.content}</Text>
                         )}
+                        {message.status === 'cancelled' ? (
+                          <Text style={styles.messageStatusText}>已停止生成</Text>
+                        ) : message.error && message.content !== message.error ? (
+                          <Text accessibilityLiveRegion="polite" style={[styles.messageStatusText, styles.messageErrorText]}>
+                            {message.error}
+                          </Text>
+                        ) : null}
                         {generationTask ? (
                           <GenerationTaskPanel
                             task={generationTask}
@@ -2407,7 +3212,7 @@ export default function App() {
                 })}
               </ScrollView>
 
-              {notice ? <Text style={styles.notice}>{notice}</Text> : null}
+              {notice ? <Text accessibilityLiveRegion="polite" style={styles.notice}>{notice}</Text> : null}
 
               {attachments.length ? (
                 <ScrollView
@@ -2419,6 +3224,7 @@ export default function App() {
                     <AnimatedPressable
                       key={attachment.id}
                       accessibilityRole="button"
+                      accessibilityLabel={`移除附件 ${attachment.name}`}
                       onPress={() => removeAttachment(attachment.id)}
                       style={styles.pendingAttachment}
                     >
@@ -2488,23 +3294,44 @@ export default function App() {
                       transition={{ type: 'timing', duration: 160 }}
                       style={styles.attachMenu}
                     >
-                      <AnimatedPressable accessibilityRole="button" onPress={() => { addAttachments('image'); setAttachMenuOpen(false); }} style={styles.attachMenuItem}>
+                      {canAttachImage ? (
+                        <AnimatedPressable
+                        accessibilityRole="button"
+                        accessibilityLabel="添加图片"
+                        onPress={() => { void addAttachments('image'); setAttachMenuOpen(false); }}
+                        style={styles.attachMenuItem}
+                      >
                         <View style={styles.attachMenuIcon}><ImageIcon size={18} color={palette.text} strokeWidth={2} /></View>
                         <Text style={styles.attachMenuText}>照片</Text>
-                      </AnimatedPressable>
-                      <AnimatedPressable accessibilityRole="button" onPress={() => { addAttachments('video'); setAttachMenuOpen(false); }} style={styles.attachMenuItem}>
-                        <View style={styles.attachMenuIcon}><Camera size={18} color={palette.text} strokeWidth={2} /></View>
+                        </AnimatedPressable>
+                      ) : null}
+                      {canAttachVideo ? (
+                        <AnimatedPressable
+                        accessibilityRole="button"
+                        accessibilityLabel="添加视频"
+                        onPress={() => { void addAttachments('video'); setAttachMenuOpen(false); }}
+                        style={styles.attachMenuItem}
+                      >
+                        <View style={styles.attachMenuIcon}><Video size={18} color={palette.text} strokeWidth={2} /></View>
                         <Text style={styles.attachMenuText}>视频</Text>
-                      </AnimatedPressable>
-                      <AnimatedPressable accessibilityRole="button" onPress={() => { addAttachments('file'); setAttachMenuOpen(false); }} style={styles.attachMenuItem}>
-                        <View style={styles.attachMenuIcon}><Paperclip size={18} color={palette.text} strokeWidth={2} /></View>
+                        </AnimatedPressable>
+                      ) : null}
+                      {canAttachFile ? (
+                        <AnimatedPressable
+                        accessibilityRole="button"
+                        accessibilityLabel="添加文件"
+                        onPress={() => { void addAttachments('file'); setAttachMenuOpen(false); }}
+                        style={styles.attachMenuItem}
+                      >
+                        <View style={styles.attachMenuIcon}><FileText size={18} color={palette.text} strokeWidth={2} /></View>
                         <Text style={styles.attachMenuText}>文件</Text>
-                      </AnimatedPressable>
+                        </AnimatedPressable>
+                      ) : null}
                     </MotiView>
                   ) : null}
                 </AnimatePresence>
                 <AnimatePresence>
-                  {parameterMenuOpen ? (
+                  {parameterMenuOpen && canConfigureParameters ? (
                     <MotiView
                       key="parameter-menu"
                       from={{ opacity: 0, translateY: 8, scale: 0.96 }}
@@ -2548,6 +3375,11 @@ export default function App() {
                         <Text style={styles.toolMenuHint}>
                           关闭时不发送采样参数，交给服务商默认值处理。
                         </Text>
+                        {!['default', 'off', 'none'].includes(activeReasoningEffort) ? (
+                          <Text style={styles.toolMenuHint}>
+                            当前已启用思考模式；为遵循模型协议，本次请求会忽略采样与惩罚参数。
+                          </Text>
+                        ) : null}
                       </View>
 
                       {parametersActive ? (
@@ -2574,9 +3406,22 @@ export default function App() {
                   ) : null}
                 </AnimatePresence>
                 <View style={styles.composer}>
+                  {!activeModelSupportsComposer ? (
+                    <Text accessibilityLiveRegion="polite" style={styles.messageStatusText}>
+                      当前是 {activeModelTask === 'embedding' ? 'Embedding' : 'Rerank'} 模型；聊天输入已停用，专用工作流尚未开放。
+                    </Text>
+                  ) : null}
                   <TextInput
+                    accessibilityLabel="消息输入框"
+                    editable={!workspaceReadOnly && activeModelSupportsComposer}
                     multiline
-                    placeholder="今天如何？"
+                    placeholder={
+                      workspaceReadOnly
+                        ? '只读模式下无法发送消息'
+                        : activeModelSupportsComposer
+                          ? '今天如何？'
+                          : '当前模型需要专用任务界面'
+                    }
                     placeholderTextColor={palette.placeholder}
                     value={input}
                     onChangeText={setInput}
@@ -2587,6 +3432,8 @@ export default function App() {
                       {canConfigureReasoning ? (
                         <AnimatedPressable
                           accessibilityRole="button"
+                          accessibilityLabel="设置思考强度"
+                          accessibilityState={{ expanded: reasoningMenuOpen }}
                           onPress={() => {
                             setAttachMenuOpen(false);
                             setParameterMenuOpen(false);
@@ -2604,46 +3451,67 @@ export default function App() {
                           />
                         </AnimatedPressable>
                       ) : null}
-                      <AnimatedPressable
-                        accessibilityRole="button"
-                        onPress={() => {
-                          setReasoningMenuOpen(false);
-                          setParameterMenuOpen(false);
-                          setAttachMenuOpen((v) => !v);
-                        }}
-                        style={styles.composerToolButton}
-                      >
-                        <Plus size={15} color={palette.textSecondary} strokeWidth={2.4} />
-                      </AnimatedPressable>
-                      <AnimatedPressable
-                        accessibilityRole="button"
-                        onPress={() => {
-                          setReasoningMenuOpen(false);
-                          setAttachMenuOpen(false);
-                          setParameterMenuOpen((current) => !current);
-                        }}
-                        style={[
-                          styles.composerToolButton,
-                          parametersActive && styles.composerToolButtonActive,
-                        ]}
-                      >
-                        <SlidersHorizontal
-                          size={15}
-                          color={parametersActive ? palette.accentText : palette.textSecondary}
-                          strokeWidth={2.3}
-                        />
-                      </AnimatedPressable>
+                      {activeModelSupportsComposer && canAttachAny ? (
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          accessibilityLabel="添加附件"
+                          accessibilityState={{ expanded: attachMenuOpen }}
+                          onPress={() => {
+                            setReasoningMenuOpen(false);
+                            setParameterMenuOpen(false);
+                            setAttachMenuOpen((v) => !v);
+                          }}
+                          style={styles.composerToolButton}
+                        >
+                          <Plus size={15} color={palette.textSecondary} strokeWidth={2.4} />
+                        </AnimatedPressable>
+                      ) : null}
+                      {canConfigureParameters ? (
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          accessibilityLabel="调整生成参数"
+                          accessibilityState={{ expanded: parameterMenuOpen }}
+                          onPress={() => {
+                            setReasoningMenuOpen(false);
+                            setAttachMenuOpen(false);
+                            setParameterMenuOpen((current) => !current);
+                          }}
+                          style={[
+                            styles.composerToolButton,
+                            parametersActive && styles.composerToolButtonActive,
+                          ]}
+                        >
+                          <SlidersHorizontal
+                            size={15}
+                            color={parametersActive ? palette.accentText : palette.textSecondary}
+                            strokeWidth={2.3}
+                          />
+                        </AnimatedPressable>
+                      ) : null}
                     </View>
                     <AnimatedPressable
                       accessibilityRole="button"
-                      disabled={busy}
-                      onPress={sendMessage}
+                      accessibilityLabel={busy ? '停止当前请求' : '发送消息'}
+                      accessibilityState={{
+                        disabled:
+                          !busy &&
+                          (workspaceReadOnly || !activeModelSupportsComposer || (!input.trim() && attachments.length === 0)),
+                      }}
+                      disabled={
+                        !busy &&
+                        (workspaceReadOnly || !activeModelSupportsComposer || (!input.trim() && attachments.length === 0))
+                      }
+                      onPress={busy ? stopActiveRequest : sendMessage}
                       haptic="medium"
                       pressScale={0.9}
-                      style={[styles.sendButton, busy && styles.buttonDisabled]}
+                      style={styles.sendButton}
                     >
                       <IconCrossfade swapKey={busy ? 'busy' : 'idle'}>
-                        <Text style={styles.sendButtonText}>{busy ? '···' : '↑'}</Text>
+                        {busy ? (
+                          <Square size={13} color={palette.textOnAccent} fill={palette.textOnAccent} strokeWidth={2} />
+                        ) : (
+                          <Text style={styles.sendButtonText}>↑</Text>
+                        )}
                       </IconCrossfade>
                     </AnimatedPressable>
                   </View>
@@ -2661,16 +3529,18 @@ export default function App() {
         >
           <View style={styles.sidebarHeader}>
             <Text style={styles.sidebarBrand}>Embezzle Studio</Text>
-            <AnimatedPressable accessibilityRole="button" onPress={() => setSidebarOpen(false)} style={styles.sidebarClose}>
+            <AnimatedPressable accessibilityRole="button" accessibilityLabel="关闭聊天记录" onPress={() => setSidebarOpen(false)} style={styles.sidebarClose}>
               <X size={20} color={palette.text} strokeWidth={2} />
             </AnimatedPressable>
           </View>
 
           <AnimatedPressable
             accessibilityRole="button"
+            accessibilityState={{ disabled: workspaceReadOnly }}
+            disabled={workspaceReadOnly}
             onPress={() => { startNewConversation(); setSidebarOpen(false); }}
             haptic="medium"
-            style={styles.sidebarNewChat}
+            style={[styles.sidebarNewChat, workspaceReadOnly && styles.buttonDisabled]}
           >
             <PenSquare size={18} color={palette.textOnAccent} strokeWidth={2} />
             <Text style={styles.sidebarNewChatText}>新对话</Text>
@@ -2688,6 +3558,7 @@ export default function App() {
             {historySearchQuery ? (
               <AnimatedPressable
                 accessibilityRole="button"
+                accessibilityLabel="清除聊天记录搜索"
                 onPress={() => setHistorySearchQuery('')}
                 style={styles.sidebarSearchClear}
               >
@@ -2716,6 +3587,7 @@ export default function App() {
                       <View style={styles.sidebarConversationRow}>
                         <AnimatedPressable
                           accessibilityRole="button"
+                          accessibilityLabel={`打开对话：${conversation.title}`}
                           onPress={() => selectConversation(conversation.id)}
                           haptic="selection"
                           style={styles.sidebarConversationContent}
@@ -2747,6 +3619,7 @@ export default function App() {
                         </AnimatedPressable>
                         <AnimatedPressable
                           accessibilityRole="button"
+                          accessibilityLabel={`更多对话操作：${conversation.title}`}
                           onPress={(event) => {
                             event.stopPropagation?.();
                             openConversationActionMenu(conversation.id, event.nativeEvent.pageY);
@@ -2910,6 +3783,49 @@ export default function App() {
                   onPress={() => {
                     if (deleteConfirmConversation) {
                       deleteConversation(deleteConfirmConversation.id);
+                    }
+                  }}
+                  haptic="warning"
+                  style={styles.deleteConfirmButton}
+                >
+                  <Text style={styles.deleteConfirmButtonText}>删除</Text>
+                </AnimatedPressable>
+              </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
+
+        <Modal
+          visible={Boolean(deleteConfirmProvider)}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setDeleteConfirmProviderId(null)}
+        >
+          <Pressable
+            style={styles.deleteConfirmScrim}
+            onPress={() => setDeleteConfirmProviderId(null)}
+          >
+            <Pressable style={styles.deleteConfirmDialog} onPress={(event) => event.stopPropagation()}>
+              <View style={styles.deleteConfirmIconWrap}>
+                <Trash2 size={22} color={palette.danger} strokeWidth={2.4} />
+              </View>
+              <Text style={styles.deleteConfirmTitle}>删除服务商</Text>
+              <Text style={styles.deleteConfirmText}>
+                这会删除「{deleteConfirmProvider?.name ?? '该服务商'}」的配置、模型列表和本地 API Key；历史消息仍会保留。
+              </Text>
+              <View style={styles.renameDialogActions}>
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  onPress={() => setDeleteConfirmProviderId(null)}
+                  style={styles.renameDialogSecondaryButton}
+                >
+                  <Text style={styles.renameDialogSecondaryText}>取消</Text>
+                </AnimatedPressable>
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  onPress={() => {
+                    if (deleteConfirmProvider) {
+                      deleteProvider(deleteConfirmProvider.id);
                     }
                   }}
                   haptic="warning"
@@ -3145,19 +4061,19 @@ function MessageActions({
           )}
         </IconCrossfade>
       </AnimatedPressable>
-      <AnimatedPressable accessibilityRole="button" onPress={onRetry} style={styles.messageActionButton}>
+      <AnimatedPressable accessibilityRole="button" accessibilityLabel="重新生成" onPress={onRetry} style={styles.messageActionButton}>
         <RefreshCw size={16} color={palette.textSecondary} strokeWidth={2} />
       </AnimatedPressable>
       {role === 'assistant' ? (
-        <AnimatedPressable accessibilityRole="button" onPress={onShare} style={styles.messageActionButton}>
+        <AnimatedPressable accessibilityRole="button" accessibilityLabel="分享消息" onPress={onShare} style={styles.messageActionButton}>
           <Share2 size={16} color={palette.textSecondary} strokeWidth={2} />
         </AnimatedPressable>
       ) : (
-        <AnimatedPressable accessibilityRole="button" onPress={onEdit} style={styles.messageActionButton}>
+        <AnimatedPressable accessibilityRole="button" accessibilityLabel="编辑消息" onPress={onEdit} style={styles.messageActionButton}>
           <Pencil size={16} color={palette.textSecondary} strokeWidth={2} />
         </AnimatedPressable>
       )}
-      <AnimatedPressable accessibilityRole="button" onPress={onMore} style={styles.messageActionButton}>
+      <AnimatedPressable accessibilityRole="button" accessibilityLabel="更多消息操作" onPress={onMore} style={styles.messageActionButton}>
         <MoreHorizontal size={16} color={palette.textSecondary} strokeWidth={2} />
       </AnimatedPressable>
     </View>
@@ -3298,93 +4214,15 @@ function GenerationTaskPanel({
   );
 }
 
-function ReasoningSlider({
-  value,
-  options,
-  onChange,
-}: {
-  value: ReasoningEffort;
-  options: ReasoningEffortOption[];
-  onChange: (effort: ReasoningEffort) => void;
-}) {
-  const sliderOptions = options.filter((option) => option.key !== 'default');
-  if (!sliderOptions.length) {
-    return null;
-  }
-
-  const fallbackIndex = Math.max(0, sliderOptions.findIndex((option) => option.key === 'medium'));
-  const activeIndex = Math.max(
-    0,
-    sliderOptions.findIndex((option) => option.key === value) >= 0
-      ? sliderOptions.findIndex((option) => option.key === value)
-      : fallbackIndex
-  );
-  const trackWidth = useRef(0);
-  const currentIndex = useRef(activeIndex);
-  currentIndex.current = activeIndex;
-
-  const snapToIndex = (locationX: number) => {
-    const width = trackWidth.current;
-    if (!width || !sliderOptions.length) return;
-    const ratio = Math.max(0, Math.min(1, locationX / width));
-    const index = Math.round(ratio * (sliderOptions.length - 1));
-    if (index !== currentIndex.current) {
-      onChange(sliderOptions[index].key);
-    }
-  };
-
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (event) => {
-        snapToIndex(event.nativeEvent.locationX);
-      },
-      onPanResponderMove: (event) => {
-        snapToIndex(event.nativeEvent.locationX);
-      },
-    })
-  ).current;
-
-  const thumbPosition = sliderOptions.length > 1
-    ? (activeIndex / (sliderOptions.length - 1)) * 100
-    : 50;
-
-  return (
-    <View style={styles.reasoningSlider}>
-      <View
-        style={styles.reasoningSliderTrackArea}
-        onLayout={(e) => { trackWidth.current = e.nativeEvent.layout.width; }}
-        {...panResponder.panHandlers}
-      >
-        <View style={styles.reasoningSliderTrack} />
-        <View style={[styles.reasoningSliderThumb, { left: `${thumbPosition}%` as any }]} />
-      </View>
-      <View style={styles.reasoningSliderLabels}>
-        {sliderOptions.map((option, index) => (
-          <Pressable key={option.key} onPress={() => onChange(option.key)}>
-            <Text
-              style={[
-                styles.reasoningSliderLabel,
-                index === activeIndex && styles.reasoningSliderLabelActive,
-              ]}
-            >
-              {option.label}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
-    </View>
-  );
-}
-
 function ParameterSlider({
+  label,
   value,
   min,
   max,
   step,
   onChange,
 }: {
+  label: string;
   value: number;
   min: number;
   max: number;
@@ -3420,9 +4258,21 @@ function ParameterSlider({
   ).current;
 
   const thumbPosition = ((value - min) / (max - min)) * 100;
+  const adjust = (direction: 1 | -1) => {
+    onChange(snapParameterValue(clampParameterValue(value + direction * step, min, max), step));
+  };
 
   return (
     <View
+      accessible
+      accessibilityRole="adjustable"
+      accessibilityLabel={label}
+      accessibilityValue={{ min, max, now: value, text: formatParameterValue(value) }}
+      accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+      onAccessibilityAction={(event) => {
+        if (event.nativeEvent.actionName === 'increment') adjust(1);
+        if (event.nativeEvent.actionName === 'decrement') adjust(-1);
+      }}
       style={styles.parameterSliderTrackArea}
       onLayout={(event) => {
         trackWidth.current = event.nativeEvent.layout.width;
@@ -3469,6 +4319,7 @@ function ParameterControl({
           <Text style={styles.parameterControlHint}>{control.description}</Text>
         </View>
         <TextInput
+          accessibilityLabel={`${control.label}数值`}
           value={draft}
           onChangeText={(text) => {
             setDraft(text);
@@ -3484,6 +4335,7 @@ function ParameterControl({
         />
       </View>
       <ParameterSlider
+        label={control.label}
         value={value}
         min={control.min}
         max={control.max}
@@ -3562,7 +4414,7 @@ function ModelPickerModal({
               transition={{ type: 'timing', duration: 180 }}
               style={styles.modelPickerBackdrop}
             >
-              <Pressable accessibilityRole="button" onPress={onClose} style={styles.modelPickerBackdropPressable} />
+              <Pressable accessibilityRole="button" accessibilityLabel="关闭模型选择" onPress={onClose} style={styles.modelPickerBackdropPressable} />
             </MotiView>
           ) : null}
         </AnimatePresence>
@@ -3583,7 +4435,7 @@ function ModelPickerModal({
                   <Text style={styles.modelPickerTitle}>选择模型</Text>
                   <Text style={styles.modelPickerSubtitle}>已添加模型</Text>
                 </View>
-                <AnimatedPressable accessibilityRole="button" onPress={onClose} style={styles.modelPickerCloseButton}>
+                <AnimatedPressable accessibilityRole="button" accessibilityLabel="关闭模型选择" onPress={onClose} style={styles.modelPickerCloseButton}>
                   <Text style={styles.modelPickerCloseText}>×</Text>
                 </AnimatedPressable>
               </View>
@@ -3729,6 +4581,7 @@ function SidebarDrawer({
       <GestureHandlerRootView style={styles.sidebarRoot}>
         <ReanimatedPressable
           accessibilityRole="button"
+          accessibilityLabel="关闭聊天记录"
           onPress={onClose}
           style={[styles.sidebarScrimBase, scrimStyle]}
         />
@@ -3807,6 +4660,7 @@ function CandidateModelRow({ model, providerName, added, onAdd }: CandidateModel
       </View>
       <AnimatedPressable
         accessibilityRole="button"
+        accessibilityLabel={added ? `已添加模型 ${model.name ?? model.id}` : `添加模型 ${model.name ?? model.id}`}
         disabled={added}
         onPress={onAdd}
         style={[styles.addModelButton, added && styles.addModelButtonAdded]}
@@ -3820,8 +4674,60 @@ function CandidateModelRow({ model, providerName, added, onAdd }: CandidateModel
 }
 
 function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
+  const [displayUri, setDisplayUri] = useState(attachment.uri);
+
+  useEffect(() => {
+    let disposed = false;
+    let temporaryUri: string | undefined;
+    void resolveAttachmentDisplayUri(attachment).then(
+      (uri) => {
+        if (disposed) {
+          if (Platform.OS === 'web' && uri.startsWith('blob:')) URL.revokeObjectURL(uri);
+          return;
+        }
+        temporaryUri = uri.startsWith('blob:') ? uri : undefined;
+        setDisplayUri(uri);
+      },
+      () => {
+        if (!disposed) setDisplayUri(attachment.uri);
+      }
+    );
+    return () => {
+      disposed = true;
+      if (Platform.OS === 'web' && temporaryUri) URL.revokeObjectURL(temporaryUri);
+    };
+  }, [attachment]);
+
+  const openOrExport = () => {
+    void (async () => {
+      const browserReadable = Platform.OS === 'web' || /^(?:https?:|data:|blob:)/i.test(displayUri);
+      if (browserReadable) {
+        await Linking.openURL(displayUri);
+        return;
+      }
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(displayUri, {
+          dialogTitle: `导出 ${attachment.name}`,
+          mimeType: attachment.mimeType,
+        });
+        return;
+      }
+      throw new Error('当前设备没有可用的文件导出应用。');
+    })().catch((error) => {
+      Alert.alert('无法打开附件', error instanceof Error ? error.message : '请稍后重试。');
+    });
+  };
+
   if (attachment.kind === 'image') {
-    return <Image source={{ uri: attachment.uri }} style={styles.attachmentImage} />;
+    return (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`打开或导出图片 ${attachment.name}`}
+        onPress={openOrExport}
+      >
+        <Image source={{ uri: displayUri }} style={styles.attachmentImage} />
+      </Pressable>
+    );
   }
 
   if (attachment.kind === 'video') {
@@ -3844,12 +4750,11 @@ function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
           </Text>
           <AnimatedPressable
             accessibilityRole="button"
-            onPress={() => {
-              void Linking.openURL(attachment.uri);
-            }}
+            accessibilityLabel={`打开或导出视频 ${attachment.name}`}
+            onPress={openOrExport}
             style={styles.attachmentOpenButton}
           >
-            <Text style={styles.attachmentOpenButtonText}>打开</Text>
+            <Text style={styles.attachmentOpenButtonText}>打开 / 导出</Text>
           </AnimatedPressable>
         </View>
       </View>
@@ -3857,12 +4762,17 @@ function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
   }
 
   return (
-    <View style={styles.attachmentFile}>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`打开或导出文件 ${attachment.name}`}
+      onPress={openOrExport}
+      style={styles.attachmentFile}
+    >
       <Text style={styles.attachmentKind}>{attachment.kind.toUpperCase()}</Text>
       <Text numberOfLines={1} style={styles.attachmentFileName}>
         {attachment.name}
       </Text>
-    </View>
+    </Pressable>
   );
 }
 
@@ -3943,6 +4853,32 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: 12,
     backgroundColor: palette.bg,
+  },
+  persistenceErrorBanner: {
+    marginHorizontal: 16,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: palette.dangerBorder,
+    borderRadius: radii.md,
+    backgroundColor: palette.dangerBg,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 4,
+  },
+  persistenceErrorTitle: {
+    color: palette.danger,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  persistenceErrorText: {
+    color: palette.text,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  persistenceErrorHint: {
+    color: palette.textSecondary,
+    fontSize: 12,
+    lineHeight: 18,
   },
   topHeaderRow: {
     flexDirection: 'row',
@@ -4107,6 +5043,23 @@ const styles = StyleSheet.create({
   providerChipTextActive: {
     color: palette.textOnAccent,
   },
+  providerDeleteButton: {
+    minHeight: 40,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: palette.dangerBorder,
+    backgroundColor: palette.dangerBg,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    paddingHorizontal: 14,
+  },
+  providerDeleteButtonText: {
+    color: palette.danger,
+    fontSize: 13,
+    fontWeight: '600',
+  },
   fieldGroup: {
     gap: 8,
   },
@@ -4138,10 +5091,29 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 6,
   },
+  capabilityChipActive: {
+    backgroundColor: palette.accent,
+    borderColor: palette.accent,
+  },
   capabilityText: {
     color: palette.textSecondary,
     fontSize: 12,
     fontWeight: '600',
+  },
+  capabilityTextActive: {
+    color: palette.textOnAccent,
+  },
+  modelOverridePanel: {
+    marginTop: 4,
+    borderTopWidth: 1,
+    borderTopColor: palette.border,
+    paddingTop: 14,
+    gap: 10,
+  },
+  modelOverrideHint: {
+    color: palette.textSecondary,
+    fontSize: 12,
+    lineHeight: 18,
   },
   updateHeaderRow: {
     flexDirection: 'row',
@@ -4706,6 +5678,14 @@ const styles = StyleSheet.create({
     color: palette.text,
     fontSize: 15,
     lineHeight: 24,
+  },
+  messageStatusText: {
+    color: palette.textSecondary,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  messageErrorText: {
+    color: palette.danger,
   },
   userMessageText: {
     color: palette.text,

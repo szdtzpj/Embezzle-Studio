@@ -6,6 +6,7 @@ ios/
 dist/
 build/
 web-build/
+coverage/
 
 .expo-web.*.log
 npm-debug.log*

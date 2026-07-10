@@ -4,28 +4,112 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: GitHub Release tag to attach the APK to
+        description: Existing GitHub Release tag, for example v1.0.4
         required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: android-release-${{ inputs.release_tag }}
+  cancel-in-progress: false
 
 jobs:
   build:
+    name: Validate and build unsigned APK
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CI: 1
+      RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag and checkout its commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release_tag must be a version tag such as v1.0.4."
+            exit 1
+          fi
+
+          if ! git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            echo "::error::Tag $RELEASE_TAG does not exist in the repository. Push the tag before running this workflow."
+            exit 1
+          fi
+
+          if ! release_json="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease 2>/dev/null)"; then
+            echo "::error::GitHub Release $RELEASE_TAG does not exist. Create it before running this workflow."
+            exit 1
+          fi
+          if [[ "$(jq -r '.isDraft or .isPrerelease' <<<"$release_json")" != "false" ]]; then
+            echo "::error::GitHub Release $RELEASE_TAG must be a published stable release, not a draft or prerelease."
+            exit 1
+          fi
+
+          tag_commit="$(git rev-list -n 1 "refs/tags/$RELEASE_TAG")"
+          if [[ -z "$tag_commit" ]] || ! git merge-base --is-ancestor "$tag_commit" origin/main; then
+            echo "::error::Tag $RELEASE_TAG must point to a commit reachable from origin/main."
+            exit 1
+          fi
+
+          git checkout --detach "refs/tags/$RELEASE_TAG"
+
+          expected_version="${RELEASE_TAG#v}"
+          app_version="$(node -p "require('./app.json').expo.version")"
+          package_version="$(node -p "require('./package.json').version")"
+          lock_version="$(node -p "require('./package-lock.json').version")"
+          lock_root_version="$(node -p "require('./package-lock.json').packages[''].version")"
+          app_info_version="$(sed -n "s/^[[:space:]]*version: '\([^']*\)'.*/\1/p" src/data/appInfo.ts | head -n 1)"
+          version_code="$(node -p "require('./app.json').expo.android.versionCode")"
+
+          if [[ "$app_version" != "$expected_version" ||
+                "$package_version" != "$expected_version" ||
+                "$lock_version" != "$expected_version" ||
+                "$lock_root_version" != "$expected_version" ||
+                "$app_info_version" != "$expected_version" ]]; then
+            echo "::error::Release tag $RELEASE_TAG must match app.json, package.json, package-lock.json, and src/data/appInfo.ts."
+            printf 'Resolved versions: app=%s package=%s lock=%s lock-root=%s appInfo=%s\n' \
+              "$app_version" "$package_version" "$lock_version" "$lock_root_version" "$app_info_version"
+            exit 1
+          fi
+
+          if [[ ! "$version_code" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::app.json expo.android.versionCode must be a positive integer."
+            exit 1
+          fi
+
+          stable_tags="$(git tag --merged origin/main | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V || true)"
+          latest_stable_tag="$(tail -n 1 <<<"$stable_tags")"
+          if [[ "$latest_stable_tag" != "$RELEASE_TAG" ]]; then
+            echo "::error::$RELEASE_TAG must be the highest stable version tag reachable from origin/main (found $latest_stable_tag)."
+            exit 1
+          fi
+          previous_tag="$(grep -Fxv "$RELEASE_TAG" <<<"$stable_tags" | tail -n 1 || true)"
+          if [[ -n "$previous_tag" ]]; then
+            previous_version_code="$(git show "$previous_tag:app.json" | node -e "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>process.stdout.write(String(JSON.parse(s).expo.android.versionCode)))")"
+            if [[ ! "$previous_version_code" =~ ^[1-9][0-9]*$ ]] || (( version_code <= previous_version_code )); then
+              echo "::error::versionCode $version_code must be greater than $previous_version_code from $previous_tag."
+              exit 1
+            fi
+          fi
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
         with:
           distribution: temurin
           java-version: 17
@@ -36,24 +120,282 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Test
+        run: npm run test
+
+      - name: Lint
+        run: npm run lint
+
       - name: Prebuild Android project
+        env:
+          CI: 1
         run: npx expo prebuild --platform android --clean --non-interactive
 
-      - name: Build release APK
-        run: cd android && ./gradlew assembleRelease --no-daemon
-
-      - name: Rename APK
+      - name: Disable generated debug signing for release
+        shell: bash
         run: |
-          mkdir -p release
-          cp android/app/build/outputs/apk/release/app-release.apk "release/Embezzle-Studio-${{ inputs.release_tag }}-release.apk"
+          set -euo pipefail
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+          build_file="android/app/build.gradle"
+          sed -i '/^[[:space:]]*release[[:space:]]*{/,/^[[:space:]]*}/ {/signingConfig.*signingConfigs.*debug/d;}' "$build_file"
+
+          if sed -n '/^[[:space:]]*release[[:space:]]*{/,/^[[:space:]]*}/p' "$build_file" | grep -q 'signingConfig'; then
+            echo "::error::Generated release build still has a signing config; an unsigned APK is required before apksigner runs."
+            exit 1
+          fi
+
+      - name: Build unsigned release APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Require unsigned APK output
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f android/app/build/outputs/apk/release/app-release-unsigned.apk || {
+            echo "::error::Gradle did not produce app-release-unsigned.apk. Refusing to sign an unknown output."
+            exit 1
+          }
+
+      - name: Verify packaged identity, SDK levels, and forbidden permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          apk="android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          aapt="$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -type f -name aapt | sort -V | tail -n 1)"
+          if [[ -z "$aapt" || ! -x "$aapt" ]]; then
+            echo "::error::aapt was not found under $ANDROID_HOME/build-tools."
+            exit 1
+          fi
+
+          badging="$($aapt dump badging "$apk")"
+          permissions="$($aapt dump permissions "$apk")"
+          printf '%s\n' "$badging"
+          printf '%s\n' "$permissions"
+
+          package_line="$(grep -m 1 '^package:' <<<"$badging")"
+          actual_package="$(sed -n "s/.* name='\([^']*\)'.*/\1/p" <<<"$package_line")"
+          actual_version_code="$(sed -n "s/.* versionCode='\([^']*\)'.*/\1/p" <<<"$package_line")"
+          actual_version_name="$(sed -n "s/.* versionName='\([^']*\)'.*/\1/p" <<<"$package_line")"
+          actual_min_sdk="$(sed -n "s/^sdkVersion:'\([^']*\)'.*/\1/p" <<<"$badging" | head -n 1)"
+          actual_target_sdk="$(sed -n "s/^targetSdkVersion:'\([^']*\)'.*/\1/p" <<<"$badging" | head -n 1)"
+
+          expected_package="com.szdtzpj.embezzlestudio"
+          expected_version_name="${RELEASE_TAG#v}"
+          expected_version_code="$(node -p "require('./app.json').expo.android.versionCode")"
+          expected_min_sdk="24"
+          expected_target_sdk="36"
+
+          if [[ "$actual_package" != "$expected_package" ||
+                "$actual_version_name" != "$expected_version_name" ||
+                "$actual_version_code" != "$expected_version_code" ||
+                "$actual_min_sdk" != "$expected_min_sdk" ||
+                "$actual_target_sdk" != "$expected_target_sdk" ]]; then
+            echo "::error::Packaged Android identity or SDK levels do not match the release contract."
+            printf 'Expected package=%s versionName=%s versionCode=%s minSdk=%s targetSdk=%s\n' \
+              "$expected_package" "$expected_version_name" "$expected_version_code" "$expected_min_sdk" "$expected_target_sdk"
+            printf 'Actual   package=%s versionName=%s versionCode=%s minSdk=%s targetSdk=%s\n' \
+              "$actual_package" "$actual_version_name" "$actual_version_code" "$actual_min_sdk" "$actual_target_sdk"
+            exit 1
+          fi
+
+          for forbidden_permission in \
+            android.permission.SYSTEM_ALERT_WINDOW \
+            android.permission.CAMERA \
+            android.permission.RECORD_AUDIO; do
+            if grep -Fq "$forbidden_permission" <<<"$permissions"; then
+              echo "::error::Forbidden permission $forbidden_permission is present in the packaged manifest."
+              exit 1
+            fi
+          done
+
+      - name: Upload unsigned APK for isolated signing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: Embezzle-Studio-${{ inputs.release_tag }}-release-apk
-          path: release/*.apk
+          name: Embezzle-Studio-${{ inputs.release_tag }}-unsigned
+          path: android/app/build/outputs/apk/release/app-release-unsigned.apk
+          if-no-files-found: error
+          retention-days: 1
 
-      - name: Attach APK to Release
+  sign:
+    name: Sign and verify APK
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: android-release
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - name: Require stable Android signing secrets
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ inputs.release_tag }}" release/*.apk --clobber
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_SIGNING_CERT_SHA256: ${{ secrets.ANDROID_SIGNING_CERT_SHA256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          missing=()
+          for name in \
+            ANDROID_KEYSTORE_BASE64 \
+            ANDROID_KEY_ALIAS \
+            ANDROID_KEYSTORE_PASSWORD \
+            ANDROID_KEY_PASSWORD \
+            ANDROID_SIGNING_CERT_SHA256; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            printf '::error::Missing required Android release signing secret(s): %s\n' "${missing[*]}"
+            echo "::error::Configure them in the protected android-release environment. Debug signing is intentionally forbidden."
+            exit 1
+          fi
+
+      - name: Setup Java
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Download unsigned APK
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: Embezzle-Studio-${{ inputs.release_tag }}-unsigned
+          path: unsigned
+
+      - name: Sign and verify release APK
+        id: signed_apk
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_SIGNING_CERT_SHA256: ${{ secrets.ANDROID_SIGNING_CERT_SHA256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          unsigned_apk="$GITHUB_WORKSPACE/unsigned/app-release-unsigned.apk"
+          if [[ ! -f "$unsigned_apk" ]]; then
+            echo "::error::Unsigned APK artifact is missing at $unsigned_apk."
+            exit 1
+          fi
+
+          apksigner="$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -type f -name apksigner | sort -V | tail -n 1)"
+          if [[ -z "$apksigner" || ! -x "$apksigner" ]]; then
+            echo "::error::apksigner was not found under $ANDROID_HOME/build-tools."
+            exit 1
+          fi
+
+          build_tools_dir="$(dirname "$apksigner")"
+          zipalign="$build_tools_dir/zipalign"
+          if [[ ! -x "$zipalign" ]]; then
+            echo "::error::zipalign was not found next to apksigner in $build_tools_dir."
+            exit 1
+          fi
+
+          signing_dir="$RUNNER_TEMP/embezzle-android-signing"
+          release_dir="$GITHUB_WORKSPACE/release"
+          keystore="$signing_dir/release.jks"
+          aligned_apk="$signing_dir/aligned-unsigned.apk"
+          apk_name="Embezzle-Studio-${RELEASE_TAG}-release.apk"
+          signed_apk="$release_dir/$apk_name"
+          report="$release_dir/apksigner-report.txt"
+
+          mkdir -p "$signing_dir" "$release_dir"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          chmod 600 "$keystore"
+
+          keytool -list \
+            -keystore "$keystore" \
+            -storepass:env ANDROID_KEYSTORE_PASSWORD \
+            -alias "$ANDROID_KEY_ALIAS" >/dev/null
+
+          "$zipalign" -f -P 16 4 "$unsigned_apk" "$aligned_apk"
+          "$apksigner" sign \
+            --ks "$keystore" \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "$signed_apk" \
+            "$aligned_apk"
+
+          "$apksigner" verify --verbose --print-certs "$signed_apk" | tee "$report"
+          "$zipalign" -c -P 16 -v 4 "$signed_apk"
+
+          if grep -qi 'Android Debug' "$report"; then
+            echo "::error::The signed APK uses an Android Debug certificate. Publication is forbidden."
+            exit 1
+          fi
+
+          actual_cert_sha256="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$report" | head -n 1 | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')"
+          expected_cert_sha256="$(printf '%s' "$ANDROID_SIGNING_CERT_SHA256" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')"
+          if [[ -z "$actual_cert_sha256" || "$actual_cert_sha256" != "$expected_cert_sha256" ]]; then
+            echo "::error::Signing certificate SHA-256 does not match ANDROID_SIGNING_CERT_SHA256."
+            exit 1
+          fi
+
+          (
+            cd "$release_dir"
+            sha256sum "$apk_name" | tee "$apk_name.sha256"
+          )
+
+          echo "artifact_name=Embezzle-Studio-${RELEASE_TAG}-signed" >> "$GITHUB_OUTPUT"
+          echo "apk_name=$apk_name" >> "$GITHUB_OUTPUT"
+
+      - name: Remove signing material
+        if: always()
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/embezzle-android-signing"
+
+      - name: Upload signed APK artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.signed_apk.outputs.artifact_name }}
+          path: |
+            release/${{ steps.signed_apk.outputs.apk_name }}
+            release/${{ steps.signed_apk.outputs.apk_name }}.sha256
+            release/apksigner-report.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Attach verified APK to GitHub Release
+    needs: sign
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - name: Download signed APK artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: Embezzle-Studio-${{ inputs.release_tag }}-signed
+          path: release
+
+      - name: Attach APK and checksum to Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk_name="Embezzle-Studio-${RELEASE_TAG}-release.apk"
+          existing_assets="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          for asset in "$apk_name" "$apk_name.sha256" "apksigner-report.txt"; do
+            if grep -Fxq "$asset" <<<"$existing_assets"; then
+              echo "::error::Release asset $asset already exists. Refusing to overwrite a published artifact."
+              exit 1
+            fi
+          done
+
+          gh release upload "$RELEASE_TAG" \
+            "release/Embezzle-Studio-${RELEASE_TAG}-release.apk" \
+            "release/Embezzle-Studio-${RELEASE_TAG}-release.apk.sha256" \
+            "release/apksigner-report.txt" \
+            --repo "$GITHUB_REPOSITORY"

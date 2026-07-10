@@ -36,6 +36,17 @@ export interface RemoteModelMetadata {
   [key: string]: unknown;
 }
 
+export type BailianThinkingMode = 'none' | 'mixed' | 'thinking-only';
+
+export type BailianReasoningEffortFamily = 'deepseek-v4' | 'glm-5.2' | 'glm-5.1-or-5';
+
+export interface BailianThinkingProfile {
+  mode: BailianThinkingMode;
+  defaultEnabled?: boolean;
+  supportsThinkingBudget: boolean;
+  reasoningEffortFamily?: BailianReasoningEffortFamily;
+}
+
 type CapabilitySource = ModelInfo['source'];
 
 const capabilityOrder: Capability[] = [
@@ -68,9 +79,6 @@ const visionKeywords = [
   'qwen2-vl',
   'qwen2.5-vl',
   'qwen3-vl',
-  'qwen3.6',
-  'qwen3-6',
-  'qwen36',
   'qvq',
   'glm-4v',
   'glm-v',
@@ -96,7 +104,17 @@ const visionKeywords = [
   'doubao-1.5-vision',
 ];
 
-const visionExclusions = ['gpt-image', 'gpt-4o-image', 'qwen-max', 'qwen3-max', 'embedding', 'rerank', 'tts', 'whisper'];
+const visionExclusions = [
+  'gpt-image',
+  'gpt-4o-image',
+  'qwen-max',
+  'qwen3-max',
+  'qwen3-6-max-preview',
+  'embedding',
+  'rerank',
+  'tts',
+  'whisper',
+];
 
 const videoInputKeywords = [
   'video-input',
@@ -105,9 +123,9 @@ const videoInputKeywords = [
   'doubao-seed',
   'gemini',
   'qwen-vl',
-  'qwen3.6',
-  'qwen3-6',
-  'qwen36',
+  'qwen2-5-vl',
+  'qwen3-vl',
+  'qvq',
 ];
 const videoGenerationKeywords = ['video-generation', 'text-to-video', 'seedance', 'sora', 'veo', 'kling', 'wan-video', 'wanx2.1-t2v'];
 const imageGenerationKeywords = [
@@ -134,6 +152,8 @@ const reasoningKeywords = [
   'think',
   'deepseek-r1',
   'deepseek-v4',
+  'deepseek-v3-2',
+  'deepseek-v3-1',
   '-r1',
   'r1-',
   'qwq',
@@ -144,6 +164,7 @@ const reasoningKeywords = [
   'o4',
   'glm-z1',
   'glm-5',
+  'glm-4-5',
   'hunyuan-t1',
   'grok-4',
   'gpt-5',
@@ -200,6 +221,150 @@ function normalizedModelId(modelId: string): string {
     .replace(/-free$/i, '');
 }
 
+function containsModelFamily(modelId: string, family: string): boolean {
+  return (
+    modelId === family ||
+    modelId.startsWith(`${family}-`) ||
+    modelId.includes(`-${family}-`) ||
+    modelId.endsWith(`-${family}`)
+  );
+}
+
+function qwenSnapshotAtOrAfter(modelId: string, family: string, minimumDate: string): boolean {
+  if (modelId === family || modelId === `${family}-latest`) {
+    return true;
+  }
+
+  const match = modelId.match(new RegExp(`(?:^|-)${family}-(\\d{4})-(\\d{2})-(\\d{2})(?:$|-)`));
+  if (!match) {
+    return false;
+  }
+
+  return `${match[1]}-${match[2]}-${match[3]}` >= minimumDate;
+}
+
+export function getBailianThinkingProfile(modelId: string): BailianThinkingProfile {
+  const id = normalizedModelId(modelId);
+  const none: BailianThinkingProfile = { mode: 'none', supportsThinkingBudget: false };
+
+  if (containsModelFamily(id, 'qwq') || containsModelFamily(id, 'qvq')) {
+    return { mode: 'thinking-only', defaultEnabled: true, supportsThinkingBudget: false };
+  }
+
+  if (containsModelFamily(id, 'deepseek-r1')) {
+    return { mode: 'thinking-only', defaultEnabled: true, supportsThinkingBudget: false };
+  }
+
+  if (containsModelFamily(id, 'deepseek-v4')) {
+    return {
+      mode: 'mixed',
+      defaultEnabled: true,
+      supportsThinkingBudget: false,
+      reasoningEffortFamily: 'deepseek-v4',
+    };
+  }
+
+  if (containsModelFamily(id, 'deepseek-v3-2') || containsModelFamily(id, 'deepseek-v3-1')) {
+    return { mode: 'mixed', defaultEnabled: false, supportsThinkingBudget: true };
+  }
+
+  if (containsModelFamily(id, 'glm-5-2')) {
+    return {
+      mode: 'mixed',
+      defaultEnabled: true,
+      supportsThinkingBudget: false,
+      reasoningEffortFamily: 'glm-5.2',
+    };
+  }
+
+  if (
+    containsModelFamily(id, 'glm-5-1') ||
+    id === 'glm-5' ||
+    id.endsWith('-glm-5')
+  ) {
+    return {
+      mode: 'mixed',
+      defaultEnabled: true,
+      supportsThinkingBudget: false,
+      reasoningEffortFamily: 'glm-5.1-or-5',
+    };
+  }
+
+  if (
+    containsModelFamily(id, 'glm-4-5') ||
+    containsModelFamily(id, 'glm-4-6') ||
+    containsModelFamily(id, 'glm-4-7')
+  ) {
+    return { mode: 'mixed', defaultEnabled: true, supportsThinkingBudget: false };
+  }
+
+  const qwenThinkingOnly =
+    containsModelFamily(id, 'qwen3-7-max-preview') ||
+    containsModelFamily(id, 'qwen3-7-max-2026-05-17') ||
+    (containsModelFamily(id, 'qwen3-vl') && id.includes('-thinking')) ||
+    (containsModelFamily(id, 'qwen3') && id.includes('-thinking'));
+  if (qwenThinkingOnly) {
+    return { mode: 'thinking-only', defaultEnabled: true, supportsThinkingBudget: true };
+  }
+
+  if (
+    containsModelFamily(id, 'qwen3-7') ||
+    containsModelFamily(id, 'qwen3-6') ||
+    containsModelFamily(id, 'qwen3-5') ||
+    containsModelFamily(id, 'qwen3-vl')
+  ) {
+    return { mode: 'mixed', defaultEnabled: true, supportsThinkingBudget: true };
+  }
+
+  if (containsModelFamily(id, 'qwen3-omni-flash')) {
+    return { mode: 'mixed', supportsThinkingBudget: false };
+  }
+
+  if (
+    containsModelFamily(id, 'qwen3-max') ||
+    /(?:^|-)qwen3-(?:235b-a22b|32b|30b-a3b|14b|8b)(?:$|-)/.test(id)
+  ) {
+    return {
+      mode: 'mixed',
+      defaultEnabled: !containsModelFamily(id, 'qwen3-max'),
+      supportsThinkingBudget: true,
+    };
+  }
+
+  if (
+    qwenSnapshotAtOrAfter(id, 'qwen-plus', '2025-04-28') ||
+    qwenSnapshotAtOrAfter(id, 'qwen-flash', '2025-07-28') ||
+    containsModelFamily(id, 'qwen-turbo')
+  ) {
+    if (id.includes('character')) {
+      return none;
+    }
+    return { mode: 'mixed', defaultEnabled: false, supportsThinkingBudget: true };
+  }
+
+  return none;
+}
+
+function qwenVisionInputProfile(modelId: string): { image: boolean; video: boolean } {
+  const id = normalizedModelId(modelId);
+  const qwen37Visual =
+    containsModelFamily(id, 'qwen3-7-plus') ||
+    containsModelFamily(id, 'qwen3-7-max-2026-06-08');
+  const qwen36Visual =
+    containsModelFamily(id, 'qwen3-6-plus') ||
+    containsModelFamily(id, 'qwen3-6-flash') ||
+    containsModelFamily(id, 'qwen3-6-35b-a3b');
+  const qwen35Visual =
+    containsModelFamily(id, 'qwen3-5-plus') ||
+    containsModelFamily(id, 'qwen3-5-flash') ||
+    containsModelFamily(id, 'qwen3-5-omni-plus') ||
+    containsModelFamily(id, 'qwen3-5-omni-flash') ||
+    /(?:^|-)qwen3-5-(?:397b-a17b|122b-a10b|27b|35b-a3b)(?:$|-)/.test(id);
+
+  const supported = qwen37Visual || qwen36Visual || qwen35Visual;
+  return { image: supported, video: supported };
+}
+
 function includesAny(value: string, keywords: string[]): boolean {
   return keywords.some((keyword) => value.includes(keyword));
 }
@@ -224,11 +389,22 @@ function sortedCapabilities(caps: Set<Capability>): Capability[] {
   return capabilityOrder.filter((capability) => caps.has(capability));
 }
 
-const reasoningEffortOrder: ReasoningEffort[] = ['default', 'off', 'low', 'medium', 'high', 'max'];
+const reasoningEffortOrder: ReasoningEffort[] = [
+  'default',
+  'off',
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+];
 const reasoningEffortAliases: Record<string, ReasoningEffort> = {
   auto: 'default',
   default: 'default',
-  none: 'off',
+  none: 'none',
+  minimal: 'minimal',
   off: 'off',
   disabled: 'off',
   disable: 'off',
@@ -239,9 +415,9 @@ const reasoningEffortAliases: Record<string, ReasoningEffort> = {
   high: 'high',
   max: 'max',
   maximum: 'max',
-  xhigh: 'max',
-  'x-high': 'max',
-  ultra: 'max',
+  xhigh: 'xhigh',
+  'x-high': 'xhigh',
+  ultra: 'xhigh',
 };
 
 function normalizeReasoningEffortToken(value: string): ReasoningEffort | undefined {
@@ -311,17 +487,6 @@ function supportedReasoningEffortsFromMetadata(metadata?: RemoteModelMetadata): 
   collectReasoningEffortValues(efforts, metadata.reasoning_efforts);
   collectReasoningEffortValues(efforts, metadata.supported_reasoning_efforts);
   collectReasoningEffortValues(efforts, metadata.thinking);
-
-  const supportedParameters = stringArray(metadata.supported_parameters);
-  if (supportedParameters.some((item) => item.includes('enable_thinking'))) {
-    efforts.add('off');
-  }
-  if (supportedParameters.some((item) => item.includes('thinking_budget'))) {
-    efforts.add('low');
-    efforts.add('medium');
-    efforts.add('high');
-    efforts.add('max');
-  }
 
   const sorted = sortedReasoningEfforts(efforts);
   return sorted.length ? sorted : undefined;
@@ -421,9 +586,17 @@ function addCapabilitiesFromModelId(caps: Set<Capability>, provider: ProviderPro
   const isGenerationOrVector = caps.has('image-generation') || caps.has('video-generation') || caps.has('embedding') || caps.has('rerank');
 
   if (!isGenerationOrVector && includesAny(text, reasoningKeywords)) add(caps, 'reasoning');
-  if (!isGenerationOrVector && provider.kind === 'bailian-compatible' && includesAny(text, ['qwen', 'qwq', 'qvq'])) {
+  if (
+    !isGenerationOrVector &&
+    provider.kind === 'bailian-compatible' &&
+    getBailianThinkingProfile(modelId).mode !== 'none'
+  ) {
     add(caps, 'reasoning');
   }
+
+  const qwenVision = qwenVisionInputProfile(modelId);
+  if (qwenVision.image) add(caps, 'image-input');
+  if (qwenVision.video) add(caps, 'video-input');
 
   const excludedFromVision = includesAny(text, visionExclusions);
   if (!excludedFromVision && !caps.has('embedding') && !caps.has('rerank') && includesAny(text, visionKeywords)) {
@@ -463,7 +636,7 @@ export function inferModelCapabilities(
   provider: ProviderProfile,
   modelId: string,
   metadata?: RemoteModelMetadata,
-  source: CapabilitySource = 'remote'
+  _source: CapabilitySource = 'remote'
 ): Capability[] {
   const caps = new Set<Capability>();
 
@@ -472,10 +645,6 @@ export function inferModelCapabilities(
 
   addCapabilitiesFromMetadata(caps, metadata);
   addCapabilitiesFromModelId(caps, provider, modelId, metadata?.name);
-
-  if (source !== 'remote' && sortedCapabilities(caps).length <= 2) {
-    provider.capabilities.forEach((capability) => add(caps, capability));
-  }
 
   if (caps.has('embedding') || caps.has('rerank')) {
     caps.delete('tool-calling');

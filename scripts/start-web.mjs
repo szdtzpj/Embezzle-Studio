@@ -9,12 +9,13 @@ const extraArgs = process.argv.slice(2);
 
 const children = [];
 
-function start(name, command, args) {
+function start(name, command, args, envOverrides = {}) {
   const child = spawn(command, args, {
     cwd: rootDir,
     env: {
       ...process.env,
       BROWSER: process.env.BROWSER ?? 'none',
+      ...envOverrides,
     },
     stdio: 'inherit',
     windowsHide: true,
@@ -34,6 +35,22 @@ function start(name, command, args) {
   return child;
 }
 
+function resolveExpoPort(args) {
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    const inlineMatch = /^--port=(\d+)$/.exec(argument);
+    const candidate = inlineMatch?.[1] ?? (argument === '--port' ? args[index + 1] : undefined);
+    if (candidate != null) {
+      const port = Number(candidate);
+      if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+        throw new Error(`Invalid Expo web port: ${candidate}`);
+      }
+      return port;
+    }
+  }
+  return 8081;
+}
+
 function shutdown(code = 0) {
   for (const child of children) {
     if (!child.killed) {
@@ -46,5 +63,11 @@ function shutdown(code = 0) {
 process.on('SIGINT', () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
 
-start('dev proxy', nodeExecutable, [path.join(rootDir, 'scripts', 'dev-proxy.mjs')]);
+const expoPort = resolveExpoPort(extraArgs);
+const localWebOrigins = `http://localhost:${expoPort},http://127.0.0.1:${expoPort}`;
+start('dev proxy', nodeExecutable, [path.join(rootDir, 'scripts', 'dev-proxy.mjs')], {
+  WEB_PROXY_ALLOWED_ORIGINS: process.env.WEB_PROXY_ALLOWED_ORIGINS
+    ? `${localWebOrigins},${process.env.WEB_PROXY_ALLOWED_ORIGINS}`
+    : localWebOrigins,
+});
 start('expo web', nodeExecutable, [expoCli, 'start', '--web', ...extraArgs]);
