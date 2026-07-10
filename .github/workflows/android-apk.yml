@@ -25,7 +25,7 @@ jobs:
       RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
 
@@ -103,7 +103,7 @@ jobs:
           fi
 
       - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 24
           cache: npm
@@ -301,7 +301,7 @@ jobs:
 
           signing_dir="$RUNNER_TEMP/embezzle-android-signing"
           release_dir="$GITHUB_WORKSPACE/release"
-          keystore="$signing_dir/release.jks"
+          keystore="$signing_dir/release.p12"
           aligned_apk="$signing_dir/aligned-unsigned.apk"
           apk_name="Embezzle-Studio-${RELEASE_TAG}-release.apk"
           signed_apk="$release_dir/$apk_name"
@@ -312,6 +312,7 @@ jobs:
           chmod 600 "$keystore"
 
           keytool -list \
+            -storetype PKCS12 \
             -keystore "$keystore" \
             -storepass:env ANDROID_KEYSTORE_PASSWORD \
             -alias "$ANDROID_KEY_ALIAS" >/dev/null
@@ -319,6 +320,7 @@ jobs:
           "$zipalign" -f -P 16 4 "$unsigned_apk" "$aligned_apk"
           "$apksigner" sign \
             --ks "$keystore" \
+            --ks-type PKCS12 \
             --ks-key-alias "$ANDROID_KEY_ALIAS" \
             --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
             --key-pass env:ANDROID_KEY_PASSWORD \

@@ -80,18 +80,19 @@ Pull Request 和 `main` 分支推送会触发 `.github/workflows/quality.yml`。
 
 ```powershell
 keytool -genkeypair -v `
-  -keystore "$HOME\embezzle-studio-release.jks" `
+  -storetype PKCS12 `
+  -keystore "$HOME\embezzle-studio-release.p12" `
   -alias embezzle-studio `
   -keyalg RSA `
   -keysize 4096 `
   -validity 10000
 
-$keystore = (Resolve-Path "$HOME\embezzle-studio-release.jks").Path
+$keystore = (Resolve-Path "$HOME\embezzle-studio-release.p12").Path
 [Convert]::ToBase64String([IO.File]::ReadAllBytes($keystore)) | Set-Clipboard
 keytool -list -v -keystore $keystore -alias embezzle-studio | Select-String 'SHA256'
 ```
 
-把剪贴板中的 Base64 文本保存为 `ANDROID_KEYSTORE_BASE64`，并把 `keytool` 输出的 SHA-256 指纹保存为 `ANDROID_SIGNING_CERT_SHA256`。不要把 keystore、Base64 文本或密码写入仓库、Release、Actions 日志或普通构建产物。请至少保留两份加密离线备份；丢失正式密钥后，已安装用户将无法原地升级到新签名的 APK。
+把剪贴板中的 Base64 文本保存为 `ANDROID_KEYSTORE_BASE64`，并把 `keytool` 输出的 SHA-256 指纹保存为 `ANDROID_SIGNING_CERT_SHA256`。PKCS12 在 Android/JDK 工具链中的兼容路径要求 key password 与 store password 使用同一个高强度随机值，因此两个 GitHub Secret 应保存同一密码。不要把 keystore、Base64 文本或密码写入仓库、Release、Actions 日志或普通构建产物。请至少保留两份加密离线备份；丢失正式密钥后，已安装用户将无法原地升级到新签名的 APK。
 
 每次发布按以下顺序操作：
 
