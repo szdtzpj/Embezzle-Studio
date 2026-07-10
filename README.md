@@ -66,9 +66,11 @@ Pull Request 和 `main` 分支推送会触发 `.github/workflows/quality.yml`。
 
 ## Android 正式签名与发布
 
-`.github/workflows/android-apk.yml` 只允许仓库所有者从 `main` 使用稳定的正式密钥签名。签名前会用固定的 Android Build Tools 36.0.0 核对实际 APK 的包名、版本、min/target SDK 与禁用权限，证明待签 APK 尚无有效签名，并在签名后只接受一个与固定指纹一致、且不是 `Android Debug` 的签名者。缺少任一签名 Secret、产物契约不符或工具链/证书校验失败时，工作流会直接失败；所有官方 Actions 都使用 GitHub 验证的最新稳定完整 SHA，并运行在 Node 24 代际。
+`.github/workflows/android-apk.yml` 只允许仓库所有者从 `main` 使用稳定的正式密钥签名。读取 owner-authored Draft 的 `contents: write` 仅存在于短小的 `release_contract` 预检 Job；预检和发布都受仅允许 `main` 的 `android-release` Environment 约束，实际 npm/Expo/Gradle 构建继续使用仓库默认的 `contents: read`，且 checkout 不持久化凭据。签名前会用固定的 Android Build Tools 36.0.0 核对实际 APK 的包名、版本、min/target SDK 与禁用权限，证明待签 APK 尚无有效签名，并在签名后只接受一个与固定指纹一致、且不是 `Android Debug` 的签名者。缺少任一签名 Secret、产物契约不符或工具链/证书校验失败时，工作流会直接失败；所有官方 Actions 都使用 GitHub 验证的最新稳定完整 SHA，并运行在 Node 24 代际。
 
-先在 GitHub 仓库的 `Settings -> Environments -> android-release` 中创建发布环境，把 deployment branch policy 限制为 `main`，并配置以下 Environment secrets。若仓库/组织方案支持 deployment protection rules，还应启用 required reviewers 和 `Prevent self-review`。[GitHub Environments 官方限制](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)说明：Free、Pro 或 Team 方案的 required reviewers 只可用于公开仓库；私有仓库的 Environment secrets 和 deployment branches/tags 至少需要 Pro/Team，保持私有并获得 required reviewers 则需要 Enterprise。个人私有仓库的直接 collaborator 也没有可降级的 read 角色，因此 `BlueOcean223` 只能被明确视为可信 write collaborator、从仓库移除，或在迁移到组织后重新分配细粒度权限；不要把“仅允许 `main` + owner workflow gate”描述成等价的双人审批。
+首个正式签名版本 [`v1.0.4`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.0.4) 已于 2026-07-10 发布为 immutable Latest Release。公开的[可信下载页](https://szdtzpj.github.io/Embezzle-Studio/release.html)提供 93,087,208 字节 APK；SHA-256 为 `187f4a90daed7c7d05d423890419d1c4fe1d705674bf1d4955075c8d725b63f0`，正式证书 SHA-256 为 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`。GitHub release attestation、三个本地下载资产和 Pages 匿名 APK 字节均已独立复核。
+
+当前仓库已经创建 `Settings -> Environments -> android-release`、把 deployment branch policy 限制为 `main`，并配置了下列五个 Environment secrets；以下表格和命令同时作为环境重建或密钥轮换手册。若仓库/组织方案支持 deployment protection rules，还应启用 required reviewers 和 `Prevent self-review`。[GitHub Environments 官方限制](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)说明：Free、Pro 或 Team 方案的 required reviewers 只可用于公开仓库；私有仓库的 Environment secrets 和 deployment branches/tags 至少需要 Pro/Team，保持私有并获得 required reviewers 则需要 Enterprise。个人私有仓库的直接 collaborator 也没有可降级的 read 角色；当前按维护者决定，`BlueOcean223` 保留为明确受信任的 write collaborator，并接受没有双人审批的剩余风险。不要把“仅允许 `main` + owner workflow gate”描述成等价的双人审批。
 
 | Secret | 内容 |
 | --- | --- |
@@ -100,7 +102,7 @@ keytool -list -v -keystore $keystore -alias embezzle-studio | Select-String 'SHA
 
 1. 同步更新 `app.json` 的 `expo.version` 和递增的 `android.versionCode`、`package.json`/`package-lock.json` 的版本，以及 `src/data/appInfo.ts` 的版本。
 2. 在本地通过与 CI 相同的质量检查，通过 Pull Request 合并到 `main`，再等待该合并提交的 Quality 与 push-triggered Pages 工作流都成功。
-3. 暂停其它 `main` 合并和新版本 Release；从最新 `origin/main` 的精确提交创建并推送与应用版本一致的 tag，例如 `v1.0.4`。
+3. 暂停其它 `main` 合并和新版本 Release；从最新 `origin/main` 的精确提交创建并推送与应用版本一致的 tag，例如下一版本 `v1.0.5`。
 4. 确认仓库已启用 Immutable Releases，由 `szdtzpj` 创建同名、非 prerelease 的空 draft Release，再从默认分支 `main` 手动运行 Android 工作流；不要提前发布空 Release。
 5. 工作流会检出与当前 `origin/main` 完全相同的 tag 提交，生成未签名 APK，使用正式 keystore 签名，并在冻结前后重复核对 tag/main 提交以及每个 GitHub asset 的 digest、状态与 uploader，然后才把 draft 发布为 latest immutable Release。等该工作流、自动触发的 Pages 工作流、Release attestation 和公开 APK 字节校验都成功后，才结束发布冻结。
 
@@ -109,16 +111,16 @@ keytool -list -v -keystore $keystore -alias embezzle-studio | Select-String 'SHA
 ```powershell
 git fetch origin
 $mergeSha = git rev-parse origin/main
-git tag -a v1.0.4 $mergeSha -m "Embezzle Studio v1.0.4"
-git push origin v1.0.4
+git tag -a v1.0.5 $mergeSha -m "Embezzle Studio v1.0.5"
+git push origin v1.0.5
 gh api --method PUT repos/szdtzpj/Embezzle-Studio/immutable-releases
-gh release create v1.0.4 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.0.4" --notes "Android production release v1.0.4."
-gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.0.4
+gh release create v1.0.5 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.0.5" --notes "Android production release v1.0.5."
+gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.0.5
 ```
 
 Release 标题、正文与发布时间会被复制到公开 Pages 清单和下载页。创建 draft 前必须把这些文字当作公开内容审阅，不得包含私有仓库、账号、客户或密钥信息；不要未经检查直接使用自动生成的 release notes。
 
-`v1.0.3` 及更早的现有 APK 使用生成的 debug 签名，只能作为测试安装包，不能作为正式发布签名的信任起点。Android 不允许用新的正式证书直接覆盖安装这些 debug-signed APK；迁移时需要卸载测试包（会清除应用本地数据），或在正式发布前另行设计数据迁移方案。
+`v1.0.3` 及更早版本和 `v1.0.4-debug.*` 预发布使用生成的 debug 签名，只能作为测试安装包，不能作为正式发布签名的信任起点。迁移到正式 `v1.0.4` 或后续版本前应先导出重要数据，再卸载测试包（会清除应用本地数据）并安装正式 APK；Android 不允许用新的正式证书直接覆盖这些 debug-signed 安装。
 
 应用内更新检查不会携带 GitHub Token。私有仓库的 Releases API 和下载页对普通安装用户会返回 `404`，因此签名发布成功后，Pages 工作流会自动重新运行，并通过 `scripts/stage-release-for-pages.mjs` 处理最新稳定 Release。脚本只接受由仓库所有者发布的 GitHub Immutable Release，以及由 `github-actions[bot]` 上传、状态为 uploaded、带 GitHub SHA-256 digest 的精确 APK/校验文件；随后仍会自行下载字节、复算两个 asset digest，并把校验条目精确绑定到 `Embezzle-Studio-${tag}-release.apk`。全部一致后才暂存公共 APK、生成 `release.html`，并让清单 `releaseUrl` 指向该页。
 

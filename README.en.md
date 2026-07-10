@@ -66,9 +66,11 @@ Pull Requests and pushes to `main` trigger `.github/workflows/quality.yml`. Chan
 
 ## Android Production Signing and Release
 
-`.github/workflows/android-apk.yml` permits only the repository owner to sign from `main` with a stable production key. Before signing, pinned Android Build Tools 36.0.0 verifies the APK identity, version, SDK levels, forbidden permissions, and absence of a pre-existing valid signature. After signing, exactly one non-debug signer must match the pinned fingerprint. Missing secrets or any artifact, toolchain, or certificate mismatch fails closed. Every official Action uses a GitHub-verified latest-stable full SHA on the Node 24 generation.
+`.github/workflows/android-apk.yml` permits only the repository owner to sign from `main` with a stable production key. The `contents: write` permission needed to inspect an owner-authored Draft exists only in the short `release_contract` preflight job; preflight and publication are both constrained by the main-only `android-release` Environment, while the npm/Expo/Gradle build retains the repository-wide `contents: read` permission and does not persist checkout credentials. Before signing, pinned Android Build Tools 36.0.0 verifies the APK identity, version, SDK levels, forbidden permissions, and absence of a pre-existing valid signature. After signing, exactly one non-debug signer must match the pinned fingerprint. Missing secrets or any artifact, toolchain, or certificate mismatch fails closed. Every official Action uses a GitHub-verified latest-stable full SHA on the Node 24 generation.
 
-First create the `android-release` environment under `Settings -> Environments`, restrict its deployment branch policy to `main`, and configure the Environment secrets below. The [official GitHub Environments limitations](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) require at least Pro/Team for private-repository Environment secrets and deployment branch/tag policies, make required reviewers public-only on Free/Pro/Team, and require Enterprise for that reviewer gate on a private repository. A direct collaborator on a private personal repository also has no read-only role to downgrade to. Therefore `BlueOcean223` must either remain an explicitly trusted write collaborator, be removed, or be reassigned after moving the repository to an organization. Do not describe the `main` restriction and owner workflow gate as equivalent to two-person approval.
+The first production-signed release, [`v1.0.4`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.0.4), was published on 2026-07-10 as the immutable Latest Release. The public [trusted download page](https://szdtzpj.github.io/Embezzle-Studio/release.html) serves a 93,087,208-byte APK with SHA-256 `187f4a90daed7c7d05d423890419d1c4fe1d705674bf1d4955075c8d725b63f0` and production certificate SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`. The GitHub release attestation, all three downloaded assets, and the anonymous Pages APK bytes were independently verified.
+
+This repository now has the `android-release` environment under `Settings -> Environments`, restricts its deployment branch policy to `main`, and has the five Environment secrets below configured; the table and commands also serve as the environment-rebuild or key-rotation runbook. The [official GitHub Environments limitations](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) require at least Pro/Team for private-repository Environment secrets and deployment branch/tag policies, make required reviewers public-only on Free/Pro/Team, and require Enterprise for that reviewer gate on a private repository. A direct collaborator on a private personal repository also has no read-only role to downgrade to. By maintainer decision, `BlueOcean223` remains an explicitly trusted write collaborator, accepting the residual lack of two-person approval. Do not describe the `main` restriction and owner workflow gate as equivalent to two-person approval.
 
 | Secret | Contents |
 | --- | --- |
@@ -100,7 +102,7 @@ For each release, follow this order:
 
 1. Update `expo.version` in `app.json`, increment `android.versionCode`, and update the versions in `package.json`, `package-lock.json`, and `src/data/appInfo.ts` together.
 2. Pass the same quality checks locally as CI, merge through a Pull Request into `main`, and wait for both Quality and the push-triggered Pages workflow on that merge commit to succeed.
-3. Pause other `main` merges and newer-version Releases. Create and push a tag matching the application version, such as `v1.0.4`, from the exact latest `origin/main` commit.
+3. Pause other `main` merges and newer-version Releases. Create and push a tag matching the application version, such as the next release `v1.0.5`, from the exact latest `origin/main` commit.
 4. Confirm Immutable Releases is enabled, then have `szdtzpj` create an empty same-name draft that is not a prerelease. Run the Android workflow from the default `main` branch; never publish an empty Release first.
 5. The workflow requires the tag to equal the exact current `origin/main`, builds and signs the APK, and rechecks the tag/main commit plus every GitHub asset digest, state, and uploader both before and after freezing the draft as the latest immutable Release. End the freeze only after Android, the automatically triggered Pages deployment, the Release attestation, and the public APK byte checks all succeed.
 
@@ -109,16 +111,16 @@ Example:
 ```powershell
 git fetch origin
 $mergeSha = git rev-parse origin/main
-git tag -a v1.0.4 $mergeSha -m "Embezzle Studio v1.0.4"
-git push origin v1.0.4
+git tag -a v1.0.5 $mergeSha -m "Embezzle Studio v1.0.5"
+git push origin v1.0.5
 gh api --method PUT repos/szdtzpj/Embezzle-Studio/immutable-releases
-gh release create v1.0.4 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.0.4" --notes "Android production release v1.0.4."
-gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.0.4
+gh release create v1.0.5 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.0.5" --notes "Android production release v1.0.5."
+gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.0.5
 ```
 
 The Release title, body, and publication time are copied into the public Pages manifest and download page. Review them as public content before creating the draft, never include private repository, account, customer, or secret information, and do not use automatically generated release notes without inspecting them first.
 
-The existing APKs for `v1.0.3` and earlier use generated debug signing. They are test packages only and cannot serve as the trust anchor for production releases. Android will not allow a newly production-signed APK to replace these debug-signed installations directly. Migration requires uninstalling the test package, which clears the app's local data, or designing a separate data-migration path before the production release.
+The APKs for `v1.0.3` and earlier, plus the `v1.0.4-debug.*` prereleases, use generated debug signing. They are test packages only and cannot serve as the production trust anchor. Before moving to production `v1.0.4` or later, export important data, uninstall the test package (which clears local app data), and install the production APK; Android cannot replace those debug-signed installations directly with the production certificate.
 
 The in-app update check carries no GitHub token. After signing succeeds, Pages processes the latest stable Release through `scripts/stage-release-for-pages.mjs`. It accepts only an owner-published GitHub Immutable Release whose exact APK and checksum assets are uploaded by `github-actions[bot]`, are in the uploaded state, and carry GitHub SHA-256 digests. It then downloads both assets, recomputes their digests, and binds the checksum entry to the exact `Embezzle-Studio-${tag}-release.apk` filename before staging any public download or `release.html` page.
 
