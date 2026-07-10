@@ -24,6 +24,7 @@ jobs:
     name: Validate release contract
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment: android-release
     permissions:
       contents: write
     outputs:
@@ -39,6 +40,10 @@ jobs:
 
           if [[ "$GITHUB_ACTOR" != "$RELEASE_OWNER" || "$GITHUB_TRIGGERING_ACTOR" != "$RELEASE_OWNER" ]]; then
             echo "::error::Only $RELEASE_OWNER may start or rerun the production Android release workflow."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::The production Android release workflow must be dispatched from refs/heads/main."
             exit 1
           fi
 
@@ -88,26 +93,8 @@ jobs:
           fi
 
           if [[ "$tag_commit" != "$main_commit" ]]; then
-            remediation_tag="v1.0.4"
-            remediation_tag_commit="0062d16329989cdcbba1edad4ff8945176126feb"
-
-            if [[ "$RELEASE_TAG" != "$remediation_tag" || "$tag_commit" != "$remediation_tag_commit" ]]; then
-              echo "::error::Tag $RELEASE_TAG must point to the exact current origin/main commit ($main_commit)."
-              exit 1
-            fi
-            if ! git merge-base --is-ancestor "$tag_commit" "$main_commit"; then
-              echo "::error::The protected $RELEASE_TAG tag commit must remain an ancestor of origin/main."
-              exit 1
-            fi
-
-            mapfile -t remediation_files < <(git diff --name-only "$tag_commit" "$main_commit")
-            if (( ${#remediation_files[@]} != 1 )) ||
-              [[ "${remediation_files[0]:-}" != ".github/workflows/android-apk.yml" ]]; then
-              echo "::error::The one-time $remediation_tag remediation permits exactly one main-only change: .github/workflows/android-apk.yml."
-              printf 'Observed main-only file: %s\n' "${remediation_files[@]:-<none>}"
-              exit 1
-            fi
-            echo "::notice::Using the one-time protected-tag remediation for $remediation_tag; the APK remains pinned to $tag_commit and origin/main is pinned to $main_commit."
+            echo "::error::Tag $RELEASE_TAG must point to the exact current origin/main commit ($main_commit)."
+            exit 1
           fi
 
           git checkout --detach "refs/tags/$RELEASE_TAG"
@@ -319,6 +306,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: android-release
+    permissions: {}
     env:
       RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
@@ -329,6 +317,10 @@ jobs:
 
           if [[ "$GITHUB_ACTOR" != "$RELEASE_OWNER" || "$GITHUB_TRIGGERING_ACTOR" != "$RELEASE_OWNER" ]]; then
             echo "::error::Only $RELEASE_OWNER may start or rerun the production Android signing job."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::The production Android signing job may run only from refs/heads/main."
             exit 1
           fi
 
@@ -445,6 +437,10 @@ jobs:
             echo "::error::The signed APK uses an Android Debug certificate. Publication is forbidden."
             exit 1
           fi
+          if ! grep -Fq 'Verified using v2 scheme (APK Signature Scheme v2): true' "$report"; then
+            echo "::error::The release APK must verify with APK Signature Scheme v2."
+            exit 1
+          fi
 
           mapfile -t signer_digests < <(sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p' "$report")
           if (( ${#signer_digests[@]} != 1 )); then
@@ -490,6 +486,7 @@ jobs:
       - sign
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: android-release
     permissions:
       contents: write
     env:
@@ -505,6 +502,10 @@ jobs:
 
           if [[ "$GITHUB_ACTOR" != "$RELEASE_OWNER" || "$GITHUB_TRIGGERING_ACTOR" != "$RELEASE_OWNER" ]]; then
             echo "::error::Only $RELEASE_OWNER may publish or rerun the production Android release workflow."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::The production Android publication job may run only from refs/heads/main."
             exit 1
           fi
 

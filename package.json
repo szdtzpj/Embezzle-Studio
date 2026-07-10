@@ -36,7 +36,8 @@
     "eslint-config-expo": "^57.0.0",
     "fake-indexeddb": "^6.2.4",
     "typescript": "~6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "yaml": "^2.9.0"
   },
   "scripts": {
     "start": "expo start",
