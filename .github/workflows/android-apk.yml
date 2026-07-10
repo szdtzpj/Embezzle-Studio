@@ -20,14 +20,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Validate and build unsigned APK
+  release_contract:
+    name: Validate release contract
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 5
+    permissions:
+      contents: write
     outputs:
       tag_commit: ${{ steps.release_contract.outputs.tag_commit }}
+      main_commit: ${{ steps.release_contract.outputs.main_commit }}
     env:
-      CI: 1
       RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
       - name: Require owner-triggered release
@@ -40,12 +42,13 @@ jobs:
             exit 1
           fi
 
-      - name: Checkout repository
+      - name: Checkout release metadata
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Validate release tag and checkout its commit
+      - name: Validate release tag and owner-authored draft
         id: release_contract
         env:
           GH_TOKEN: ${{ github.token }}
@@ -63,8 +66,9 @@ jobs:
             exit 1
           fi
 
-          if ! release_json="$(gh release view "$RELEASE_TAG" --json author,isDraft,isImmutable,isPrerelease,tagName 2>/dev/null)"; then
-            echo "::error::GitHub Release draft $RELEASE_TAG does not exist. Create an owner-authored draft before running this workflow."
+          if ! release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json author,isDraft,isImmutable,isPrerelease,tagName)"; then
+            echo "::error::Unable to read GitHub Release draft $RELEASE_TAG. Confirm that the owner-authored draft exists and that this isolated preflight job retains contents: write."
             exit 1
           fi
           if [[ "$(jq -r '.tagName' <<<"$release_json")" != "$RELEASE_TAG" ||
@@ -78,9 +82,32 @@ jobs:
 
           tag_commit="$(git rev-list -n 1 "refs/tags/$RELEASE_TAG")"
           main_commit="$(git rev-parse origin/main)"
-          if [[ -z "$tag_commit" || "$tag_commit" != "$main_commit" ]]; then
-            echo "::error::Tag $RELEASE_TAG must point to the exact current origin/main commit ($main_commit)."
+          if [[ ! "$tag_commit" =~ ^[0-9a-f]{40}$ || ! "$main_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unable to resolve the release tag and origin/main to full commit SHAs."
             exit 1
+          fi
+
+          if [[ "$tag_commit" != "$main_commit" ]]; then
+            remediation_tag="v1.0.4"
+            remediation_tag_commit="0062d16329989cdcbba1edad4ff8945176126feb"
+
+            if [[ "$RELEASE_TAG" != "$remediation_tag" || "$tag_commit" != "$remediation_tag_commit" ]]; then
+              echo "::error::Tag $RELEASE_TAG must point to the exact current origin/main commit ($main_commit)."
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$tag_commit" "$main_commit"; then
+              echo "::error::The protected $RELEASE_TAG tag commit must remain an ancestor of origin/main."
+              exit 1
+            fi
+
+            mapfile -t remediation_files < <(git diff --name-only "$tag_commit" "$main_commit")
+            if (( ${#remediation_files[@]} != 1 )) ||
+              [[ "${remediation_files[0]:-}" != ".github/workflows/android-apk.yml" ]]; then
+              echo "::error::The one-time $remediation_tag remediation permits exactly one main-only change: .github/workflows/android-apk.yml."
+              printf 'Observed main-only file: %s\n' "${remediation_files[@]:-<none>}"
+              exit 1
+            fi
+            echo "::notice::Using the one-time protected-tag remediation for $remediation_tag; the APK remains pinned to $tag_commit and origin/main is pinned to $main_commit."
           fi
 
           git checkout --detach "refs/tags/$RELEASE_TAG"
@@ -109,7 +136,7 @@ jobs:
             exit 1
           fi
 
-          stable_tags="$(git tag --merged origin/main | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V || true)"
+          stable_tags="$(git tag --merged "$main_commit" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V || true)"
           latest_stable_tag="$(tail -n 1 <<<"$stable_tags")"
           if [[ "$latest_stable_tag" != "$RELEASE_TAG" ]]; then
             echo "::error::$RELEASE_TAG must be the highest stable version tag reachable from origin/main (found $latest_stable_tag)."
@@ -125,6 +152,48 @@ jobs:
           fi
 
           echo "tag_commit=$tag_commit" >> "$GITHUB_OUTPUT"
+          echo "main_commit=$main_commit" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Validate and build unsigned APK
+    needs: release_contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      tag_commit: ${{ steps.validated_checkout.outputs.tag_commit }}
+      main_commit: ${{ steps.validated_checkout.outputs.main_commit }}
+    env:
+      CI: 1
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      EXPECTED_TAG_COMMIT: ${{ needs.release_contract.outputs.tag_commit }}
+      EXPECTED_MAIN_COMMIT: ${{ needs.release_contract.outputs.main_commit }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.release_contract.outputs.tag_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify validated release checkout
+        id: validated_checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$EXPECTED_TAG_COMMIT" =~ ^[0-9a-f]{40}$ ||
+                ! "$EXPECTED_MAIN_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The validated release tag/main commit outputs are missing or malformed."
+            exit 1
+          fi
+          actual_head="$(git rev-parse HEAD)"
+          if [[ "$actual_head" != "$EXPECTED_TAG_COMMIT" ]]; then
+            echo "::error::Checkout resolved to $actual_head instead of validated release commit $EXPECTED_TAG_COMMIT."
+            exit 1
+          fi
+
+          echo "tag_commit=$EXPECTED_TAG_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "main_commit=$EXPECTED_MAIN_COMMIT" >> "$GITHUB_OUTPUT"
 
       - name: Setup Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -427,6 +496,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ inputs.release_tag }}
       EXPECTED_TAG_COMMIT: ${{ needs.build.outputs.tag_commit }}
+      EXPECTED_MAIN_COMMIT: ${{ needs.build.outputs.main_commit }}
     steps:
       - name: Require owner-triggered publication
         shell: bash
@@ -467,14 +537,16 @@ jobs:
             exit 1
           fi
 
-          if [[ ! "$EXPECTED_TAG_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::The validated build tag commit output is missing or malformed."
+          if [[ ! "$EXPECTED_TAG_COMMIT" =~ ^[0-9a-f]{40}$ ||
+                ! "$EXPECTED_MAIN_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The validated build tag/main commit outputs are missing or malformed."
             exit 1
           fi
           remote_tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq '.sha')"
           remote_main_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq '.sha')"
-          if [[ "$remote_tag_commit" != "$EXPECTED_TAG_COMMIT" || "$remote_main_commit" != "$EXPECTED_TAG_COMMIT" ]]; then
-            echo "::error::Release refs changed after the build contract was validated. Expected tag and main at $EXPECTED_TAG_COMMIT; found tag=$remote_tag_commit main=$remote_main_commit."
+          if [[ "$remote_tag_commit" != "$EXPECTED_TAG_COMMIT" ||
+                "$remote_main_commit" != "$EXPECTED_MAIN_COMMIT" ]]; then
+            echo "::error::Release refs changed after the build contract was validated. Expected tag=$EXPECTED_TAG_COMMIT main=$EXPECTED_MAIN_COMMIT; found tag=$remote_tag_commit main=$remote_main_commit."
             exit 1
           fi
 
@@ -502,14 +574,16 @@ jobs:
 
           verify_remote_refs() {
             local remote_tag_commit remote_main_commit
-            if [[ ! "$EXPECTED_TAG_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "::error::The validated build tag commit output is missing or malformed."
+            if [[ ! "$EXPECTED_TAG_COMMIT" =~ ^[0-9a-f]{40}$ ||
+                  ! "$EXPECTED_MAIN_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::The validated build tag/main commit outputs are missing or malformed."
               return 1
             fi
             remote_tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq '.sha')"
             remote_main_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq '.sha')"
-            if [[ "$remote_tag_commit" != "$EXPECTED_TAG_COMMIT" || "$remote_main_commit" != "$EXPECTED_TAG_COMMIT" ]]; then
-              echo "::error::Release refs no longer match the validated build commit $EXPECTED_TAG_COMMIT; found tag=$remote_tag_commit main=$remote_main_commit."
+            if [[ "$remote_tag_commit" != "$EXPECTED_TAG_COMMIT" ||
+                  "$remote_main_commit" != "$EXPECTED_MAIN_COMMIT" ]]; then
+              echo "::error::Release refs no longer match the validated commits tag=$EXPECTED_TAG_COMMIT main=$EXPECTED_MAIN_COMMIT; found tag=$remote_tag_commit main=$remote_main_commit."
               return 1
             fi
           }
