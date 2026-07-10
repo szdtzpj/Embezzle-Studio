@@ -21,6 +21,9 @@ Thumbs.db
 .env.*
 !.env.example
 
+# Local live-provider credentials supplied for manual smoke tests.
+api_key.txt
+
 # Signing keys and certificates must never enter the repository.
 *.jks
 *.keystore

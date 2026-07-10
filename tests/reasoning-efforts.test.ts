@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ChatMessage, MediaAttachment, ProviderProfile, ReasoningEffort } from '../src/domain/types';
 import { createModelInfoFromId } from '../src/services/modelCapabilities';
-import { queryGenerationTask, sendOpenAiCompatibleChat } from '../src/services/openAiCompatible';
+import {
+  getModelParameterConstraint,
+  queryGenerationTask,
+  sendOpenAiCompatibleChat,
+} from '../src/services/openAiCompatible';
 import { getSupportedReasoningEfforts, normalizeReasoningEffort } from '../src/services/reasoningEfforts';
 
 const platform = vi.hoisted(() => ({ OS: 'android' }));
@@ -51,7 +55,8 @@ describe('documented reasoning effort matrices', () => {
     [ark, 'deepseek-v4-pro-260425', ['default', 'off', 'high', 'max']],
     [ark, 'deepseek-v3-2-251201', ['default', 'off']],
     [ark, 'glm-4-7-251222', ['default', 'off']],
-    [ark, 'doubao-seed-2-1-pro-260628', ['default', 'off', 'low', 'medium', 'high']],
+    [ark, 'doubao-seed-2-1-pro-260628', ['default', 'off', 'minimal', 'low', 'medium', 'high']],
+    [customArk, 'glm-5-2-260617', ['default', 'off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']],
     [openai, 'gpt-5', ['default', 'minimal', 'low', 'medium', 'high']],
     [openai, 'gpt-5.1', ['default', 'none', 'low', 'medium', 'high']],
     [openai, 'gpt-5.2', ['default', 'none', 'low', 'medium', 'high', 'xhigh']],
@@ -140,6 +145,13 @@ describe('reasoning and sampling wire parameters', () => {
     expect(standard.presence_penalty).toBe(1);
   });
 
+  it('does not expose undocumented penalty controls for official OpenAI reasoning models', () => {
+    expect(getModelParameterConstraint(openai, 'gpt-5.1', 'temperature').supported).toBe(true);
+    expect(getModelParameterConstraint(openai, 'gpt-5.1', 'topP').supported).toBe(true);
+    expect(getModelParameterConstraint(openai, 'gpt-5.1', 'presencePenalty').supported).toBe(false);
+    expect(getModelParameterConstraint(openai, 'gpt-5.1', 'frequencyPenalty').supported).toBe(false);
+  });
+
   it('preserves GPT-5.6 max reasoning effort on the official OpenAI wire', async () => {
     expect(await requestBody(openai, 'gpt-5.6-sol', 'max')).toMatchObject({
       reasoning_effort: 'max',
@@ -189,5 +201,37 @@ describe('Ark video task protocol', () => {
       taskId: 'cgt-expired',
       kind: 'video',
     })).rejects.toThrow(/已过期/);
+  });
+
+  it('allows video references for a custom profile on the exact official Ark host', async () => {
+    const reference: MediaAttachment = {
+      id: 'ref-video',
+      kind: 'video',
+      uri: 'https://videos.example.com/reference.mp4',
+      name: 'reference.mp4',
+      mimeType: 'video/mp4',
+    };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: 'cgt-video-ref',
+      status: 'succeeded',
+      content: { video_url: 'https://videos.example.com/generated.mp4' },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await sendOpenAiCompatibleChat({
+      provider: customArk,
+      modelId: 'doubao-seedance-2-0-260128',
+      model: createModelInfoFromId(customArk, 'doubao-seedance-2-0-260128', 'manual'),
+      messages: [{ ...message, attachments: [reference] }],
+      reasoningEffort: 'default',
+    });
+
+    const [requestUrl, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(requestUrl).toBe('https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks');
+    expect(body.content).toContainEqual({
+      type: 'video_url',
+      video_url: { url: reference.uri },
+    });
   });
 });

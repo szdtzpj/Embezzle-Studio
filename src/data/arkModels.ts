@@ -3,7 +3,6 @@ import type { Capability, ModelInfo, ModelTask, ProviderProfile } from '../domai
 const arkMultimodalReasoning: Capability[] = [
   'text',
   'image-input',
-  'video-input',
   'tool-calling',
   'reasoning',
   'streaming',
@@ -11,7 +10,9 @@ const arkMultimodalReasoning: Capability[] = [
 
 const arkTextReasoning: Capability[] = ['text', 'tool-calling', 'reasoning', 'streaming'];
 const arkVideoGeneration: Capability[] = ['text', 'image-input', 'video-input', 'video-generation'];
-const arkImageGeneration: Capability[] = ['text', 'image-input', 'image-generation'];
+// The current image adapter is text-to-image only; reference-image editing is
+// intentionally not advertised until its provider-specific wire path exists.
+const arkImageGeneration: Capability[] = ['text', 'image-generation'];
 const arkMultimodalEmbedding: Capability[] = ['text', 'image-input', 'video-input', 'embedding'];
 
 interface ArkPresetOptions {
@@ -167,15 +168,19 @@ export function isArkStaticDoubaoModelId(modelId: string): boolean {
   return arkLegacyStaticAliasIds.has(modelId.trim().toLowerCase());
 }
 
+export function isVolcengineArkDataPlaneHost(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase();
+    return host === 'ark.cn-beijing.volces.com' || host === 'ark.cn-beijing.volcengineapi.com';
+  } catch {
+    return false;
+  }
+}
+
 export function isVolcengineArkProvider(provider: ProviderProfile): boolean {
   if (provider.kind === 'volcengine-ark') {
     return true;
   }
 
-  try {
-    const host = new URL(provider.baseUrl).hostname.toLowerCase();
-    return host === 'ark.cn-beijing.volces.com' || host === 'ark.cn-beijing.volcengineapi.com';
-  } catch {
-    return false;
-  }
+  return isVolcengineArkDataPlaneHost(provider.baseUrl);
 }

@@ -1,4 +1,5 @@
 import type { ModelInfo, ProviderProfile, ReasoningEffort } from '../domain/types';
+import { isVolcengineArkProvider } from '../data/arkModels';
 import { getBailianThinkingProfile, inferModelTask, isReasoningModel } from './modelCapabilities';
 
 export interface ReasoningEffortOption {
@@ -106,7 +107,7 @@ function isArkThinkingModel(text: string): boolean {
 }
 
 function canDisableThinking(provider: ProviderProfile, model: ModelInfo, text: string): boolean {
-  if (provider.kind === 'volcengine-ark' || isArkThinkingModel(text)) {
+  if (isVolcengineArkProvider(provider) || isArkThinkingModel(text)) {
     return true;
   }
 
@@ -148,17 +149,23 @@ export function getSupportedReasoningEfforts(
         return ['default', 'off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
       }
 
+      if (profile.reasoningEffortFamily === 'stepfun') {
+        return ['default', 'off', 'low', 'medium', 'high'];
+      }
+
       if (profile.supportsThinkingBudget) {
         return ['default', 'off', 'low', 'medium', 'high', 'max'];
       }
 
       return profile.defaultEnabled === false
         ? ['default', 'off', 'high']
-        : ['default', 'off'];
+        : profile.defaultEnabled === true
+          ? ['default', 'off']
+          : ['default', 'off', 'high'];
     }
   }
 
-  if (provider.kind === 'volcengine-ark') {
+  if (isVolcengineArkProvider(provider)) {
     if (text.includes('glm-5-2')) {
       return ['default', 'off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
     }
@@ -173,7 +180,7 @@ export function getSupportedReasoningEfforts(
       text.includes('doubao-seed-evolving') ||
       text.includes('doubao-seed-character-260628')
     ) {
-      return ['default', 'off', 'low', 'medium', 'high'];
+      return ['default', 'off', 'minimal', 'low', 'medium', 'high'];
     }
     return isReasoningModel(model) ? ['default', 'off'] : [];
   }
@@ -227,10 +234,32 @@ export function getReasoningEffortOptions(
   provider?: ProviderProfile | null,
   model?: ModelInfo | null
 ): ReasoningEffortOption[] {
-  return getSupportedReasoningEfforts(provider, model).map((effort) => ({
-    key: effort,
-    label: reasoningEffortLabels[effort],
-  }));
+  const efforts = getSupportedReasoningEfforts(provider, model);
+  const profile = provider?.kind === 'bailian-compatible' && model
+    ? getBailianThinkingProfile(model.id)
+    : undefined;
+  const budgetLabels: Partial<Record<ReasoningEffort, string>> = {
+    low: '1K 思考上限',
+    medium: '4K 思考上限',
+    high: '8K 思考上限',
+    max: '16K 思考上限',
+  };
+
+  return efforts.map((effort) => {
+    let label = reasoningEffortLabels[effort];
+    if (profile?.supportsThinkingBudget && budgetLabels[effort]) {
+      label = budgetLabels[effort]!;
+    } else if (
+      profile?.mode === 'mixed' &&
+      profile.defaultEnabled !== true &&
+      !profile.reasoningEffortFamily &&
+      effort === 'high'
+    ) {
+      label = '开启思考';
+    }
+
+    return { key: effort, label };
+  });
 }
 
 export function normalizeReasoningEffort(

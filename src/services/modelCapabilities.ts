@@ -1,4 +1,5 @@
 import type { Capability, ModelInfo, ModelTask, ProviderProfile, ReasoningEffort } from '../domain/types';
+import { isVolcengineArkProvider } from '../data/arkModels';
 
 export type ModelCapabilityFilter =
   | 'all'
@@ -17,12 +18,25 @@ export interface RemoteModelMetadata {
   modalities?: {
     input?: unknown;
     output?: unknown;
+    input_modalities?: unknown;
+    output_modalities?: unknown;
   };
   architecture?: {
     input_modalities?: unknown;
     output_modalities?: unknown;
   };
   supported_parameters?: unknown;
+  features?: {
+    tools?: {
+      function_calling?: unknown;
+    };
+  };
+  task_type?: unknown;
+  domain?: unknown;
+  status?: unknown;
+  token_limits?: {
+    context_window?: unknown;
+  };
   attachment?: unknown;
   reasoning?: unknown;
   reasoning_effort?: unknown;
@@ -38,13 +52,16 @@ export interface RemoteModelMetadata {
 
 export type BailianThinkingMode = 'none' | 'mixed' | 'thinking-only';
 
-export type BailianReasoningEffortFamily = 'deepseek-v4' | 'glm-5.2' | 'glm-5.1-or-5';
+export type BailianReasoningEffortFamily = 'deepseek-v4' | 'glm-5.2' | 'glm-5.1-or-5' | 'stepfun';
+
+export type BailianThinkingControl = 'enable-thinking' | 'thinking-object';
 
 export interface BailianThinkingProfile {
   mode: BailianThinkingMode;
   defaultEnabled?: boolean;
   supportsThinkingBudget: boolean;
   reasoningEffortFamily?: BailianReasoningEffortFamily;
+  control?: BailianThinkingControl;
 }
 
 type CapabilitySource = ModelInfo['source'];
@@ -245,7 +262,52 @@ function qwenSnapshotAtOrAfter(modelId: string, family: string, minimumDate: str
 
 export function getBailianThinkingProfile(modelId: string): BailianThinkingProfile {
   const id = normalizedModelId(modelId);
+  const namespaced = modelId.includes('/');
   const none: BailianThinkingProfile = { mode: 'none', supportsThinkingBudget: false };
+
+  if (
+    containsModelFamily(id, 'kimi-k2-7-code') ||
+    containsModelFamily(id, 'kimi-k2-thinking')
+  ) {
+    return { mode: 'thinking-only', defaultEnabled: true, supportsThinkingBudget: false };
+  }
+
+  if (containsModelFamily(id, 'kimi-k2-6') || containsModelFamily(id, 'kimi-k2-5')) {
+    return {
+      mode: 'mixed',
+      // The Moonshot-supplied page contradicts itself about the default.
+      // Undefined keeps "Default" wire-neutral while still offering explicit
+      // on/off controls; Alibaba-hosted aliases consistently default to off.
+      defaultEnabled: namespaced ? undefined : false,
+      supportsThinkingBudget: !namespaced,
+    };
+  }
+
+  if (containsModelFamily(id, 'minimax-m3') && namespaced) {
+    return {
+      mode: 'mixed',
+      defaultEnabled: true,
+      supportsThinkingBudget: false,
+      control: 'thinking-object',
+    };
+  }
+
+  if (
+    containsModelFamily(id, 'minimax-m2-7') ||
+    containsModelFamily(id, 'minimax-m2-5') ||
+    containsModelFamily(id, 'minimax-m2-1')
+  ) {
+    return { mode: 'thinking-only', defaultEnabled: true, supportsThinkingBudget: false };
+  }
+
+  if (containsModelFamily(id, 'step-3-7-flash')) {
+    return {
+      mode: 'mixed',
+      defaultEnabled: false,
+      supportsThinkingBudget: false,
+      reasoningEffortFamily: 'stepfun',
+    };
+  }
 
   if (containsModelFamily(id, 'qwq') || containsModelFamily(id, 'qvq')) {
     return { mode: 'thinking-only', defaultEnabled: true, supportsThinkingBudget: false };
@@ -527,28 +589,138 @@ function addExternalCapability(caps: Set<Capability>, raw: string): void {
   }
 }
 
-function addCapabilitiesFromMetadata(caps: Set<Capability>, metadata?: RemoteModelMetadata): void {
+const arkEmbeddingTaskTypes = new Set(['textembedding', 'imageembedding']);
+const arkImageGenerationTaskTypes = new Set(['texttoimage', 'imagetoimage']);
+const arkVideoGenerationTaskTypes = new Set([
+  'imagetoaudiovideo',
+  'imagetovideo',
+  'multimodaltovideo',
+  'texttoaudiovideo',
+  'texttovideo',
+  'videoediting',
+  'videoextension',
+]);
+const arkChatTaskTypes = new Set(['textgeneration', 'visualquestionanswering']);
+const arkUnsupportedTaskTypes = new Set(['imageto3d', 'speechtotext']);
+
+type ArkMetadataTaskResolution = ModelTask | 'unsupported' | 'conflict' | undefined;
+
+function arkMetadataTask(metadata?: RemoteModelMetadata): ArkMetadataTaskResolution {
+  if (!metadata) {
+    return undefined;
+  }
+
+  const taskTypes = stringArray(metadata.task_type).map((value) => value.replace(/[\s_-]+/g, ''));
+  const outputModalities = [
+    ...stringArray(metadata.modalities?.output),
+    ...stringArray(metadata.modalities?.output_modalities),
+    ...stringArray(metadata.architecture?.output_modalities),
+  ];
+  const domain = typeof metadata.domain === 'string'
+    ? metadata.domain.trim().toLowerCase().replace(/[\s_-]+/g, '')
+    : '';
+
+  if (
+    domain === '3dgeneration' ||
+    outputModalities.includes('three_d') ||
+    outputModalities.includes('audio') ||
+    taskTypes.includes('imageto3d')
+  ) {
+    return 'unsupported';
+  }
+
+  const tasks = new Set<ModelTask>();
+  if (taskTypes.some((value) => arkEmbeddingTaskTypes.has(value))) tasks.add('embedding');
+  if (taskTypes.some((value) => arkImageGenerationTaskTypes.has(value))) tasks.add('image-generation');
+  if (taskTypes.some((value) => arkVideoGenerationTaskTypes.has(value))) tasks.add('video-generation');
+  if (taskTypes.some((value) => arkChatTaskTypes.has(value))) tasks.add('chat');
+  if (
+    tasks.size === 0 &&
+    taskTypes.some((value) => arkUnsupportedTaskTypes.has(value))
+  ) {
+    return 'unsupported';
+  }
+
+  if (domain === 'embedding') tasks.add('embedding');
+  if (domain === 'imagegeneration') tasks.add('image-generation');
+  if (domain === 'videogeneration') tasks.add('video-generation');
+  if (domain === 'llm' || domain === 'vlm') tasks.add('chat');
+  if (domain === 'router') {
+    const textOnlyOutput = outputModalities.length === 0 || outputModalities.every((value) => value === 'text');
+    if (taskTypes.some((value) => arkChatTaskTypes.has(value)) && textOnlyOutput) {
+      tasks.add('chat');
+    } else {
+      return 'unsupported';
+    }
+  }
+
+  if (outputModalities.includes('image')) tasks.add('image-generation');
+  if (outputModalities.includes('video')) tasks.add('video-generation');
+  if (outputModalities.includes('vector')) tasks.add('embedding');
+
+  if (tasks.size > 1) {
+    return 'conflict';
+  }
+  if (tasks.size === 0) {
+    const hasStructuredTaskMetadata = Boolean(domain || taskTypes.length || outputModalities.length);
+    return hasStructuredTaskMetadata ? 'unsupported' : undefined;
+  }
+
+  const [task] = tasks;
+  if (
+    task === 'image-generation' &&
+    taskTypes.includes('imagetoimage') &&
+    !taskTypes.includes('texttoimage')
+  ) {
+    return 'unsupported';
+  }
+  return task;
+}
+
+function addCapabilitiesFromMetadata(
+  caps: Set<Capability>,
+  provider: ProviderProfile,
+  metadata?: RemoteModelMetadata
+): void {
   if (!metadata) {
     return;
   }
 
   const inputModalities = [
     ...stringArray(metadata.modalities?.input),
+    ...stringArray(metadata.modalities?.input_modalities),
     ...stringArray(metadata.architecture?.input_modalities),
   ];
   const outputModalities = [
     ...stringArray(metadata.modalities?.output),
+    ...stringArray(metadata.modalities?.output_modalities),
     ...stringArray(metadata.architecture?.output_modalities),
   ];
   const supportedParameters = stringArray(metadata.supported_parameters);
+  const taskTypes = stringArray(metadata.task_type);
 
-  if (inputModalities.includes('image')) add(caps, 'image-input');
+  const ark = isVolcengineArkProvider(provider);
+  if (inputModalities.includes('image') || (
+    ark && inputModalities.some((value) => ['first_frame', 'first_last_frame', 'reference'].includes(value))
+  )) {
+    add(caps, 'image-input');
+  }
   if (inputModalities.includes('video')) add(caps, 'video-input');
   if (inputModalities.includes('file')) add(caps, 'file-input');
   if (outputModalities.includes('image')) add(caps, 'image-generation');
   if (outputModalities.includes('video')) add(caps, 'video-generation');
   if (outputModalities.includes('vector')) add(caps, 'embedding');
+  if (ark && taskTypes.some((item) => arkEmbeddingTaskTypes.has(item.replace(/[\s_-]+/g, '')))) {
+    add(caps, 'embedding');
+  }
+  if (ark && taskTypes.some((item) => arkImageGenerationTaskTypes.has(item.replace(/[\s_-]+/g, '')))) {
+    add(caps, 'image-generation');
+  }
+  if (ark && taskTypes.some((item) => arkVideoGenerationTaskTypes.has(item.replace(/[\s_-]+/g, '')))) {
+    add(caps, 'video-generation');
+  }
   if (supportedParameters.some((item) => item.includes('tool') || item.includes('function'))) add(caps, 'tool-calling');
+  if (metadata.features?.tools?.function_calling === true) add(caps, 'tool-calling');
   if (supportedParameters.some((item) => item.includes('reasoning') || item.includes('thinking'))) add(caps, 'reasoning');
   if (metadata.attachment === true) add(caps, 'file-input');
   if (metadata.tool_call === true) add(caps, 'tool-calling');
@@ -621,11 +793,16 @@ function addCapabilitiesFromModelId(caps: Set<Capability>, provider: ProviderPro
   if (/^(?:gpt-4o|gpt-5|o3|o4)(?:\b|-)/.test(id)) add(caps, 'web-search');
   if (/^claude-(?:opus-4|sonnet-4|haiku-4|3-5-haiku|3-5-sonnet|3-7-sonnet)\b/.test(id)) add(caps, 'web-search');
 
-  if (provider.kind === 'volcengine-ark' && includesAny(text, arkThinkingKeywords)) {
+  if (isVolcengineArkProvider(provider) && includesAny(text, arkThinkingKeywords)) {
     add(caps, 'reasoning');
   }
 
-  if (provider.kind === 'volcengine-ark' && id.startsWith('doubao-seed') && !id.includes('code')) {
+  if (
+    isVolcengineArkProvider(provider) &&
+    !isGenerationOrVector &&
+    id.startsWith('doubao-seed') &&
+    !id.includes('code')
+  ) {
     add(caps, 'image-input');
     add(caps, 'video-input');
     add(caps, 'tool-calling');
@@ -643,14 +820,19 @@ export function inferModelCapabilities(
   add(caps, 'text');
   if (provider.capabilities.includes('streaming')) add(caps, 'streaming');
 
-  addCapabilitiesFromMetadata(caps, metadata);
+  addCapabilitiesFromMetadata(caps, provider, metadata);
   addCapabilitiesFromModelId(caps, provider, modelId, metadata?.name);
 
   if (caps.has('embedding') || caps.has('rerank')) {
+    const explicitInputModalities = [
+      ...stringArray(metadata?.modalities?.input),
+      ...stringArray(metadata?.modalities?.input_modalities),
+      ...stringArray(metadata?.architecture?.input_modalities),
+    ];
     caps.delete('tool-calling');
     caps.delete('web-search');
-    caps.delete('image-input');
-    caps.delete('video-input');
+    if (!explicitInputModalities.includes('image')) caps.delete('image-input');
+    if (!explicitInputModalities.includes('video')) caps.delete('video-input');
     caps.delete('image-generation');
     caps.delete('video-generation');
   }
@@ -674,6 +856,45 @@ export function inferModelTask(model: Pick<ModelInfo, 'id' | 'name' | 'task' | '
   return 'chat';
 }
 
+function sanitizeArkModelForImplementedAdapters(model: ModelInfo): ModelInfo {
+  const task = model.task ?? inferModelTask(model);
+  const capabilities = new Set(model.capabilities);
+
+  if (task === 'chat') {
+    capabilities.delete('image-generation');
+    capabilities.delete('video-generation');
+    capabilities.delete('embedding');
+    capabilities.delete('rerank');
+    // Ark video understanding requires a dedicated upload/input adapter that
+    // this Chat Completions client does not implement yet.
+    capabilities.delete('video-input');
+  } else {
+    capabilities.delete('tool-calling');
+    capabilities.delete('reasoning');
+    capabilities.delete('web-search');
+    capabilities.delete('streaming');
+    capabilities.delete('image-generation');
+    capabilities.delete('video-generation');
+    capabilities.delete('embedding');
+    capabilities.delete('rerank');
+
+    if (task === 'image-generation') {
+      capabilities.add('image-generation');
+      // The current image adapter is text-to-image only.
+      capabilities.delete('image-input');
+      capabilities.delete('video-input');
+    } else if (task === 'video-generation') {
+      capabilities.add('video-generation');
+    } else if (task === 'embedding') {
+      capabilities.add('embedding');
+    } else if (task === 'rerank') {
+      capabilities.add('rerank');
+    }
+  }
+
+  return { ...model, task, capabilities: sortedCapabilities(capabilities) };
+}
+
 export function createModelInfoFromId(
   provider: ProviderProfile,
   modelId: string,
@@ -682,16 +903,24 @@ export function createModelInfoFromId(
 ): ModelInfo {
   const capabilities = inferModelCapabilities(provider, modelId, metadata, source);
   const supportedReasoningEfforts = supportedReasoningEffortsFromMetadata(metadata);
+  const contextWindow = metadata?.token_limits?.context_window;
+  const inferredTask = inferModelTask({ id: modelId, name: metadata?.name ?? modelId, capabilities });
+  const resolvedArkTask = isVolcengineArkProvider(provider) ? arkMetadataTask(metadata) : undefined;
   const model: ModelInfo = {
     id: modelId,
     name: metadata?.name ?? modelId,
     capabilities,
     ...(supportedReasoningEfforts ? { supportedReasoningEfforts } : {}),
-    task: inferModelTask({ id: modelId, name: metadata?.name ?? modelId, capabilities }),
+    ...(typeof contextWindow === 'number' && Number.isSafeInteger(contextWindow) && contextWindow > 0
+      ? { contextWindow }
+      : {}),
+    task: resolvedArkTask && resolvedArkTask !== 'unsupported' && resolvedArkTask !== 'conflict'
+      ? resolvedArkTask
+      : inferredTask,
     source,
   };
 
-  return model;
+  return isVolcengineArkProvider(provider) ? sanitizeArkModelForImplementedAdapters(model) : model;
 }
 
 export function enrichDiscoveredModel(provider: ProviderProfile, metadata: RemoteModelMetadata): ModelInfo | null {
@@ -699,7 +928,29 @@ export function enrichDiscoveredModel(provider: ProviderProfile, metadata: Remot
     return null;
   }
 
-  return createModelInfoFromId(provider, metadata.id, 'remote', metadata);
+  const ark = isVolcengineArkProvider(provider);
+  if (
+    ark &&
+    typeof metadata.status === 'string' &&
+    metadata.status.trim().toLowerCase() === 'shutdown'
+  ) {
+    return null;
+  }
+
+  const resolvedArkTask = ark ? arkMetadataTask(metadata) : undefined;
+  if (resolvedArkTask === 'unsupported' || resolvedArkTask === 'conflict') {
+    return null;
+  }
+
+  const model = createModelInfoFromId(provider, metadata.id, 'remote', metadata);
+  if (
+    ark &&
+    typeof metadata.status === 'string' &&
+    metadata.status.trim().toLowerCase() === 'retiring'
+  ) {
+    model.name = `${model.name || model.id}（即将下线）`;
+  }
+  return model;
 }
 
 export function isVisionModel(model?: Pick<ModelInfo, 'capabilities'> | null): boolean {
