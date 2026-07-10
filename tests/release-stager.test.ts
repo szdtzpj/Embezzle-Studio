@@ -54,11 +54,26 @@ function binaryResponse(value: Uint8Array | string, status = 200, headers: Recor
   });
 }
 
-function releaseAsset(id: number, name: string) {
+function trustedRelease(value: Record<string, unknown>) {
+  return {
+    immutable: true,
+    draft: false,
+    prerelease: false,
+    author: { login: 'szdtzpj' },
+    ...value,
+  };
+}
+
+function releaseAsset(id: number, name: string, value: Uint8Array | string = '') {
+  const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
   return {
     id,
     name,
     url: `https://api.github.com/repos/${repository}/releases/assets/${id}`,
+    state: 'uploaded',
+    size: bytes.byteLength,
+    digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+    uploader: { login: 'github-actions[bot]' },
   };
 }
 
@@ -75,17 +90,18 @@ describe('stageReleaseForPages', () => {
     const apkName = 'Embezzle-Studio-v1.0.5-release.apk';
     const apkBytes = new TextEncoder().encode('verified apk bytes');
     const sha256 = createHash('sha256').update(apkBytes).digest('hex');
-    const release = {
+    const checksumText = `${sha256}\n`;
+    const release = trustedRelease({
       tag_name: 'v1.0.5',
       name: 'Stable <img src=x onerror=alert(1)> & "safe"',
       body: '<script>alert("release notes")</script>\nUse A & B.',
       published_at: '2026-07-10T08:00:00Z',
       assets: [
         releaseAsset(100, 'decoy.apk'),
-        releaseAsset(101, apkName),
-        releaseAsset(102, `${apkName}.sha256`),
+        releaseAsset(101, apkName, apkBytes),
+        releaseAsset(102, `${apkName}.sha256`, checksumText),
       ],
-    };
+    });
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.endsWith('/releases/latest')) {
@@ -95,7 +111,7 @@ describe('stageReleaseForPages', () => {
         return binaryResponse(apkBytes);
       }
       if (url.endsWith('/assets/102')) {
-        return binaryResponse(`${sha256}\n`);
+        return binaryResponse(checksumText);
       }
       return new Response(null, { status: 404 });
     });
@@ -134,8 +150,9 @@ describe('stageReleaseForPages', () => {
     expect(html).toContain(`<code>${sha256}</code>`);
     expect(html).toContain(`href="${publicBaseUrl}/downloads/Embezzle-Studio-v1.0.5-release.apk"`);
     expect(html).toContain('Checksum-matched Android release');
+    expect(html).toContain('GitHub Immutable Release');
     expect(html).toContain('下载已校验摘要的 APK');
-    expect(html).toContain('不等同于生产签名验证');
+    expect(html).toContain('仍不等同于生产签名验证');
     expect(html).toContain('apksigner');
     expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
@@ -147,18 +164,22 @@ describe('stageReleaseForPages', () => {
     const apkBytes = new TextEncoder().encode('real apk');
     const actualSha256 = createHash('sha256').update(apkBytes).digest('hex');
     const wrongSha256 = '0'.repeat(64);
+    const checksumText = `${actualSha256}  another.apk\n${wrongSha256}  ${apkName}\n`;
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.endsWith('/releases/latest')) {
-        return jsonResponse({
+        return jsonResponse(trustedRelease({
           tag_name: 'v1.0.5',
-          assets: [releaseAsset(201, apkName), releaseAsset(202, 'SHA256SUMS')],
-        });
+          assets: [
+            releaseAsset(201, apkName, apkBytes),
+            releaseAsset(202, 'SHA256SUMS', checksumText),
+          ],
+        }));
       }
       if (url.endsWith('/assets/201')) {
         return binaryResponse(apkBytes);
       }
-      return binaryResponse(`${actualSha256}  another.apk\n${wrongSha256}  ${apkName}\n`);
+      return binaryResponse(checksumText);
     });
 
     await expect(stageReleaseForPages({
@@ -201,6 +222,35 @@ describe('stageReleaseForPages', () => {
   });
 
   it.each([
+    ['a mutable release', { immutable: false }],
+    ['a release from a different author', { author: { login: 'attacker' } }],
+    ['a release without an explicit draft state', { draft: undefined }],
+    ['a release without an explicit prerelease state', { prerelease: undefined }],
+  ])('keeps the public manifest fail-closed for %s', async (_label, override) => {
+    const outputDir = await createOutputDirectory();
+    await seedStaleRelease(outputDir);
+    const fetchImpl = vi.fn(async () => jsonResponse(trustedRelease({
+      tag_name: 'v1.0.5',
+      name: 'Untrusted release',
+      ...override,
+      assets: [],
+    })));
+
+    const manifest = await stageReleaseForPages({
+      outputDir,
+      repository,
+      publicBaseUrl,
+      fetchImpl,
+    });
+
+    expect(manifest).toMatchObject({ version: '1.0.5', releaseUrl: publicBaseUrl, apk: null });
+    expect(manifest.releaseNotes).toMatch(/Immutable Release/);
+    expect(await exists(path.join(outputDir, 'release.html'))).toBe(false);
+    expect(await exists(path.join(outputDir, 'downloads'))).toBe(false);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
     ['a missing checksum asset', undefined],
     ['an untrusted APK asset API URL', 'https://attacker.example/app.apk'],
   ])('fails closed for %s without downloading any asset', async (_label, unsafeApkUrl) => {
@@ -214,12 +264,12 @@ describe('stageReleaseForPages', () => {
     const assets = unsafeApkUrl
       ? [apkAsset, releaseAsset(302, `${apkName}.sha256`)]
       : [apkAsset];
-    const fetchImpl = vi.fn(async () => jsonResponse({
+    const fetchImpl = vi.fn(async () => jsonResponse(trustedRelease({
       tag_name: 'v1.0.5',
       name: 'Stable',
       body: 'Untrusted asset metadata must not be published.',
       assets,
-    }));
+    })));
 
     const manifest = await stageReleaseForPages({
       outputDir,
@@ -238,22 +288,101 @@ describe('stageReleaseForPages', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ['an APK from a non-Actions uploader', 'apk', { uploader: { login: 'attacker' } }],
+    ['an APK without a GitHub digest', 'apk', { digest: null }],
+    ['a checksum from a non-Actions uploader', 'checksum', { uploader: { login: 'attacker' } }],
+    ['a checksum outside the uploaded state', 'checksum', { state: 'new' }],
+    ['a checksum without a GitHub digest', 'checksum', { digest: null }],
+  ])('fails closed for %s', async (_label, target, override) => {
+    const outputDir = await createOutputDirectory();
+    await seedStaleRelease(outputDir);
+    const apkName = 'Embezzle-Studio-v1.0.5-release.apk';
+    const apkAsset = releaseAsset(351, apkName);
+    const checksumAsset = releaseAsset(352, `${apkName}.sha256`);
+    Object.assign(target === 'apk' ? apkAsset : checksumAsset, override);
+    const fetchImpl = vi.fn(async () => jsonResponse(trustedRelease({
+      tag_name: 'v1.0.5',
+      assets: [apkAsset, checksumAsset],
+    })));
+
+    const manifest = await stageReleaseForPages({
+      outputDir,
+      repository,
+      publicBaseUrl,
+      fetchImpl,
+    });
+
+    expect(manifest).toMatchObject({ version: '1.0.5', releaseUrl: publicBaseUrl, apk: null });
+    expect(await exists(path.join(outputDir, 'release.html'))).toBe(false);
+    expect(await exists(path.join(outputDir, 'downloads'))).toBe(false);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['checksum', 361, /checksum bytes do not match/i],
+    ['APK', 362, /APK bytes do not match/i],
+  ])('rejects %s bytes that disagree with the GitHub asset digest', async (target, badAssetId, expectedError) => {
+    const outputDir = await createOutputDirectory();
+    await seedStaleRelease(outputDir);
+    const apkName = 'Embezzle-Studio-v1.0.5-release.apk';
+    const apkBytes = new TextEncoder().encode('verified APK body');
+    const apkSha256 = createHash('sha256').update(apkBytes).digest('hex');
+    const checksumText = `${apkSha256}  ${apkName}\n`;
+    const apkAsset = releaseAsset(362, apkName, apkBytes);
+    const checksumAsset = releaseAsset(361, `${apkName}.sha256`, checksumText);
+    const badAsset = target === 'APK' ? apkAsset : checksumAsset;
+    badAsset.digest = `sha256:${'0'.repeat(64)}`;
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/releases/latest')) {
+        return jsonResponse(trustedRelease({
+          tag_name: 'v1.0.5',
+          assets: [apkAsset, checksumAsset],
+        }));
+      }
+      if (url.endsWith('/assets/361')) {
+        return binaryResponse(checksumText);
+      }
+      if (url.endsWith('/assets/362')) {
+        return binaryResponse(apkBytes);
+      }
+      return new Response(null, { status: 404 });
+    });
+
+    await expect(stageReleaseForPages({
+      outputDir,
+      repository,
+      publicBaseUrl,
+      fetchImpl,
+    })).rejects.toThrow(expectedError);
+
+    expect(badAsset.id).toBe(badAssetId);
+    expect(await exists(path.join(outputDir, 'release.html'))).toBe(false);
+    expect(await exists(path.join(outputDir, 'release-manifest.json'))).toBe(false);
+    expect(await exists(path.join(outputDir, 'downloads'))).toBe(false);
+  });
+
   it('rejects an APK whose Content-Length exceeds the configured bound before reading it', async () => {
     const outputDir = await createOutputDirectory();
     await seedStaleRelease(outputDir);
     const apkName = 'Embezzle-Studio-v1.0.5-release.apk';
     const apkBytes = new TextEncoder().encode('12345678');
     const sha256 = createHash('sha256').update(apkBytes).digest('hex');
+    const checksumText = sha256;
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.endsWith('/releases/latest')) {
-        return jsonResponse({
+        return jsonResponse(trustedRelease({
           tag_name: 'v1.0.5',
-          assets: [releaseAsset(401, apkName), releaseAsset(402, `${apkName}.sha256`)],
-        });
+          assets: [
+            releaseAsset(401, apkName, apkBytes),
+            releaseAsset(402, `${apkName}.sha256`, checksumText),
+          ],
+        }));
       }
       if (url.endsWith('/assets/402')) {
-        return binaryResponse(sha256);
+        return binaryResponse(checksumText);
       }
       return binaryResponse(apkBytes, 200, { 'Content-Length': '9' });
     });
@@ -277,10 +406,10 @@ describe('stageReleaseForPages', () => {
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.endsWith('/releases/latest')) {
-        return jsonResponse({
+        return jsonResponse(trustedRelease({
           tag_name: 'v1.0.5',
           assets: [releaseAsset(501, apkName), releaseAsset(502, `${apkName}.sha256`)],
-        });
+        }));
       }
       return binaryResponse(`${'a'.repeat(64)}\n`);
     });

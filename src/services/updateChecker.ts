@@ -217,6 +217,10 @@ export async function checkForAppUpdate(): Promise<AppUpdateInfo> {
   }
 
   const comparison = compareVersions(latestVersion, appInfo.version);
+  const installAsset = parseInstallAsset(manifest);
+  const hasNewerVersion = Number.isNaN(comparison)
+    ? latestVersion !== normalizeVersion(appInfo.version)
+    : comparison > 0;
   return {
     currentVersion: appInfo.version,
     latestVersion,
@@ -224,9 +228,7 @@ export async function checkForAppUpdate(): Promise<AppUpdateInfo> {
     releaseUrl,
     releaseNotes: manifest.releaseNotes,
     publishedAt: manifest.publishedAt,
-    updateAvailable: Number.isNaN(comparison)
-      ? latestVersion !== normalizeVersion(appInfo.version)
-      : comparison > 0,
-    installAsset: parseInstallAsset(manifest),
+    updateAvailable: Boolean(installAsset) && hasNewerVersion,
+    installAsset,
   };
 }

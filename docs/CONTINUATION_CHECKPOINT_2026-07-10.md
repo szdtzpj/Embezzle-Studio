@@ -13,28 +13,30 @@ The continuation reached the locally provable boundary on 2026-07-10, after whic
 ### Closed implementation and audit items
 
 - `stage-release-for-pages.mjs` now selects only `Embezzle-Studio-${tag}-release.apk`, binds it to its same-name `.sha256` or the exact filename entry in `SHA256SUMS`, and enforces 256 MiB APK / 64 KiB checksum limits from both `Content-Length` and streamed bytes.
-- `release.html` and the Pages APK are written only after the actual APK SHA-256 matches. The page escapes release text, encodes the APK as one URL path segment, displays version/size/full digest, and states that checksum equality is not production-signature verification. Valid manifests point to `release.html`; 404/missing/untrusted assets remain `apk: null` and remove stale managed outputs.
+- `release.html` and the Pages APK are written only for an owner-published GitHub Immutable Release whose exact APK/checksum assets are `uploaded` by `github-actions[bot]`, carry valid GitHub digests, and match after both assets are downloaded and hashed. The page escapes release text, encodes the APK as one URL path segment, displays version/size/full digest, and states that immutable/digest/checksum evidence is not production-signature verification. Valid manifests point to `release.html`; 404/mutable/non-owner/missing or metadata-untrusted assets remain `apk: null` and remove stale managed outputs.
 - Incremental current-doc review added native GPT-5.6 `max` effort without collapsing it to `xhigh`, and explicitly rejects the nonexistent `gpt-5.6-pro` slug as a Responses-only Pro model. Existing GPT-5 through GPT-5.5/o-series matrices remain covered.
 - Ark protocol detection now requires the explicit Ark provider kind or an exact official data-plane hostname. Display names and lookalike hostnames cannot suppress normal `/models` discovery or activate Ark-only request parameters.
-- Android CI now uses `aapt` on the unsigned artifact to enforce package/version/minSdk/targetSdk and reject overlay/camera/microphone permissions before signing. All 15 official GitHub Action uses are pinned to verified full commit SHAs.
+- Android CI now uses `aapt` on the unsigned artifact to enforce package/version/minSdk/targetSdk and reject overlay/camera/microphone permissions before signing. Owner/rerun gates precede build, secret-backed signing, publication, and Pages deployment; the release workflow rechecks the exact tag/main commit and all three assets before and after freezing the draft as immutable. All 15 official GitHub Action uses are pinned to GitHub-verified latest-stable full commit SHAs.
+- The update checker announces an available version only when the manifest also contains a trusted APK asset. A newer fail-closed `apk: null` manifest now renders as “暂无可用的可信更新” rather than falsely claiming that the pending version is downloadable or already installed.
 - README/product/roadmap documentation now matches Web tab-session API keys, IndexedDB/native attachment lifecycles, capability-gated image/video/file UI, Bailian video bounds, the public checksum page, and the production release boundary.
 
 ### Current local evidence
 
-- `npm.cmd run check`: passed — 12 test files, 183 tests; TypeScript and ESLint zero errors/warnings.
-- Release stager/update checker focus: 26/26 tests passed. A real unauthenticated latest-Release 404 smoke wrote schema 1/version 1.0.4/`apk: null` and no `release.html` or `downloads/` directory.
-- `npm.cmd run build:web`: passed — 3185 modules, 6.9 MB main bundle. `npx.cmd expo-doctor`: 20/20.
+- `npm.cmd run check`: passed — 12 test files, 195 tests; TypeScript and ESLint zero errors/warnings.
+- Release stager/update checker focus: 38/38 tests passed, including missing release booleans, both asset uploaders/states/digests, downloaded-byte versus GitHub-digest mismatches, and newer-version `apk: null` behavior. An authenticated live smoke against the current mutable v1.0.3 Release wrote `apk: null` with the public base URL and no `release.html` or `downloads/` directory.
+- `npm.cmd run build:web`: passed after the final UI/update-checker edits — 3133 modules, 6.9 MB main bundle. `npx.cmd expo-doctor`: 20/20.
 - Exported Web artifact browser smoke passed at the normal desktop viewport and 390×844: chat, settings, return navigation, history dialog, Web key notice, and update 404 state were visible/operable; final browser console warning/error list was empty.
-- `git diff --check` passed for tracked changes and an additional no-index check passed for all 22 untracked files. All 3 workflow YAML files parsed, all 8 embedded Bash blocks passed Git Bash `bash -n`, and all 15 official Action uses passed full-SHA validation.
+- `git diff --check` passed for tracked changes and an additional no-index check passed for the original 22 untracked files. All 3 workflow YAML files parsed, all 34 embedded Bash blocks passed Git Bash `bash -n`, and all 15 official Action uses passed full-SHA validation. The eight distinct Action tag commits were also resolved through the official GitHub repositories and matched the pinned SHAs.
 - `npm audit --omit=dev --audit-level=high` exited 0. The remaining 11 moderate `uuid -> xcode -> @expo/config-plugins` advisories require a breaking Expo downgrade/change from `npm audit fix --force`, so no blind force-fix was applied.
-- A guarded clean Expo Android prebuild and `gradlew clean assembleRelease --no-daemon` completed with `NODE_ENV=production`; the complete Git status entry set was unchanged before and after native generation/build. The prebuild guard backup is `C:\Users\555\AppData\Local\Temp\EmbezzleStudio-prebuild-20260710-082014`.
-- Final local APK: `android/app/build/outputs/apk/release/app-release.apk`, written `2026-07-10 08:29:46 +08:00`, later than the final `updateChecker.ts` edit.
+- After the final update-checker/UI fix, a new clean Expo Android prebuild and `gradlew clean assembleRelease --no-daemon` completed with `NODE_ENV=production`, explicit installed SDK path `C:\Users\555\AppData\Local\Android\Sdk`, and Build Tools 36.0.0. The first Gradle attempt correctly failed after clean prebuild removed `local.properties` and the shell lacked `ANDROID_HOME`; rerunning the same clean tree with the verified SDK path succeeded. The complete Git status entry set was unchanged across the successful build.
+- Final local APK: `android/app/build/outputs/apk/release/app-release.apk`, written `2026-07-10 10:54:01 +08:00`, later than the final `App.tsx` and `updateChecker.ts` edits.
   - package `com.szdtzpj.embezzlestudio`; version `1.0.4`; versionCode `4`; minSdk `24`; targetSdk `36`
-  - size `92,978,921` bytes
-  - SHA-256 `F2DA1AAEE90146D30F53534E1213B50410180FA2D227E83E62FB02A4E840D42E`
+  - size `92,979,061` bytes
+  - SHA-256 `945031C481475DA160267E2C56A7738DC609D2930EF69136E198392EFDA1E211`
   - permissions: INTERNET, legacy read/write storage with maxSdk 32, VIBRATE, biometric/fingerprint, and the app-scoped dynamic receiver permission; no SYSTEM_ALERT_WINDOW, CAMERA, or RECORD_AUDIO
-  - `apksigner` verifies APK Signature Scheme v2; `zipalign -c -P 16 -v 4` succeeds
+  - `apksigner` verifies APK Signature Scheme v2 (`v3: false`); `zipalign -c -P 16 4` succeeds
   - signer is intentionally local-only `CN=Android Debug`; certificate SHA-256 `fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c`. This artifact must not be published as the production release.
+- A disposable **non-production** PKCS12 preflight exercised the same pinned Build Tools 36.0.0 zipalign/apksigner path against the rebuilt unsigned bytes. Package/version/SDK checks passed, v2/v3 verification passed, the single signer matched the disposable certificate, and the temporary keystore/password variables/output were removed. This proves the mechanics only; its certificate and APK are explicitly not publication artifacts.
 - At the local-boundary snapshot, final status/diff scope, untracked sizes, common secret patterns, and keystore/private-key file extensions were inspected; no generated source artifact or secret material was found. GitHub changes described below happened only after the user subsequently authorized them.
 
 ### GitHub continuation evidence
@@ -42,8 +44,9 @@ The continuation reached the locally provable boundary on 2026-07-10, after whic
 - PR [#1](https://github.com/szdtzpj/Embezzle-Studio/pull/1) merged the audited implementation as `9d87de076e4f58d2ae1b4e77d12cf21c893a0644`; its final head Quality run `29062677804` and the exact merge-SHA Quality run `29062764033` succeeded.
 - The first merge-SHA Pages run `29062764034` exposed a real integration gap: the build job's `configure-pages` call could not read the Pages site with a contents-only token. PR [#2](https://github.com/szdtzpj/Embezzle-Studio/pull/2) added only `contents: read` plus `pages: read` to that job, retained `pages: write`/`id-token: write` only in deploy, upgraded the three Pages actions to their GitHub-verified Node 24 stable SHAs, and explicitly included `.nojekyll` in the v5 artifact. It merged as `a7bfe09bf7f57b5341f594093bb2f2b85efebf70`.
 - On that Pages-fix merge SHA, Quality run `29063138324` succeeded and Pages run `29063138326` completed both build and deploy. Anonymous HTTPS checks returned `200` for the site root and `release-manifest.json`, and `404` for `release.html` and the old v1.0.3 download path. The published manifest identifies v1.0.3 but has `apk: null`, so the existing debug-signed asset was not exposed as a trusted update.
+- PR [#3](https://github.com/szdtzpj/Embezzle-Studio/pull/3) recorded the remote evidence as merge `61eb73e33526f34873b98a228f494b93a577800e`; its exact-SHA Quality run `29063440376` and Pages run `29063440384` both succeeded.
 - Active remote protection now includes main ruleset `18749435` (no deletion/force-push and strict required `Typecheck, test, lint, and build web` from GitHub Actions), `v*` tag ruleset `18749437` (no deletion or ref movement), and repository-wide full-SHA enforcement for Actions.
-- Environment `android-release` exists with a custom deployment branch policy allowing only `main`; it still has no production secrets or reviewer. GitHub does not offer required Environment reviewers for this private personal repository without Enterprise. `BlueOcean223` still has write access, so the user must explicitly trust that release authority or reduce the collaborator's access before production secrets are installed.
+- Environment `android-release` exists with a custom deployment branch policy allowing only `main`; it still has no production secrets or reviewer. GitHub does not offer required Environment reviewers for this private personal repository without Enterprise. A private personal repository has no direct-collaborator read role: `BlueOcean223` must remain an explicitly trusted write collaborator, be removed, or be reassigned after moving the repository to an organization before production secrets are installed.
 
 ### Not locally verified
 
@@ -170,7 +173,7 @@ Start with the release page/stager closure; do not begin by re-auditing complete
 
 These are the remaining user/security boundaries after the remote work above:
 
-- Decide whether to trust the existing write collaborator with no-reviewer release authority, reduce that access, or move to a repository/plan that supports required reviewers. [GitHub's environment limits](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) make required reviewers public-only on Free/Pro/Team.
+- Decide whether to trust the existing write collaborator with no-reviewer release authority, remove that collaborator, or move to an organization/plan that supports a granular role and required reviewers. A private personal repository has no read-only direct-collaborator downgrade. [GitHub's environment limits](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) make required reviewers public-only on Free/Pro/Team.
 - Connect suitable encrypted removable storage, generate and test at least one offline recovery copy of the stable signing identity, then configure the five production secrets:
   - `ANDROID_KEYSTORE_BASE64`
   - `ANDROID_KEY_ALIAS`

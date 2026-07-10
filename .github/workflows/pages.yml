@@ -10,9 +10,14 @@ on:
       - Build Android APK
     types:
       - completed
+    branches:
+      - main
 
 permissions:
   contents: read
+
+env:
+  RELEASE_OWNER: szdtzpj
 
 concurrency:
   group: pages
@@ -26,11 +31,22 @@ jobs:
       pages: read
     runs-on: ubuntu-latest
     steps:
+      - name: Require owner-controlled manual execution
+        if: ${{ github.event_name == 'workflow_dispatch' || github.run_attempt > 1 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_TRIGGERING_ACTOR" != "$RELEASE_OWNER" ]]; then
+            echo "::error::Only $RELEASE_OWNER may manually start or rerun the Pages publication workflow."
+            exit 1
+          fi
+
       - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Node
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 24
           cache: npm
@@ -77,6 +93,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     steps:
+      - name: Require owner-controlled deployment rerun
+        if: ${{ github.event_name == 'workflow_dispatch' || github.run_attempt > 1 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_TRIGGERING_ACTOR" != "$RELEASE_OWNER" ]]; then
+            echo "::error::Only $RELEASE_OWNER may manually start or rerun the Pages deployment job."
+            exit 1
+          fi
+
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
