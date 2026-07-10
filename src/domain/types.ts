@@ -37,6 +37,8 @@ export type ReasoningEffort =
   | 'xhigh'
   | 'max';
 
+export type ColorMode = 'system' | 'light' | 'dark';
+
 export type ModelTask = 'chat' | 'image-generation' | 'video-generation' | 'embedding' | 'rerank';
 
 export interface ModelParameterSettings {
@@ -67,6 +69,7 @@ export interface ProviderProfile {
   capabilities: Capability[];
   models: ModelInfo[];
   notes?: string;
+  enabled?: boolean;
 }
 
 export interface MediaAttachment {

@@ -3,7 +3,7 @@ import { BlurView } from 'expo-blur';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
 import * as Sharing from 'expo-sharing';
-import { createElement, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, createElement, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import {
   ActivityIndicator,
@@ -22,6 +22,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useColorScheme,
   useWindowDimensions,
   View,
 } from 'react-native';
@@ -42,18 +43,19 @@ import Reanimated, {
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AnimatePresence, MotiView } from 'moti';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { Brain, Check, ChevronDown, Copy, Download, ExternalLink, FileText, Image as ImageIcon, Lightbulb, Menu, MessageSquare, MoreHorizontal, PenSquare, Pencil, Pin, Plus, RefreshCw, Search, Share2, Settings, SlidersHorizontal, Square, Trash2, Video, X } from 'lucide-react-native';
+import { Brain, Check, ChevronDown, Copy, FileText, Image as ImageIcon, Lightbulb, Menu, MessageSquare, MoreHorizontal, PenSquare, Pencil, Pin, Plus, RefreshCw, Search, Share2, Settings, SlidersHorizontal, Square, Trash2, Video, X } from 'lucide-react-native';
 import { Bailian, ChatGLM, Claude, DeepSeek, Doubao, Gemini, Kimi, Minimax, NewAPI, OpenAI, Qwen, Volcengine, Zhipu } from '@lobehub/icons-rn';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/arkModels';
 import { appInfo } from './src/data/appInfo';
-import { createDefaultWorkspace, defaultParameterSettings } from './src/data/providerCatalog';
+import { createDefaultWorkspace, defaultParameterSettings, isUserCreatedProvider } from './src/data/providerCatalog';
 import type {
   AppWorkspace,
   Capability,
   ChatCompletionResult,
   ChatTokenUsage,
   ChatConversation,
+  ColorMode,
   GenerationTaskInfo,
   ChatMessage,
   MessageRole,
@@ -79,7 +81,13 @@ import {
 import { refreshProviderModels } from './src/services/modelDiscovery';
 import { buildChatTranscript } from './src/services/conversationContext';
 import { createId } from './src/services/id';
-import { consumeStorageRecoveryNotice, loadWorkspace, saveWorkspace } from './src/services/storage';
+import {
+  consumeStorageRecoveryNotice,
+  loadColorMode,
+  loadWorkspace,
+  saveColorMode,
+  saveWorkspace,
+} from './src/services/storage';
 import { checkForAppUpdate, type AppUpdateInfo } from './src/services/updateChecker';
 import {
   createModelInfoFromId,
@@ -97,12 +105,47 @@ import {
   isWorkspaceReadOnly,
   resolveMessageProvider,
 } from './src/services/workspaceRuntime';
+import { SettingsScreen } from './src/ui/screens/SettingsScreen';
+import { KelivoThemeProvider } from './src/ui/theme';
+import { modelIconKey } from './src/ui/utils/modelDisplay';
 
 /**
  * Anthropic / Claude 风格视觉令牌。
  * 暖色纸张底、粘土色强调、柔和圆角。仅影响外观，不改动任何业务逻辑。
  */
-const palette = {
+interface AppPalette {
+  bg: string;
+  surface: string;
+  surfaceAlt: string;
+  surfaceSunken: string;
+  border: string;
+  borderStrong: string;
+  accent: string;
+  accentPressed: string;
+  accentSoft: string;
+  accentBorder: string;
+  accentText: string;
+  text: string;
+  textSecondary: string;
+  textMuted: string;
+  textMutedSolid: string;
+  textOnAccent: string;
+  danger: string;
+  dangerBg: string;
+  dangerBorder: string;
+  warning: string;
+  edit: string;
+  success: string;
+  placeholder: string;
+  scrim: string;
+  userBubble: string;
+  userBubbleBorder: string;
+  userEditBubble: string;
+  userEditBorder: string;
+  frostedSurface: string;
+}
+
+const lightPalette: AppPalette = {
   bg: '#F4F4F4',
   surface: '#EAEAEA',
   surfaceAlt: '#E2E2E2',
@@ -123,9 +166,66 @@ const palette = {
   dangerBg: '#FEF2F2',
   dangerBorder: '#FECACA',
   warning: '#D97706',
+  edit: '#2563EB',
+  success: '#16A34A',
   placeholder: '#9CA3AF',
   scrim: 'rgba(0, 0, 0, 0.4)',
-} as const;
+  userBubble: '#E8F8EF',
+  userBubbleBorder: '#BEEBD1',
+  userEditBubble: '#F4FFF8',
+  userEditBorder: '#9FDBB8',
+  frostedSurface: 'rgba(255, 255, 255, 0.64)',
+};
+
+const darkPalette: AppPalette = {
+  bg: '#111214',
+  surface: '#1A1C1F',
+  surfaceAlt: '#23262B',
+  surfaceSunken: '#0D0F11',
+  border: '#30343A',
+  borderStrong: '#454A52',
+  accent: '#8FA2E8',
+  accentPressed: '#A9B7EC',
+  accentSoft: '#252D48',
+  accentBorder: '#465783',
+  accentText: '#DCE4FF',
+  text: '#F3F4F6',
+  textSecondary: '#B1B5BC',
+  textMuted: '#9CA3AF66',
+  textMutedSolid: '#8B919A',
+  textOnAccent: '#10131A',
+  danger: '#F87171',
+  dangerBg: '#3A1D22',
+  dangerBorder: '#6B2A34',
+  warning: '#FBBF24',
+  edit: '#93C5FD',
+  success: '#6DD58C',
+  placeholder: '#7F8792',
+  scrim: 'rgba(0, 0, 0, 0.68)',
+  userBubble: '#18362A',
+  userBubbleBorder: '#285640',
+  userEditBubble: '#152E25',
+  userEditBorder: '#39765A',
+  frostedSurface: 'rgba(17, 18, 20, 0.74)',
+};
+
+type AppStyles = ReturnType<typeof createAppStyles>;
+
+interface AppThemeContextValue {
+  palette: AppPalette;
+  styles: AppStyles;
+  isDark: boolean;
+}
+
+const AppThemeContext = createContext<AppThemeContextValue | null>(null);
+
+function useAppTheme(): AppThemeContextValue {
+  const theme = useContext(AppThemeContext);
+  if (!theme) {
+    throw new Error('App theme is unavailable.');
+  }
+  return theme;
+}
 
 const radii = {
   sm: 10,
@@ -323,6 +423,7 @@ function AnimatedMessage({
  * 切换聊天 / 配置时的柔和淡入 + 轻微缩放过渡。
  */
 function ScreenFade({ children }: { children?: ReactNode }) {
+  const { styles } = useAppTheme();
   const progress = useSharedValue(0);
 
   useEffect(() => {
@@ -345,6 +446,7 @@ function ScreenFade({ children }: { children?: ReactNode }) {
  * 用 moti 的 AnimatePresence 编排挂载 / 卸载，避免图标瞬间硬切。
  */
 function IconCrossfade({ swapKey, children }: { swapKey: string; children: ReactNode }) {
+  const { styles } = useAppTheme();
   return (
     <View style={styles.iconCrossfade}>
       <AnimatePresence exitBeforeEnter>
@@ -369,6 +471,7 @@ function IconCrossfade({ swapKey, children }: { swapKey: string; children: React
  * 用 pointerEvents="none" 让它不拦截任何点击，纯视觉反馈。
  */
 function Toast({ message }: { message: string | null }) {
+  const { palette, styles } = useAppTheme();
   return (
     <View pointerEvents="none" style={styles.toastRoot}>
       <AnimatePresence>
@@ -394,6 +497,7 @@ function Toast({ message }: { message: string | null }) {
 
 /** 单个脉动圆点，交错的相位由 delay 控制。 */
 function ThinkingDot({ delay }: { delay: number }) {
+  const { styles } = useAppTheme();
   const progress = useSharedValue(0);
 
   useEffect(() => {
@@ -425,6 +529,7 @@ function ThinkingDot({ delay }: { delay: number }) {
  * “正在思考”指示器：三个交错脉动的圆点，运行在 UI 线程。
  */
 function ThinkingDots() {
+  const { styles } = useAppTheme();
   return (
     <View style={styles.thinkingRow} accessibilityRole="text" accessibilityLabel="正在思考">
       <ThinkingDot delay={0} />
@@ -550,6 +655,10 @@ function getSelectableModels(provider: ProviderProfile) {
       model.source !== 'preset' &&
       !(isVolcengineArkProvider(provider) && model.source !== 'remote' && isArkStaticDoubaoModelId(model.id))
   );
+}
+
+function isProviderEnabled(provider?: ProviderProfile | null): provider is ProviderProfile {
+  return Boolean(provider) && provider?.enabled !== false;
 }
 
 function modelIndexText(model: ModelInfo) {
@@ -694,28 +803,73 @@ function conversationShareText(conversation: ChatConversation): string {
   return lines.join('\n').trim();
 }
 
-function formatUpdateStatusTitle(updateInfo: AppUpdateInfo | null, updateNotice: string) {
-  if (updateInfo) {
-    if (!updateInfo.installAsset) {
-      return '暂无可用的可信更新';
-    }
-    return updateInfo.updateAvailable
-      ? `可更新到 v${updateInfo.latestVersion}`
-      : `最新版本 v${updateInfo.latestVersion}`;
+export default function App() {
+  const systemColorScheme = useColorScheme();
+  const [colorMode, setColorMode] = useState<ColorMode>('system');
+  const [appearanceNotice, setAppearanceNotice] = useState('');
+  const colorModeChangedRef = useRef(false);
+
+  useEffect(() => {
+    let mounted = true;
+    loadColorMode()
+      .then((savedColorMode) => {
+        if (mounted && !colorModeChangedRef.current) {
+          setColorMode(savedColorMode);
+        }
+      })
+      .catch((error) => {
+        if (mounted) {
+          setAppearanceNotice(error instanceof Error ? error.message : '颜色模式加载失败。');
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  function updateColorMode(nextColorMode: ColorMode) {
+    colorModeChangedRef.current = true;
+    setColorMode(nextColorMode);
+    setAppearanceNotice('');
+    saveColorMode(nextColorMode).catch((error) => {
+      setAppearanceNotice(error instanceof Error ? error.message : '颜色模式保存失败。');
+    });
   }
 
-  if (updateNotice.includes('暂未找到')) {
-    return '暂无可用 Release';
-  }
+  const isDark = colorMode === 'dark' || (colorMode === 'system' && systemColorScheme === 'dark');
+  const theme = useMemo<AppThemeContextValue>(() => {
+    const palette = isDark ? darkPalette : lightPalette;
+    return {
+      palette,
+      styles: appStylesByMode[isDark ? 'dark' : 'light'],
+      isDark,
+    };
+  }, [isDark]);
 
-  if (updateNotice) {
-    return '检查失败';
-  }
-
-  return '尚未检查';
+  return (
+    <KelivoThemeProvider scheme={isDark ? 'dark' : 'light'}>
+      <AppThemeContext.Provider value={theme}>
+        <AppContent
+          colorMode={colorMode}
+          onSetColorMode={updateColorMode}
+          appearanceNotice={appearanceNotice}
+        />
+      </AppThemeContext.Provider>
+    </KelivoThemeProvider>
+  );
 }
 
-export default function App() {
+function AppContent({
+  colorMode,
+  onSetColorMode,
+  appearanceNotice,
+}: {
+  colorMode: ColorMode;
+  onSetColorMode: (colorMode: ColorMode) => void;
+  appearanceNotice: string;
+}) {
+  const { palette, styles, isDark } = useAppTheme();
   const [workspace, setWorkspace] = useState<AppWorkspace>(() => createDefaultWorkspace());
   const [booting, setBooting] = useState(true);
   const [persistenceReady, setPersistenceReady] = useState(false);
@@ -732,6 +886,7 @@ export default function App() {
   const [historySearchQuery, setHistorySearchQuery] = useState('');
   const [attachments, setAttachments] = useState<MediaAttachment[]>([]);
   const [busy, setBusy] = useState(false);
+  const [refreshingModels, setRefreshingModels] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [notice, setNotice] = useState('');
   const [updateNotice, setUpdateNotice] = useState('');
@@ -741,7 +896,6 @@ export default function App() {
   const [conversationActionMenuTop, setConversationActionMenuTop] = useState(16);
   const [renamingConversationId, setRenamingConversationId] = useState<string | null>(null);
   const [deleteConfirmConversationId, setDeleteConfirmConversationId] = useState<string | null>(null);
-  const [deleteConfirmProviderId, setDeleteConfirmProviderId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [sidebarPanelHeight, setSidebarPanelHeight] = useState(0);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
@@ -977,10 +1131,6 @@ export default function App() {
         setDeleteConfirmConversationId(null);
         return true;
       }
-      if (deleteConfirmProviderId) {
-        setDeleteConfirmProviderId(null);
-        return true;
-      }
       if (modelPickerOpen) {
         setModelPickerOpen(false);
         return true;
@@ -1007,7 +1157,6 @@ export default function App() {
   }, [
     attachMenuOpen,
     deleteConfirmConversationId,
-    deleteConfirmProviderId,
     messageActionMenuId,
     modelPickerOpen,
     parameterMenuOpen,
@@ -1022,6 +1171,22 @@ export default function App() {
     [workspace.activeProviderId, workspace.providers]
   );
   const workspaceReadOnly = isWorkspaceReadOnly(booting, persistenceReady);
+
+  useEffect(() => {
+    if (workspaceReadOnly || settingsOpen || isProviderEnabled(activeProvider)) {
+      return;
+    }
+
+    const fallbackProvider = workspace.providers.find(isProviderEnabled);
+    if (!fallbackProvider || fallbackProvider.id === workspace.activeProviderId) {
+      return;
+    }
+
+    setWorkspace((current) => ({
+      ...current,
+      activeProviderId: fallbackProvider.id,
+    }));
+  }, [activeProvider, settingsOpen, workspace.activeProviderId, workspace.providers, workspaceReadOnly]);
 
   const addedModels = useMemo(() => {
     if (!activeProvider) {
@@ -1137,6 +1302,7 @@ export default function App() {
   const providerModelGroups = useMemo(
     () =>
       workspace.providers
+        .filter(isProviderEnabled)
         .map((provider) => ({
           provider,
           models: getSelectableModels(provider),
@@ -1154,9 +1320,6 @@ export default function App() {
     : null;
   const deleteConfirmConversation = deleteConfirmConversationId
     ? workspace.conversations.find((conversation) => conversation.id === deleteConfirmConversationId) ?? null
-    : null;
-  const deleteConfirmProvider = deleteConfirmProviderId
-    ? workspace.providers.find((provider) => provider.id === deleteConfirmProviderId) ?? null
     : null;
   const conversationActionConversation = conversationActionId
     ? workspace.conversations.find((conversation) => conversation.id === conversationActionId) ?? null
@@ -1207,6 +1370,51 @@ export default function App() {
     clearPendingAttachments();
   }
 
+  function closeSettings() {
+    setSettingsOpen(false);
+    if (workspaceReadOnly) {
+      return;
+    }
+    setWorkspace((current) => {
+      const selectedProvider = current.providers.find(
+        (provider) => provider.id === current.activeProviderId,
+      );
+      if (isProviderEnabled(selectedProvider)) {
+        return current;
+      }
+
+      const fallbackProvider = current.providers.find(isProviderEnabled);
+      return fallbackProvider
+        ? { ...current, activeProviderId: fallbackProvider.id }
+        : current;
+    });
+  }
+
+  function toggleProviderEnabled(providerId: string) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+    setWorkspace((current) => {
+      const providers = current.providers.map((provider) =>
+        provider.id === providerId
+          ? { ...provider, enabled: !(provider.enabled ?? true) }
+          : provider,
+      );
+      const toggledProvider = providers.find((provider) => provider.id === providerId);
+      const fallbackProvider = providers.find(isProviderEnabled);
+      const activeProviderId =
+        current.activeProviderId === providerId && !isProviderEnabled(toggledProvider)
+          ? fallbackProvider?.id ?? current.activeProviderId
+          : current.activeProviderId;
+
+      return {
+        ...current,
+        providers,
+        activeProviderId,
+      };
+    });
+  }
+
   function selectModel(modelId: string) {
     if (!ensureWorkspaceWritable() || !activeProvider) {
       return;
@@ -1224,6 +1432,11 @@ export default function App() {
 
   function selectProviderModel(providerId: string, modelId: string) {
     if (!ensureWorkspaceWritable()) {
+      return;
+    }
+    const provider = workspace.providers.find((item) => item.id === providerId);
+    if (!isProviderEnabled(provider)) {
+      setNotice('该服务商已禁用，请先在设置中启用。');
       return;
     }
 
@@ -1322,6 +1535,7 @@ export default function App() {
       baseUrl: 'https://your-provider.example.com/v1',
       capabilities: ['text', 'image-input', 'streaming'],
       models: [],
+      enabled: true,
     };
 
     setWorkspace((current) => ({
@@ -1342,15 +1556,13 @@ export default function App() {
     setModelCapabilityFilter('all');
   }
 
-  function deleteProvider(providerId: string) {
+  function deleteProvider(providerId: string, onDeleted?: () => void) {
     if (!ensureWorkspaceWritable()) {
-      setDeleteConfirmProviderId(null);
       return;
     }
 
-    if (workspace.providers.length <= 1) {
-      setNotice('至少需要保留一个服务商。');
-      setDeleteConfirmProviderId(null);
+    const provider = workspace.providers.find((item) => item.id === providerId);
+    if (!provider || !isUserCreatedProvider(provider)) {
       return;
     }
 
@@ -1360,7 +1572,7 @@ export default function App() {
         return current;
       }
       const activeProviderId = current.activeProviderId === providerId
-        ? providers[0].id
+        ? providers.find(isProviderEnabled)?.id ?? providers[0].id
         : current.activeProviderId;
       const activeModelIdByProvider = { ...current.activeModelIdByProvider };
       const modelCandidatesByProvider = { ...current.modelCandidatesByProvider };
@@ -1379,12 +1591,12 @@ export default function App() {
         reasoningEffortByModel,
       };
     });
-    setDeleteConfirmProviderId(null);
     setManualModelId('');
     setModelSearchQuery('');
     setModelCapabilityFilter('all');
     clearPendingAttachments();
-    setNotice('已删除服务商及其本地 API Key。');
+    setNotice(`已删除供应商 ${provider.name} 及其本地 API Key。`);
+    onDeleted?.();
   }
 
   function addManualModel() {
@@ -1542,7 +1754,7 @@ export default function App() {
   }
 
   async function refreshModels() {
-    if (!ensureWorkspaceWritable() || !activeProvider) {
+    if (!ensureWorkspaceWritable() || !isProviderEnabled(activeProvider)) {
       return;
     }
 
@@ -1550,6 +1762,7 @@ export default function App() {
     if (!controller) {
       return;
     }
+    setRefreshingModels(true);
     setNotice('');
 
     try {
@@ -1578,6 +1791,7 @@ export default function App() {
       }));
       setNotice(error instanceof Error ? error.message : '模型列表获取失败。');
     } finally {
+      setRefreshingModels(false);
       finishActiveRequest(controller);
     }
   }
@@ -1904,7 +2118,7 @@ export default function App() {
       (provider ? workspace.activeModelIdByProvider[provider.id] : '') ??
       activeModelId;
 
-    if (!provider || !modelId) {
+    if (!isProviderEnabled(provider) || !modelId) {
       return null;
     }
 
@@ -2508,6 +2722,10 @@ export default function App() {
       setNotice('找不到这个生成任务对应的服务商。');
       return;
     }
+    if (!isProviderEnabled(provider)) {
+      setNotice('这个生成任务对应的服务商已禁用。');
+      return;
+    }
 
     generationTaskControllersRef.current.get(message.id)?.abort();
     const controller = new AbortController();
@@ -2561,6 +2779,11 @@ export default function App() {
 
     if (!activeProvider) {
       setNotice('请先选择服务商。');
+      return;
+    }
+
+    if (!isProviderEnabled(activeProvider)) {
+      setNotice('当前服务商已禁用，请先在设置中启用。');
       return;
     }
 
@@ -2667,6 +2890,7 @@ export default function App() {
     return (
       <GestureHandlerRootView style={styles.root}>
         <SafeAreaProvider>
+          <StatusBar style={isDark ? 'light' : 'dark'} />
           <SafeAreaView style={styles.loadingShell}>
             <ActivityIndicator color={palette.accent} />
             <Text style={styles.loadingText}>正在加载工作区</Text>
@@ -2679,12 +2903,13 @@ export default function App() {
   return (
     <GestureHandlerRootView style={styles.root}>
       <SafeAreaProvider>
-      <StatusBar style="dark" />
+      <StatusBar style={isDark ? 'light' : 'dark'} />
       <SafeAreaView style={styles.shell}>
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           style={styles.keyboard}
         >
+          {!settingsOpen ? (
           <View style={styles.topBar}>
             <View style={styles.topHeaderRow}>
               <View style={styles.topLeft}>
@@ -2725,6 +2950,7 @@ export default function App() {
               </AnimatedPressable>
             </View>
           </View>
+          ) : null}
 
           {workspaceReadOnly ? (
             <View
@@ -2755,351 +2981,62 @@ export default function App() {
 
           {settingsOpen ? (
             <ScreenFade>
-              <ScrollView style={styles.content} contentContainerStyle={styles.settingsContent}>
-
-              <View style={styles.settingsCard}>
-                <Text style={styles.settingsCardTitle}>服务商</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRow}>
-                  {workspace.providers.map((provider) => (
-                    <AnimatedPressable
-                      key={provider.id}
-                      accessibilityRole="button"
-                      onPress={() => selectProvider(provider.id)}
-                      haptic="selection"
-                      style={[
-                        styles.providerChip,
-                        provider.id === activeProvider.id && styles.providerChipActive,
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.providerChipText,
-                          provider.id === activeProvider.id && styles.providerChipTextActive,
-                        ]}
-                      >
-                        {provider.name}
-                      </Text>
-                    </AnimatedPressable>
-                  ))}
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    onPress={addCustomProvider}
-                    style={styles.providerChip}
-                  >
-                    <Text style={styles.providerChipText}>+ 新增</Text>
-                  </AnimatedPressable>
-                </ScrollView>
-              </View>
-
-              <View style={styles.settingsCard}>
-                <Text style={styles.settingsCardTitle}>连接配置</Text>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>名称</Text>
-                   <TextInput
-                    value={activeProvider.name}
-                    editable={!workspaceReadOnly}
-                    onChangeText={(name) => updateActiveProvider({ name })}
-                    style={styles.input}
-                  />
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>Base URL</Text>
-                  <TextInput
-                    autoCapitalize="none"
-                    value={activeProvider.baseUrl}
-                    editable={!workspaceReadOnly}
-                    onChangeText={(baseUrl) => updateActiveProvider({ baseUrl })}
-                    style={styles.input}
-                  />
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>API Key</Text>
-                  <TextInput
-                    autoCapitalize="none"
-                    secureTextEntry
-                    value={activeProvider.apiKey ?? ''}
-                    editable={!workspaceReadOnly}
-                   onChangeText={(apiKey) => updateActiveProvider({ apiKey })}
-                   style={styles.input}
-                 />
-                  {Platform.OS === 'web' ? (
-                    <Text style={styles.modelOverrideHint}>
-                      Web 端仅在当前标签页会话中保存密钥，关闭标签页后会清除；Android 使用系统安全存储。
-                    </Text>
-                  ) : null}
-                </View>
-
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  disabled={busy || workspaceReadOnly}
-                  onPress={refreshModels}
-                  style={[styles.primaryButton, (busy || workspaceReadOnly) && styles.buttonDisabled]}
-                >
-                  <Text style={styles.primaryButtonText}>{busy ? '请求中...' : '获取模型'}</Text>
-                </AnimatedPressable>
-                {workspace.providers.length > 1 ? (
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`删除服务商 ${activeProvider.name}`}
-                    disabled={busy || workspaceReadOnly}
-                    onPress={() => setDeleteConfirmProviderId(activeProvider.id)}
-                    style={[styles.providerDeleteButton, (busy || workspaceReadOnly) && styles.buttonDisabled]}
-                  >
-                    <Trash2 size={15} color={palette.danger} strokeWidth={2.2} />
-                    <Text style={styles.providerDeleteButtonText}>删除此服务商</Text>
-                  </AnimatedPressable>
-                ) : null}
-              </View>
-
-              {notice ? <Text style={styles.settingsNotice}>{notice}</Text> : null}
-
-              <View style={styles.settingsCard}>
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>可添加模型</Text>
-                  {modelCandidates.length ? (
-                    <AnimatedPressable
-                      accessibilityRole="button"
-                      accessibilityLabel="清空可添加模型列表"
-                      onPress={() => {
-                        if (!ensureWorkspaceWritable()) {
-                          return;
-                        }
-                        setWorkspace((current) => ({
-                          ...current,
-                          modelCandidatesByProvider: {
-                            ...current.modelCandidatesByProvider,
-                            [activeProvider.id]: [],
-                          },
-                        }));
-                        setModelSearchQuery('');
-                        setModelCapabilityFilter('all');
-                      }}
-                      style={styles.settingsCardHeaderAction}
-                    >
-                      <Trash2 size={16} color={palette.textSecondary} strokeWidth={2} />
-                    </AnimatedPressable>
-                  ) : null}
-                </View>
-                {modelCandidates.length ? (
-                  <>
-                    <View style={styles.modelSearchRow}>
-                      <TextInput
-                        testID="candidate-model-search"
-                        autoCapitalize="none"
-                        autoCorrect={false}
-                        placeholder="搜索模型名称或 ID"
-                        placeholderTextColor={palette.placeholder}
-                        value={modelSearchQuery}
-                        onChangeText={setModelSearchQuery}
-                        style={[styles.input, styles.modelSearchInput]}
-                      />
-                      {modelSearchQuery ? (
-                        <AnimatedPressable
-                          accessibilityRole="button"
-                          onPress={() => setModelSearchQuery('')}
-                          style={styles.secondaryButton}
-                        >
-                          <Text style={styles.secondaryButtonText}>清除</Text>
-                        </AnimatedPressable>
-                      ) : null}
-                    </View>
-                    <ScrollView
-                      horizontal
-                      showsHorizontalScrollIndicator={false}
-                      contentContainerStyle={styles.modelFilterTabs}
-                    >
-                      {candidateModelFilters.map((filter) => {
-                        const active = filter.key === modelCapabilityFilter;
-
-                        return (
-                          <AnimatedPressable
-                            key={filter.key}
-                            accessibilityRole="button"
-                            testID={`candidate-model-filter-${filter.key}`}
-                            onPress={() => setModelCapabilityFilter(filter.key)}
-                            style={styles.modelFilterTab}
-                          >
-                            <Text
-                              style={[
-                                styles.modelFilterTabText,
-                                active && styles.modelFilterTabTextActive,
-                              ]}
-                            >
-                              {filter.label}
-                            </Text>
-                            <View style={[styles.modelFilterTabLine, active && styles.modelFilterTabLineActive]} />
-                          </AnimatedPressable>
-                        );
-                      })}
-                    </ScrollView>
-                    <Text testID="candidate-model-search-count" style={styles.modelSearchMeta}>
-                      显示 {filteredModelCandidates.length} / {modelCandidates.length}
-                    </Text>
-                  </>
-                ) : null}
-                {modelCandidates.length ? (
-                  <ScrollView
-                    nestedScrollEnabled
-                    style={styles.candidateModelListFrame}
-                    contentContainerStyle={styles.modelList}
-                    showsVerticalScrollIndicator={filteredModelCandidates.length > 4}
-                  >
-                    {filteredModelCandidates.map((model) => (
-                      <CandidateModelRow
-                        key={model.id}
-                        model={model}
-                        providerName={activeProvider.name}
-                        added={addedModelIds.has(model.id)}
-                        onAdd={() => addCandidateModel(model)}
-                      />
-                    ))}
-                    {!filteredModelCandidates.length ? (
-                      <View style={styles.modelSearchEmpty}>
-                        <Text style={styles.modelSearchEmptyText}>没有匹配的模型</Text>
-                      </View>
-                    ) : null}
-                  </ScrollView>
-                ) : null}
-              </View>
-
-              <View style={styles.settingsCard}>
-                <Text style={styles.settingsCardTitle}>已添加模型</Text>
-                <View style={styles.inlineField}>
-                  <TextInput
-                    autoCapitalize="none"
-                    placeholder="手动模型 ID"
-                    placeholderTextColor={palette.placeholder}
-                    value={manualModelId}
-                    editable={!workspaceReadOnly}
-                    onChangeText={setManualModelId}
-                    style={[styles.input, styles.inlineInput]}
-                  />
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    onPress={addManualModel}
-                    style={styles.secondaryButton}
-                  >
-                    <Text style={styles.secondaryButtonText}>添加</Text>
-                  </AnimatedPressable>
-                </View>
-                <View style={styles.modelList}>
-                  {addedModels.map((model) => (
-                    <ModelButton
-                      key={model.id}
-                      model={model}
-                      providerName={activeProvider.name}
-                      active={model.id === activeModelId}
-                      onPress={() => selectModel(model.id)}
-                      onRemove={() => removeModel(model.id)}
-                    />
-                  ))}
-                </View>
-                {activeModel ? (
-                  <View style={styles.modelOverridePanel}>
-                    <Text style={styles.fieldLabel}>当前模型用途</Text>
-                    <View style={styles.capabilityRow}>
-                      {configurableModelTasks.map((task) => {
-                        const selected = inferModelTask(activeModel) === task;
-                        return (
-                          <AnimatedPressable
-                            key={task}
-                            accessibilityRole="button"
-                            accessibilityState={{ selected }}
-                            onPress={() => setActiveModelTask(task)}
-                            style={[styles.capabilityChip, selected && styles.capabilityChipActive]}
-                          >
-                            <Text style={[styles.capabilityText, selected && styles.capabilityTextActive]}>
-                              {modelTaskLabel[task]}
-                            </Text>
-                          </AnimatedPressable>
-                        );
-                      })}
-                    </View>
-                    <Text style={styles.fieldLabel}>能力覆盖</Text>
-                    <View style={styles.capabilityRow}>
-                      {configurableModelCapabilities.map((capability) => {
-                        const selected = activeModel.capabilities.includes(capability.key);
-                        return (
-                          <AnimatedPressable
-                            key={capability.key}
-                            accessibilityRole="checkbox"
-                            accessibilityState={{ checked: selected }}
-                            onPress={() => toggleActiveModelCapability(capability.key)}
-                            style={[styles.capabilityChip, selected && styles.capabilityChipActive]}
-                          >
-                            <Text style={[styles.capabilityText, selected && styles.capabilityTextActive]}>
-                              {capability.label}
-                            </Text>
-                          </AnimatedPressable>
-                        );
-                      })}
-                    </View>
-                    <Text style={styles.modelOverrideHint}>
-                      自动识别不准确时可手动覆盖；设置会随模型保存。
-                    </Text>
-                  </View>
-                ) : null}
-              </View>
-
-              <View style={styles.settingsCard}>
-                <View style={styles.updateHeaderRow}>
-                  <View style={styles.updateTitleBlock}>
-                    <Text style={styles.settingsCardTitle}>版本更新</Text>
-                    <Text style={styles.updateVersionText}>当前 v{appInfo.version}</Text>
-                  </View>
-                  <Text style={styles.updateSourceBadge}>可信公开更新源</Text>
-                </View>
-
-                <View style={styles.updateStatusPanel}>
-                  <Text style={styles.updateStatusTitle}>
-                    {formatUpdateStatusTitle(updateInfo, updateNotice)}
-                  </Text>
-                  {updateInfo?.publishedAt ? (
-                    <Text style={styles.updateStatusMeta}>
-                      发布于 {new Date(updateInfo.publishedAt).toLocaleDateString('zh-CN')}
-                    </Text>
-                  ) : null}
-                  {updateInfo?.installAsset ? (
-                    <>
-                      <Text numberOfLines={1} style={styles.updateStatusMeta}>
-                        安装包 {updateInfo.installAsset.name}
-                      </Text>
-                      <Text numberOfLines={1} style={styles.updateStatusMeta}>
-                        SHA-256 {updateInfo.installAsset.sha256}
-                      </Text>
-                    </>
-                  ) : null}
-                  {updateNotice ? <Text style={styles.updateNotice}>{updateNotice}</Text> : null}
-                </View>
-
-                <View style={styles.updateActionRow}>
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    disabled={checkingUpdate}
-                    onPress={checkUpdates}
-                    style={[styles.secondaryButton, styles.updateActionButton, checkingUpdate && styles.buttonDisabled]}
-                  >
-                    <RefreshCw size={16} color={palette.text} strokeWidth={2} />
-                    <Text style={styles.secondaryButtonText}>{checkingUpdate ? '检查中' : '检查更新'}</Text>
-                  </AnimatedPressable>
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    onPress={openUpdateTarget}
-                    style={[styles.primaryButton, styles.updateActionButton]}
-                  >
-                    {updateInfo?.updateAvailable ? (
-                      <Download size={16} color={palette.textOnAccent} strokeWidth={2} />
-                    ) : (
-                      <ExternalLink size={16} color={palette.textOnAccent} strokeWidth={2} />
-                    )}
-                    <Text style={styles.primaryButtonText}>
-                      {updateInfo?.installAsset ? '前往发布页' : '查看发布状态'}
-                    </Text>
-                  </AnimatedPressable>
-                </View>
-              </View>
-
-              </ScrollView>
+              <SettingsScreen
+                readOnly={workspaceReadOnly}
+                colorMode={colorMode}
+                onSetColorMode={onSetColorMode}
+                onClose={closeSettings}
+                providers={workspace.providers}
+                activeProvider={activeProvider}
+                activeModel={activeModel}
+                activeModelId={activeModelId}
+                addedModels={addedModels}
+                addedModelIds={addedModelIds}
+                modelCandidates={modelCandidates}
+                filteredModelCandidates={filteredModelCandidates}
+                modelSearchQuery={modelSearchQuery}
+                modelCapabilityFilter={modelCapabilityFilter}
+                candidateModelFilters={candidateModelFilters}
+                manualModelId={manualModelId}
+                refreshingModels={refreshingModels}
+                configurableModelTasks={configurableModelTasks}
+                configurableModelCapabilities={configurableModelCapabilities}
+                checkingUpdate={checkingUpdate}
+                updateInfo={updateInfo}
+                updateNotice={updateNotice}
+                notice={[notice, appearanceNotice].filter(Boolean).join('\n')}
+                onSelectProvider={selectProvider}
+                onToggleProviderEnabled={toggleProviderEnabled}
+                onDeleteProvider={deleteProvider}
+                onAddCustomProvider={addCustomProvider}
+                onUpdateProvider={updateActiveProvider}
+                onRefreshModels={refreshModels}
+                onSetModelSearchQuery={setModelSearchQuery}
+                onSetModelCapabilityFilter={setModelCapabilityFilter}
+                onAddCandidateModel={addCandidateModel}
+                onClearCandidates={() => {
+                  if (!ensureWorkspaceWritable()) {
+                    return;
+                  }
+                  setWorkspace((current) => ({
+                    ...current,
+                    modelCandidatesByProvider: {
+                      ...current.modelCandidatesByProvider,
+                      [activeProvider.id]: [],
+                    },
+                  }));
+                  setModelSearchQuery('');
+                  setModelCapabilityFilter('all');
+                }}
+                onSetManualModelId={setManualModelId}
+                onAddManualModel={addManualModel}
+                onSelectModel={selectModel}
+                onRemoveModel={removeModel}
+                onSetActiveModelTask={setActiveModelTask}
+                onToggleActiveModelCapability={toggleActiveModelCapability}
+                onCheckUpdates={checkUpdates}
+                onOpenUpdateTarget={openUpdateTarget}
+              />
             </ScreenFade>
           ) : (
             <ScreenFade>
@@ -3263,8 +3200,11 @@ export default function App() {
                 })}
               </ScrollView>
 
-              {notice ? <Text accessibilityLiveRegion="polite" style={styles.notice}>{notice}</Text> : null}
-
+              {notice || appearanceNotice ? (
+                <Text accessibilityLiveRegion="polite" style={styles.notice}>
+                  {[notice, appearanceNotice].filter(Boolean).join('\n')}
+                </Text>
+              ) : null}
               {attachments.length ? (
                 <ScrollView
                   horizontal
@@ -3697,7 +3637,7 @@ export default function App() {
             <>
               <BlurView
                 intensity={38}
-                tint="light"
+                tint={isDark ? 'dark' : 'light'}
                 blurMethod="dimezisBlurView"
                 style={styles.sidebarConversationFrost}
               >
@@ -3720,7 +3660,7 @@ export default function App() {
                   <Text style={styles.sidebarConversationActionText}>
                     {conversationActionConversation.pinnedAt ? '取消置顶' : '置顶'}
                   </Text>
-                  <Pin size={16} color="#111827" strokeWidth={2.4} />
+                  <Pin size={16} color={palette.text} strokeWidth={2.4} />
                 </AnimatedPressable>
                 <AnimatedPressable
                   accessibilityRole="button"
@@ -3728,7 +3668,7 @@ export default function App() {
                   style={styles.sidebarConversationActionRow}
                 >
                   <Text style={styles.sidebarConversationActionText}>编辑名称</Text>
-                  <Pencil size={16} color="#2563EB" strokeWidth={2.4} />
+                  <Pencil size={16} color={palette.edit} strokeWidth={2.4} />
                 </AnimatedPressable>
                 <AnimatedPressable
                   accessibilityRole="button"
@@ -3736,7 +3676,7 @@ export default function App() {
                   style={styles.sidebarConversationActionRow}
                 >
                   <Text style={styles.sidebarConversationActionText}>分享对话</Text>
-                  <Share2 size={16} color="#16A34A" strokeWidth={2.3} />
+                  <Share2 size={16} color={palette.success} strokeWidth={2.3} />
                 </AnimatedPressable>
                 <AnimatedPressable
                   accessibilityRole="button"
@@ -3846,49 +3786,6 @@ export default function App() {
           </Pressable>
         </Modal>
 
-        <Modal
-          visible={Boolean(deleteConfirmProvider)}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setDeleteConfirmProviderId(null)}
-        >
-          <Pressable
-            style={styles.deleteConfirmScrim}
-            onPress={() => setDeleteConfirmProviderId(null)}
-          >
-            <Pressable style={styles.deleteConfirmDialog} onPress={(event) => event.stopPropagation()}>
-              <View style={styles.deleteConfirmIconWrap}>
-                <Trash2 size={22} color={palette.danger} strokeWidth={2.4} />
-              </View>
-              <Text style={styles.deleteConfirmTitle}>删除服务商</Text>
-              <Text style={styles.deleteConfirmText}>
-                这会删除「{deleteConfirmProvider?.name ?? '该服务商'}」的配置、模型列表和本地 API Key；历史消息仍会保留。
-              </Text>
-              <View style={styles.renameDialogActions}>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  onPress={() => setDeleteConfirmProviderId(null)}
-                  style={styles.renameDialogSecondaryButton}
-                >
-                  <Text style={styles.renameDialogSecondaryText}>取消</Text>
-                </AnimatedPressable>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  onPress={() => {
-                    if (deleteConfirmProvider) {
-                      deleteProvider(deleteConfirmProvider.id);
-                    }
-                  }}
-                  haptic="warning"
-                  style={styles.deleteConfirmButton}
-                >
-                  <Text style={styles.deleteConfirmButtonText}>删除</Text>
-                </AnimatedPressable>
-              </View>
-            </Pressable>
-          </Pressable>
-        </Modal>
-
         <Toast message={toastMessage} />
       </SafeAreaView>
     </SafeAreaProvider>
@@ -3954,73 +3851,6 @@ function formatCompactModelName(modelId?: string, _providerName?: string, maxLen
   return truncateModelLabel(capitalizeFirstSegment(compact), maxLength);
 }
 
-type ModelIconKey =
-  | 'openai'
-  | 'claude'
-  | 'gemini'
-  | 'qwen'
-  | 'deepseek'
-  | 'doubao'
-  | 'chatglm'
-  | 'zhipu'
-  | 'kimi'
-  | 'minimax'
-  | 'bailian'
-  | 'volcengine'
-  | 'newapi'
-  | 'unknown';
-
-function modelIconKey(modelId?: string, providerName?: string): ModelIconKey {
-  const modelText = (modelId ?? '').toLowerCase();
-  const providerText = (providerName ?? '').toLowerCase();
-  const text = `${modelText} ${providerText}`;
-
-  if (text.includes('模型未记录') || text.includes('未知服务商')) {
-    return 'unknown';
-  }
-  if (text.includes('gpt') || text.includes('openai') || text.includes('codex')) {
-    return 'openai';
-  }
-  if (text.includes('claude') || text.includes('anthropic')) {
-    return 'claude';
-  }
-  if (text.includes('gemini') || text.includes('google')) {
-    return 'gemini';
-  }
-  if (modelText.includes('qwen') || modelText.includes('qwq') || modelText.includes('qvq') || modelText.includes('tongyi')) {
-    return 'qwen';
-  }
-  if (text.includes('deepseek')) {
-    return 'deepseek';
-  }
-  if (modelText.includes('doubao') || modelText.includes('seed')) {
-    return 'doubao';
-  }
-  if (modelText.includes('chatglm')) {
-    return 'chatglm';
-  }
-  if (/^glm(?:[-_.]|$)/.test(modelText) || text.includes('zhipu') || text.includes('bigmodel') || text.includes('智谱')) {
-    return 'zhipu';
-  }
-  if (text.includes('kimi') || text.includes('moonshot')) {
-    return 'kimi';
-  }
-  if (text.includes('minimax')) {
-    return 'minimax';
-  }
-  if (providerText.includes('bailian') || providerText.includes('dashscope') || providerText.includes('aliyun')) {
-    return 'bailian';
-  }
-  if (providerText.includes('volc') || providerText.includes('ark') || providerText.includes('huoshan')) {
-    return 'volcengine';
-  }
-  if (providerText.includes('new api') || providerText.includes('new-api') || providerText.includes('newapi')) {
-    return 'newapi';
-  }
-
-  return 'unknown';
-}
-
 function ModelAvatar({
   modelId,
   providerName,
@@ -4032,6 +3862,7 @@ function ModelAvatar({
   size?: number;
   containerSize?: number;
 }) {
+  const { palette, styles } = useAppTheme();
   const iconKey = modelIconKey(modelId, providerName);
 
   return (
@@ -4063,6 +3894,7 @@ function AssistantMessageHeader({
   providerName: string;
   createdAt: number;
 }) {
+  const { styles } = useAppTheme();
   return (
     <View style={styles.assistantMetaRow}>
       <ModelAvatar modelId={modelId} providerName={providerName} />
@@ -4095,6 +3927,7 @@ function MessageActions({
   onShare: () => void;
   onMore: () => void;
 }) {
+  const { palette, styles } = useAppTheme();
   return (
     <View style={[styles.messageActions, role === 'user' && styles.userMessageActions]}>
       <AnimatedPressable
@@ -4150,6 +3983,7 @@ function MessageInlineEditor({
   onCancel: () => void;
   onSave: () => void;
 }) {
+  const { palette, styles } = useAppTheme();
   return (
     <View style={styles.messageInlineEditor}>
       <TextInput
@@ -4194,6 +4028,7 @@ function MessageActionMenu({
   onEdit: () => void;
   onDelete: () => void;
 }) {
+  const { palette, styles } = useAppTheme();
   return (
     <View style={[styles.messageActionMenu, role === 'user' && styles.userMessageActionMenu]}>
       <AnimatedPressable accessibilityRole="button" onPress={onEdit} style={styles.messageActionMenuRow}>
@@ -4214,6 +4049,7 @@ function MessageActionMenu({
 }
 
 function TokenUsageLine({ usage }: { usage: ChatTokenUsage }) {
+  const { palette, styles } = useAppTheme();
   const total =
     usage.totalTokens ??
     [usage.inputTokens, usage.outputTokens, usage.reasoningTokens]
@@ -4244,6 +4080,7 @@ function GenerationTaskPanel({
   busy: boolean;
   onRefresh: () => void;
 }) {
+  const { styles } = useAppTheme();
   return (
     <View style={styles.generationTaskPanel}>
       <View style={styles.generationTaskInfo}>
@@ -4280,6 +4117,7 @@ function ParameterSlider({
   step: number;
   onChange: (value: number) => void;
 }) {
+  const { styles } = useAppTheme();
   const trackWidth = useRef(0);
   const currentValue = useRef(value);
   currentValue.current = value;
@@ -4356,6 +4194,7 @@ function ParameterControl({
   value: number;
   onChange: (value: number) => void;
 }) {
+  const { styles } = useAppTheme();
   const [draft, setDraft] = useState(formatParameterValue(value));
 
   useEffect(() => {
@@ -4421,6 +4260,7 @@ function ModelPickerModal({
   onClose,
   onSelect,
 }: ModelPickerModalProps) {
+  const { styles } = useAppTheme();
   const [mounted, setMounted] = useState(visible);
   const unmountTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -4575,6 +4415,7 @@ function SidebarDrawer({
   onPanelLayout?: (height: number) => void;
   children: ReactNode;
 }) {
+  const { styles } = useAppTheme();
   const { width } = useWindowDimensions();
   const panelWidth = Math.min(320, Math.round(width * 0.8));
   const [mounted, setMounted] = useState(open);
@@ -4649,15 +4490,8 @@ function SidebarDrawer({
   );
 }
 
-interface ModelButtonProps {
-  model: ModelInfo;
-  providerName?: string;
-  active: boolean;
-  onPress: () => void;
-  onRemove: () => void;
-}
-
 function ModelTaskBadge({ model }: { model: ModelInfo }) {
+  const { styles } = useAppTheme();
   const task = inferModelTask(model);
 
   return (
@@ -4667,64 +4501,8 @@ function ModelTaskBadge({ model }: { model: ModelInfo }) {
   );
 }
 
-function ModelButton({ model, providerName, active, onPress, onRemove }: ModelButtonProps) {
-  return (
-    <View style={[styles.modelButton, active && styles.modelButtonActive]}>
-      <AnimatedPressable accessibilityRole="button" onPress={onPress} style={styles.modelSelectArea}>
-        <ModelAvatar modelId={model.id} providerName={providerName} size={17} containerSize={26} />
-        <View style={styles.modelTextBlock}>
-          <Text numberOfLines={1} style={[styles.modelName, active && styles.modelNameActive]}>
-            {model.name ?? model.id}
-          </Text>
-          <Text numberOfLines={1} style={styles.modelMeta}>
-            {model.id}
-          </Text>
-          <ModelTaskBadge model={model} />
-        </View>
-      </AnimatedPressable>
-      <AnimatedPressable accessibilityRole="button" onPress={onRemove} style={styles.compactButton}>
-        <Text style={styles.compactButtonText}>删除</Text>
-      </AnimatedPressable>
-    </View>
-  );
-}
-
-interface CandidateModelRowProps {
-  model: ModelInfo;
-  providerName?: string;
-  added: boolean;
-  onAdd: () => void;
-}
-
-function CandidateModelRow({ model, providerName, added, onAdd }: CandidateModelRowProps) {
-  return (
-    <View style={styles.candidateRow}>
-      <ModelAvatar modelId={model.id} providerName={providerName} size={17} containerSize={26} />
-      <View style={styles.modelTextBlock}>
-        <Text numberOfLines={1} style={styles.modelName}>
-          {model.name ?? model.id}
-        </Text>
-        <Text numberOfLines={1} style={styles.modelMeta}>
-          {model.id}
-        </Text>
-        <ModelTaskBadge model={model} />
-      </View>
-      <AnimatedPressable
-        accessibilityRole="button"
-        accessibilityLabel={added ? `已添加模型 ${model.name ?? model.id}` : `添加模型 ${model.name ?? model.id}`}
-        disabled={added}
-        onPress={onAdd}
-        style={[styles.addModelButton, added && styles.addModelButtonAdded]}
-      >
-        <Text style={[styles.addModelButtonText, added && styles.addModelButtonTextAdded]}>
-          {added ? '已添加' : '+'}
-        </Text>
-      </AnimatedPressable>
-    </View>
-  );
-}
-
 function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
+  const { palette, styles } = useAppTheme();
   const [displayUri, setDisplayUri] = useState(attachment.uri);
 
   useEffect(() => {
@@ -4788,7 +4566,10 @@ function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
           createElement('video', {
             controls: true,
             src: attachment.uri,
-            style: webVideoPreviewStyle,
+            style: {
+              ...webVideoPreviewStyle,
+              backgroundColor: palette.surfaceSunken,
+            },
           })
         ) : (
           <View style={styles.attachmentVideoPlaceholder}>
@@ -4827,7 +4608,8 @@ function AttachmentPreview({ attachment }: { attachment: MediaAttachment }) {
   );
 }
 
-const styles = StyleSheet.create({
+function createAppStyles(palette: AppPalette) {
+  return StyleSheet.create({
   root: {
     flex: 1,
   },
@@ -5044,7 +4826,7 @@ const styles = StyleSheet.create({
     fontFamily: serifFont,
   },
   settingsCard: {
-    backgroundColor: '#FFFFFF',
+    backgroundColor: palette.surfaceAlt,
     borderRadius: radii.lg,
     padding: 16,
     gap: 14,
@@ -5649,9 +5431,9 @@ const styles = StyleSheet.create({
   },
   userBubble: {
     maxWidth: '86%',
-    backgroundColor: '#E8F8EF',
+    backgroundColor: palette.userBubble,
     borderWidth: 1,
-    borderColor: '#BEEBD1',
+    borderColor: palette.userBubbleBorder,
     borderRadius: radii.lg,
     borderTopRightRadius: radii.sm,
     paddingHorizontal: 12,
@@ -5695,7 +5477,7 @@ const styles = StyleSheet.create({
     width: 24,
     height: 24,
     borderRadius: 12,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: palette.surfaceAlt,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -5843,8 +5625,8 @@ const styles = StyleSheet.create({
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
   userInlineEditInput: {
-    borderColor: '#9FDBB8',
-    backgroundColor: '#F4FFF8',
+    borderColor: palette.userEditBorder,
+    backgroundColor: palette.userEditBubble,
   },
   assistantInlineEditInput: {
     borderColor: palette.border,
@@ -5881,7 +5663,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   inlineEditPrimaryText: {
-    color: '#FFFFFF',
+    color: palette.textOnAccent,
     fontSize: 13,
     fontWeight: '800',
   },
@@ -5893,7 +5675,7 @@ const styles = StyleSheet.create({
     borderRadius: radii.md,
     borderWidth: 1,
     borderColor: palette.border,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: palette.surfaceAlt,
     overflow: 'hidden',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 8 },
@@ -5913,7 +5695,7 @@ const styles = StyleSheet.create({
     gap: 12,
     paddingHorizontal: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#EFEFEF',
+    borderBottomColor: palette.border,
   },
   messageActionMenuDangerRow: {
     borderBottomWidth: 0,
@@ -6565,7 +6347,7 @@ const styles = StyleSheet.create({
     backgroundColor: palette.surface,
   },
   sidebarConversationMoreActive: {
-    backgroundColor: '#FFFFFF',
+    backgroundColor: palette.surfaceAlt,
     borderWidth: 1,
     borderColor: palette.accentBorder,
   },
@@ -6579,7 +6361,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: palette.border,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: palette.surfaceAlt,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 12 },
     shadowOpacity: 0.12,
@@ -6593,7 +6375,7 @@ const styles = StyleSheet.create({
     left: 0,
     zIndex: 30,
     elevation: 30,
-    backgroundColor: 'rgba(255, 255, 255, 0.64)',
+    backgroundColor: palette.frostedSurface,
     ...(Platform.OS === 'web'
       ? ({
           backdropFilter: 'blur(14px)',
@@ -6612,7 +6394,7 @@ const styles = StyleSheet.create({
     gap: 10,
     paddingHorizontal: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#EFEFEF',
+    borderBottomColor: palette.border,
   },
   sidebarConversationActionDangerRow: {
     borderBottomWidth: 0,
@@ -6635,7 +6417,7 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.32)',
+    backgroundColor: palette.scrim,
     paddingHorizontal: 28,
     zIndex: 1000,
     elevation: 1000,
@@ -6713,7 +6495,7 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.32)',
+    backgroundColor: palette.scrim,
     paddingHorizontal: 30,
     zIndex: 1000,
     elevation: 1000,
@@ -6765,8 +6547,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
   },
   deleteConfirmButtonText: {
-    color: '#FFFFFF',
+    color: palette.textOnAccent,
     fontSize: 14,
     fontWeight: '800',
   },
-});
+  });
+}
+
+const appStylesByMode = {
+  light: createAppStyles(lightPalette),
+  dark: createAppStyles(darkPalette),
+} as const;

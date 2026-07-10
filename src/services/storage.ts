@@ -10,6 +10,7 @@ import type {
   Capability,
   ChatConversation,
   ChatMessage,
+  ColorMode,
   MediaAttachment,
   ModelInfo,
   ModelParameterSettings,
@@ -26,6 +27,7 @@ const LEGACY_WORKSPACE_KEY = '@embezzle-studio/workspace-v1';
 const WORKSPACE_KEY = '@embezzle-studio/workspace-v2';
 const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v2.backup';
 const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v2';
+const COLOR_MODE_KEY = '@embezzle-studio/color-mode-v1';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
 const STORAGE_SCHEMA_VERSION = 2;
 const INTERRUPTED_MESSAGE = '上次请求在应用退出前未完成，已标记为中断。';
@@ -228,6 +230,7 @@ function normalizeProvider(value: unknown, index: number): PersistedProvider {
     capabilities: normalizeCapabilities(value.capabilities, ['text', 'streaming']),
     models: [],
     ...(typeof value.notes === 'string' ? { notes: value.notes } : {}),
+    ...(typeof value.enabled === 'boolean' ? { enabled: value.enabled } : {}),
   };
   provider.models = arrayField(value.models, `providers[${index}].models`).map((model, modelIndex) =>
     normalizeModel(model, provider, `providers[${index}].models[${modelIndex}]`)
@@ -445,6 +448,15 @@ function normalizePlugins(value: unknown): PluginManifest[] {
       ...(typeof plugin.endpoint === 'string' ? { endpoint: plugin.endpoint.trim() } : {}),
     };
   });
+}
+
+export async function loadColorMode(): Promise<ColorMode> {
+  const value = await AsyncStorage.getItem(COLOR_MODE_KEY);
+  return value === 'light' || value === 'dark' || value === 'system' ? value : 'system';
+}
+
+export async function saveColorMode(colorMode: ColorMode): Promise<void> {
+  await AsyncStorage.setItem(COLOR_MODE_KEY, colorMode);
 }
 
 function normalizeModelCapabilities(provider: ProviderProfile, model: ModelInfo): ModelInfo {

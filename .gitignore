@@ -31,3 +31,5 @@ api_key.txt
 *.pfx
 *.pem
 *.key
+
+pro-ref/

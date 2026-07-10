@@ -7,6 +7,7 @@ const LEGACY_WORKSPACE_KEY = '@embezzle-studio/workspace-v1';
 const WORKSPACE_KEY = '@embezzle-studio/workspace-v2';
 const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v2.backup';
 const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v2';
+const COLOR_MODE_KEY = '@embezzle-studio/color-mode-v1';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
 
 const mocks = vi.hoisted(() => ({
@@ -331,6 +332,17 @@ describe('versioned and ordered saves', () => {
     expect(loadedModel?.capabilities).not.toContain('reasoning');
   });
 
+  it('preserves a disabled provider across the v2 normalization boundary', async () => {
+    const workspace = createDefaultWorkspace();
+    workspace.providers[0] = { ...workspace.providers[0], enabled: false };
+    const { loadWorkspace, saveWorkspace } = await subject();
+
+    await saveWorkspace(workspace);
+    const loaded = await loadWorkspace();
+
+    expect(loaded?.providers[0].enabled).toBe(false);
+  });
+
   it('preserves authoritative remote model task and capabilities across a restart', async () => {
     const workspace = createDefaultWorkspace();
     workspace.providers[0] = {
@@ -387,5 +399,23 @@ describe('versioned and ordered saves', () => {
     expect(finalEnvelope.workspace.conversations[0].title).toBe('second');
     expect(backupEnvelope.revision).toBe(1);
     expect(backupEnvelope.workspace.conversations[0].title).toBe('first');
+  });
+});
+
+describe('appearance storage', () => {
+  it('defaults to the system color mode when no preference exists', async () => {
+    const { loadColorMode } = await subject();
+
+    await expect(loadColorMode()).resolves.toBe('system');
+  });
+
+  it('round-trips a saved color mode independently from workspace snapshots', async () => {
+    const { loadColorMode, saveColorMode } = await subject();
+
+    await saveColorMode('dark');
+
+    expect(mocks.values.get(COLOR_MODE_KEY)).toBe('dark');
+    await expect(loadColorMode()).resolves.toBe('dark');
+    expect(mocks.values.has(WORKSPACE_KEY)).toBe(false);
   });
 });
