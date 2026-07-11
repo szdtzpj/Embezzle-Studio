@@ -28,7 +28,20 @@
 - Audio input and transcription path.
 - Per-message media inspection.
 
-当前实现边界：图片、视频和文件选择 UI 已按模型能力启用；选择器已经实施数量、单项大小、总大小和图片像素上限。百炼兼容模式已支持有界的本地视频 `video_url`，OpenAI 官方 API 已支持显式 `file-input` 模型的文件附件，火山方舟已支持带参考素材的视频生成任务。其他服务商的对话视频上传/转码协议、自动压缩和音频链路仍未完成，因此 M2 不能仅凭已有入口视为整体完成。
+当前实现边界：图片、视频和文件选择 UI 已按模型能力启用；选择器已经实施数量、单项大小、总大小和图片像素上限。百炼兼容模式已支持有界的本地视频 `video_url`，OpenAI 官方 API 已支持显式 `file-input` 模型的文件附件，火山方舟已支持带参考素材的视频生成任务。`1.1.0` 开发分支新增 Android 请求式语音：OpenAI/百炼用户账号可以转写前台录音并生成回答朗读；火山语音因独立凭证协议、Realtime 因需要 token broker 而保持关闭。其他服务商的视频上传/转码、自动压缩及更广语音协议仍未完成，因此 M2 尚未整体完成。
+
+## M2.5 - BYOK Productivity
+
+- 2–4 模型同问对比、整组停止与单候选上下文选择。
+- OpenAI/火山方舟/阿里百炼官方 Responses 联网搜索与可点击引用证据。
+- 本地提示词/角色模板、媒体任务中心和 Token/延迟/用户价格估算。
+- 不含 API Key/MCP 授权/媒体的 XChaCha20-Poly1305 加密备份与严格导入。
+
+当前状态：以上本地与协议实现已进入 `1.1.0` / code 7 开发分支；Embezzle Studio 不提供付费 API、生产代理、汇率服务、同步服务器或任务 worker。真实账号产品开通、计费证据、Android 麦克风/播放和并发压力仍是外部验收边界，当前公开 Latest 仍为 `v1.0.6`。
+
+2026-07-11 `1.1.0` 本机验证：`npm.cmd run check` 通过 21 个测试文件/423 个测试，TypeScript 与 ESLint 零错误/警告；最终 Web export 通过（3249 modules、主 bundle 7.2 MB），Expo Doctor 20/20，`expo install --check` 通过。390×844 导出 Web 覆盖新增设置中心、模板保存/插入，并实际证明生产式 Web 请求在接触本机代理前 fail-closed，console 为 0 error / 0 warning。3 个 workflow YAML、35 个 Bash block 和 `git diff --check` 通过。
+
+干净 Android prebuild 与 `NODE_ENV=production` 未签名 Release 构建通过。本地正式证书候选位于 `D:\EmbezzleStudio-Releases\v1.1.0-candidate\Embezzle-Studio-v1.1.0-candidate-release.apk`，大小 97,198,551 字节，SHA-256 `f4a0062fc03d320bb5e3915b6b9a0cdb3a80ee16b4ad18cce78edfd79f92cd80`；包名 `com.szdtzpj.embezzlestudio`、版本 `1.1.0`/code 7、minSdk 24/targetSdk 36。`RECORD_AUDIO` 为请求式语音的有意权限，overlay/camera 缺席；单一正式签名者、v2/v3 与 zipalign 通过。该候选未 tag、未上传、未发布，公开 Latest 仍为 `v1.0.6`。
 
 已发布的 `1.0.6` 包含并取代此前 `1.0.5` 的真机反馈修复：待发送图片使用 1:1 方形真实预览；对话视频改为 `expo-video` 原生内嵌播放器和全屏控件；视频文件名与“保存/分享”位于不会被卡片裁切的独立操作区；Android 保存使用系统 Storage Access Framework，不申请宽泛媒体库权限。原生图片选择不再额外请求整张 Base64，以降低高分辨率图片进入 JS 堆时的峰值。
 
@@ -41,6 +54,8 @@
 - Tool-call execution loop in chat.
 - Plugin manifest installer from URL or local file.
 - Plugin marketplace/import format for private use.
+
+当前状态：远程 HTTPS MCP 配置、独立安全存储、私网/内嵌凭据拒绝、默认关闭和权限确认已经实现；真实工具执行仍保持 fail-closed。OpenAI/Ark 的 `mcp_approval_request -> mcp_approval_response` 循环、参数/拟发送数据预览、工具白名单和真实服务器测试完成前不得把配置状态描述为可执行 MCP。百炼缺少同等逐次审批契约时不开放写工具。
 
 ## M4 - Collaboration Handoff
 

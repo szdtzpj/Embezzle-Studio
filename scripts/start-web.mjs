@@ -70,4 +70,6 @@ start('dev proxy', nodeExecutable, [path.join(rootDir, 'scripts', 'dev-proxy.mjs
     ? `${localWebOrigins},${process.env.WEB_PROXY_ALLOWED_ORIGINS}`
     : localWebOrigins,
 });
-start('expo web', nodeExecutable, [expoCli, 'start', '--web', ...extraArgs]);
+start('expo web', nodeExecutable, [expoCli, 'start', '--web', ...extraArgs], {
+  EXPO_PUBLIC_ENABLE_WEB_DEV_PROXY: '1',
+});

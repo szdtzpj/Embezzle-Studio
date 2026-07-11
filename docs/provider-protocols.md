@@ -1,6 +1,6 @@
 # Provider Protocol Matrix
 
-Last verified: 2026-07-10. This file records wire-level decisions that must stay covered by tests when model catalogs change.
+Last verified: 2026-07-11. This file records wire-level decisions that must stay covered by tests when model catalogs change.
 
 ## OpenAI
 
@@ -25,6 +25,22 @@ Last verified: 2026-07-10. This file records wire-level decisions that must stay
 - GLM 5/5.1 preserve `xhigh` and never send `max`; GLM 5.2 may send `max`. DeepSeek V4 uses its native `high|max` subset. [GLM models](https://help.aliyun.com/zh/model-studio/glm), [DeepSeek models](https://help.aliyun.com/zh/model-studio/deepseek-api)
 - Bailian `/models` is treated as an optional compatibility feature. A missing or malformed response directs the user to the official model catalog and manual Model ID entry instead of making the provider unusable. [Model catalog](https://help.aliyun.com/zh/model-studio/models)
 
+## Provider-hosted search
+
+- OpenAI search uses official `POST /v1/responses` with `tools: [{ type: "web_search" }]`. Ark uses official `POST /api/v3/responses` with bounded `max_keyword: 3` and `limit: 10`. Bailian uses official compatible `POST /responses` with the `web_search` tool. Provider kind, official HTTPS host, and known base path must all match; a lookalike host or relay is not promoted to a hosted-search adapter. [OpenAI web search](https://developers.openai.com/api/docs/guides/tools-web-search), [Ark web search](https://www.volcengine.com/docs/82379/1756990), [Bailian web search](https://help.aliyun.com/zh/model-studio/web-search)
+- Ark/Bailian search starts text-only. OpenAI may reuse its already validated Responses image/file input. A model capability label alone never sends a search: the user key, exact adapter, and explicit search switch are also required.
+- `webSearchTriggered` requires a `web_search_call`, a valid `url_citation`, or (Bailian only) positive `usage.x_tools.web_search.count`. Citations reject non-HTTPS, credential-bearing, local/private, malformed, or out-of-range URLs and are displayed as visible links.
+
+## Request-based audio
+
+- Audio is Android-only and requires the user's own key. OpenAI transcription uses multipart `POST /v1/audio/transcriptions` (25 MiB maximum); synthesis uses JSON `POST /v1/audio/speech` (4,096 code-point input maximum) and stores returned bytes in the app cache. [OpenAI STT](https://developers.openai.com/api/docs/guides/speech-to-text), [OpenAI TTS](https://developers.openai.com/api/docs/guides/text-to-speech)
+- Bailian transcription uses `qwen3-asr-flash` through compatible Chat `input_audio` with a 10 MiB data-URL maximum. Bailian synthesis uses provider-native multimodal generation and immediately downloads the temporary result URL after strict HTTPS/public-host validation. [Qwen ASR](https://help.aliyun.com/zh/model-studio/qwen-asr-api-reference), [Qwen TTS](https://help.aliyun.com/en/model-studio/qwen-tts-api)
+- Ark credentials are never reused for Volcengine speech products, which have separate AppID/access-token/resource contracts. OpenAI Realtime is not enabled because a safe client session needs a server-generated ephemeral token.
+
+## Remote MCP
+
+- OpenAI and Ark document Responses MCP approval-request/approval-response flows; Bailian documents hosted MCP but not an equivalent per-call approval contract for this client. Configuration therefore remains default-off and non-executing until the client can show server/tool/full arguments/outgoing data, enforce non-empty allowlists, and send the documented approval response. [OpenAI MCP](https://developers.openai.com/api/docs/guides/tools-connectors-mcp), [Ark MCP](https://www.volcengine.com/docs/82379/1827534), [Bailian MCP](https://help.aliyun.com/en/model-studio/mcp)
+
 ## Regression tests
 
-The table is exercised by `tests/reasoning-efforts.test.ts`, `tests/openai-responses.test.ts`, `tests/openai-routing-integration.test.ts`, `tests/bailian-compatible.test.ts`, and `tests/ark-model-discovery.test.ts`.
+The table is exercised by `tests/reasoning-efforts.test.ts`, `tests/openai-responses.test.ts`, `tests/openai-routing-integration.test.ts`, `tests/bailian-compatible.test.ts`, `tests/ark-model-discovery.test.ts`, `tests/provider-web-search.test.ts`, and `tests/provider-audio.test.ts`.

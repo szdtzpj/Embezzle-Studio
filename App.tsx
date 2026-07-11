@@ -1,6 +1,14 @@
 import { StatusBar } from 'expo-status-bar';
 import { useEvent } from 'expo';
 import { BlurView } from 'expo-blur';
+import {
+  RecordingPresets,
+  createAudioPlayer,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  useAudioRecorder,
+  useAudioRecorderState,
+} from 'expo-audio';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
 import * as Sharing from 'expo-sharing';
@@ -44,7 +52,7 @@ import Reanimated, {
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AnimatePresence, MotiView } from 'moti';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Brain, Check, ChevronDown, Copy, Download, ExternalLink, FileText, Image as ImageIcon, Lightbulb, Menu, MessageSquare, MoreHorizontal, PenSquare, Pencil, Pin, Play, Plus, RefreshCw, Search, Share2, Settings, SlidersHorizontal, Square, Trash2, Video, X } from 'lucide-react-native';
+import { BookOpen, Brain, Check, ChevronDown, Columns3, Copy, Download, ExternalLink, FileText, Globe2, Image as ImageIcon, Lightbulb, Menu, MessageSquare, Mic, MoreHorizontal, PenSquare, Pencil, Pin, Play, Plus, RefreshCw, Search, Share2, Settings, SlidersHorizontal, Square, Trash2, Video, Volume2, Wrench, X } from 'lucide-react-native';
 import { Bailian, ChatGLM, Claude, DeepSeek, Doubao, Gemini, Kimi, Minimax, NewAPI, OpenAI, Qwen, Volcengine, Zhipu } from '@lobehub/icons-rn';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/arkModels';
@@ -65,6 +73,9 @@ import type {
   ProviderProfile,
   ReasoningEffort,
   ModelParameterSettings,
+  ModelPricing,
+  PricingCurrency,
+  WebCitation,
 } from './src/domain/types';
 import { pickFiles, pickImages, pickVideos, validateAttachments } from './src/services/mediaPicker';
 import { saveAttachmentToDevice } from './src/services/mediaExport';
@@ -100,6 +111,36 @@ import {
   isWorkspaceReadOnly,
   resolveMessageProvider,
 } from './src/services/workspaceRuntime';
+import { aggregateUsage, estimateMessageCost } from './src/services/usageAnalytics';
+import {
+  assertProviderWebSearchMessagesSupported,
+  resolveProviderWebSearchProtocol,
+} from './src/services/providerWebSearch';
+import {
+  createPromptTemplate,
+  deletePromptTemplate,
+  renderPromptTemplate,
+  setPromptTemplatePinned,
+} from './src/services/promptTemplates';
+import {
+  deriveGenerationTasks,
+  filterGenerationTasks,
+  type GenerationTaskFilter,
+} from './src/services/generationTasks';
+import {
+  exportEncryptedWorkspaceBackup,
+  importEncryptedWorkspaceBackup,
+} from './src/services/workspaceBackup';
+import {
+  exportWorkspaceBackupFile,
+  pickWorkspaceBackupFile,
+} from './src/services/workspaceBackupIO';
+import {
+  getProviderAudioReadiness,
+  resolveProviderAudioProtocol,
+  synthesizeSpeech,
+  transcribeAudio,
+} from './src/services/providerAudio';
 
 /**
  * Anthropic / Claude 风格视觉令牌。
@@ -216,10 +257,93 @@ function confirmDestructiveAction(title: string, message: string): Promise<boole
   });
 }
 
+function isPrivateMcpHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (
+    !normalized ||
+    (!normalized.includes('.') && !normalized.includes(':')) ||
+    normalized === 'localhost' ||
+    normalized.endsWith('.localhost') ||
+    normalized.endsWith('.local') ||
+    normalized.endsWith('.internal') ||
+    normalized.endsWith('.lan') ||
+    normalized.endsWith('.home.arpa')
+  ) {
+    return true;
+  }
+
+  if (normalized.includes(':')) {
+    const segments = normalized.split(':');
+    const first = Number.parseInt(segments[0] || '0', 16);
+    const second = Number.parseInt(segments[1] || '0', 16);
+    const third = Number.parseInt(segments[2] || '0', 16);
+    return (
+      normalized.startsWith('::') ||
+      normalized.startsWith('64:ff9b:') ||
+      normalized.startsWith('100::') ||
+      normalized.startsWith('2002:') ||
+      first === 0x5f00 ||
+      (first >= 0xfc00 && first <= 0xfdff) ||
+      (first >= 0xfe80 && first <= 0xfeff) ||
+      (first >= 0xff00 && first <= 0xffff) ||
+      (first === 0x3fff && second <= 0x0fff) ||
+      (first === 0x2001 &&
+        (second === 0 ||
+          (second === 2 && third === 0) ||
+          second === 0x0db8 ||
+          (second >= 0x10 && second <= 0x2f)))
+    );
+  }
+
+  const octets = normalized.split('.').map(Number);
+  if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) {
+    return /^[0-9.]+$/.test(normalized);
+  }
+  const [a, b, c] = octets;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 192 && b === 0 && (c === 0 || c === 2)) ||
+    (a === 192 && b === 88 && c === 99) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    (a === 198 && b === 51 && c === 100) ||
+    (a === 203 && b === 0 && c === 113) ||
+    a >= 224
+  );
+}
+
 type AssistantRequestOutcome =
   | { status: 'success' }
   | { status: 'cancelled' }
   | { status: 'error'; error: string };
+
+type AudioOperation = 'idle' | 'recording' | 'transcribing' | 'synthesizing';
+
+interface ActiveAudioOperation {
+  id: number;
+  kind: Exclude<AudioOperation, 'idle'>;
+  controller: AbortController;
+}
+
+async function deleteTemporaryAudioFile(uri?: string | null): Promise<void> {
+  if (!uri?.startsWith('file:')) {
+    return;
+  }
+  try {
+    const { File } = await import('expo-file-system');
+    const file = new File(uri);
+    if (file.exists) {
+      file.delete();
+    }
+  } catch {
+    // Temporary cache cleanup is best effort and must not mask the user-facing result.
+  }
+}
 
 const AnimatedPressableView = Reanimated.createAnimatedComponent(Pressable);
 const webInteractiveStyle =
@@ -571,19 +695,28 @@ const modelTaskLabel: Record<ModelTask, string> = {
   chat: '对话',
   'image-generation': '图片生成',
   'video-generation': '视频生成',
+  'audio-transcription': '语音转写',
+  'speech-generation': '语音合成',
   embedding: '嵌入',
   rerank: '重排',
 };
 const configurableModelCapabilities: Array<{ key: Capability; label: string }> = [
   { key: 'image-input', label: '图片输入' },
   { key: 'video-input', label: '视频输入' },
+  { key: 'file-input', label: '文件输入' },
   { key: 'reasoning', label: '深度思考' },
   { key: 'tool-calling', label: '工具调用' },
+  { key: 'web-search', label: '联网搜索' },
+  { key: 'speech-to-text', label: '语音转写' },
+  { key: 'text-to-speech', label: '语音合成' },
+  { key: 'mcp', label: 'MCP' },
 ];
 const configurableModelTasks: ModelTask[] = [
   'chat',
   'image-generation',
   'video-generation',
+  'audio-transcription',
+  'speech-generation',
   'embedding',
   'rerank',
 ];
@@ -788,6 +921,8 @@ function formatUpdateStatusTitle(updateInfo: AppUpdateInfo | null, updateNotice:
 }
 
 export default function App() {
+  const voiceRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const voiceRecorderState = useAudioRecorderState(voiceRecorder, 250);
   const [workspace, setWorkspace] = useState<AppWorkspace>(() => createDefaultWorkspace());
   const [booting, setBooting] = useState(true);
   const [persistenceReady, setPersistenceReady] = useState(false);
@@ -800,6 +935,21 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [input, setInput] = useState('');
   const [manualModelId, setManualModelId] = useState('');
+  const [promptTemplateName, setPromptTemplateName] = useState('');
+  const [promptTemplateContent, setPromptTemplateContent] = useState('');
+  const [promptTemplateMode, setPromptTemplateMode] = useState<'composer' | 'system'>('composer');
+  const [pricingInputDraft, setPricingInputDraft] = useState('');
+  const [pricingCachedDraft, setPricingCachedDraft] = useState('');
+  const [pricingOutputDraft, setPricingOutputDraft] = useState('');
+  const [generationTaskFilter, setGenerationTaskFilter] = useState<GenerationTaskFilter>('all');
+  const [backupPassword, setBackupPassword] = useState('');
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [mcpName, setMcpName] = useState('');
+  const [mcpEndpoint, setMcpEndpoint] = useState('');
+  const [mcpAuthorization, setMcpAuthorization] = useState('');
+  const [audioOperation, setAudioOperation] = useState<AudioOperation>('idle');
+  const audioBusy = audioOperation !== 'idle';
+  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const [modelSearchQuery, setModelSearchQuery] = useState('');
   const [modelCapabilityFilter, setModelCapabilityFilter] = useState<ModelCapabilityFilter>('all');
   const [candidateModelRenderLimit, setCandidateModelRenderLimit] = useState(candidateModelPageSize);
@@ -836,6 +986,13 @@ export default function App() {
   const suppressNextSaveRef = useRef(false);
   const mountedRef = useRef(true);
   const activeRequestRef = useRef<{ controller: AbortController; label: string } | null>(null);
+  const audioOperationSequenceRef = useRef(0);
+  const activeAudioOperationRef = useRef<ActiveAudioOperation | null>(null);
+  const speechPlayerRef = useRef<ReturnType<typeof createAudioPlayer> | null>(null);
+  const speechCacheUriRef = useRef<string | null>(null);
+  const voiceRecorderRef = useRef(voiceRecorder);
+  const backgroundRecordingStopRef = useRef(false);
+  voiceRecorderRef.current = voiceRecorder;
   const generationTaskControllersRef = useRef(new Map<string, AbortController>());
   const chatScrollRef = useRef<ScrollView>(null);
   const shouldAutoScrollRef = useRef(true);
@@ -855,6 +1012,14 @@ export default function App() {
         clearTimeout(saveTimer.current);
       }
       activeRequestRef.current?.controller.abort();
+      activeAudioOperationRef.current?.controller.abort();
+      speechPlayerRef.current?.release();
+      speechPlayerRef.current = null;
+      void deleteTemporaryAudioFile(speechCacheUriRef.current);
+      speechCacheUriRef.current = null;
+      if (voiceRecorderRef.current.isRecording) {
+        void voiceRecorderRef.current.stop();
+      }
       void deletePersistedAttachments(pendingAttachmentsRef.current);
       for (const controller of taskControllers.values()) {
         controller.abort();
@@ -905,6 +1070,50 @@ export default function App() {
     activeRequestRef.current = { controller, label };
     setBusy(true);
     return controller;
+  }
+
+  function beginAudioOperation(kind: ActiveAudioOperation['kind']): ActiveAudioOperation | null {
+    if (activeAudioOperationRef.current) {
+      return null;
+    }
+    const operation: ActiveAudioOperation = {
+      id: ++audioOperationSequenceRef.current,
+      kind,
+      controller: new AbortController(),
+    };
+    activeAudioOperationRef.current = operation;
+    setAudioOperation(kind);
+    return operation;
+  }
+
+  function transitionAudioOperation(
+    operation: ActiveAudioOperation,
+    kind: ActiveAudioOperation['kind']
+  ): boolean {
+    if (activeAudioOperationRef.current !== operation || operation.controller.signal.aborted) {
+      return false;
+    }
+    operation.kind = kind;
+    setAudioOperation(kind);
+    return true;
+  }
+
+  function finishAudioOperation(operation: ActiveAudioOperation): void {
+    if (activeAudioOperationRef.current !== operation) {
+      return;
+    }
+    activeAudioOperationRef.current = null;
+    if (mountedRef.current) {
+      setAudioOperation('idle');
+    }
+  }
+
+  function assertAudioOperationCurrent(operation: ActiveAudioOperation): void {
+    if (activeAudioOperationRef.current !== operation || operation.controller.signal.aborted) {
+      const error = new Error('语音操作已停止。');
+      error.name = 'AbortError';
+      throw error;
+    }
   }
 
   function finishActiveRequest(controller: AbortController) {
@@ -1018,6 +1227,42 @@ export default function App() {
     const subscription = AppState.addEventListener('change', (nextState) => {
       if (nextState !== 'active') {
         void flushWorkspace();
+        const operation = activeAudioOperationRef.current;
+        operation?.controller.abort();
+        if (speechPlayerRef.current) {
+          speechPlayerRef.current.pause();
+          speechPlayerRef.current.release();
+          speechPlayerRef.current = null;
+          void deleteTemporaryAudioFile(speechCacheUriRef.current);
+          speechCacheUriRef.current = null;
+          setSpeakingMessageId(null);
+        }
+        const recorder = voiceRecorderRef.current;
+        if (operation?.kind === 'recording' && recorder.isRecording && !backgroundRecordingStopRef.current) {
+          backgroundRecordingStopRef.current = true;
+          void (async () => {
+            try {
+              await recorder.stop();
+              await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+              await deleteTemporaryAudioFile(recorder.uri);
+              if (mountedRef.current) {
+                setNotice('应用进入后台，录音已停止并丢弃，未发送给任何服务商。');
+              }
+            } catch {
+              if (mountedRef.current) {
+                setNotice('应用进入后台；录音停止状态无法确认，请返回后重新录制。');
+              }
+            } finally {
+              backgroundRecordingStopRef.current = false;
+              finishAudioOperation(operation);
+            }
+          })();
+        } else if (operation?.kind === 'recording') {
+          finishAudioOperation(operation);
+          setNotice('应用进入后台，录音准备已取消，未发送给任何服务商。');
+        } else if (operation) {
+          setNotice('应用进入后台，进行中的语音请求已停止。');
+        }
       }
     });
 
@@ -1246,6 +1491,98 @@ export default function App() {
         .filter((group) => group.models.length > 0),
     [workspace.providers]
   );
+  const comparisonRuntimes = useMemo(
+    () =>
+      workspace.comparisonTargets.flatMap((target) => {
+        const provider = workspace.providers.find((item) => item.id === target.providerId);
+        const model = provider
+          ? getSelectableModels(provider).find((item) => item.id === target.modelId)
+          : undefined;
+        if (!provider || !model || inferModelTask(model) !== 'chat') {
+          return [];
+        }
+        const effortKey = `${provider.id}:${model.id}`;
+        return [{
+          provider,
+          model,
+          modelId: model.id,
+          reasoningEffort: normalizeReasoningEffort(
+            provider,
+            model,
+            workspace.reasoningEffortByModel[effortKey] ?? 'default'
+          ),
+        }];
+      }),
+    [workspace.comparisonTargets, workspace.providers, workspace.reasoningEffortByModel]
+  );
+  const comparisonActive = workspace.comparisonEnabled && comparisonRuntimes.length >= 2;
+  const composerSupportsMessages = comparisonActive || activeModelSupportsComposer;
+  const composerCanAttachImage = comparisonActive
+    ? comparisonRuntimes.every((runtime) => runtime.model.capabilities.includes('image-input'))
+    : canAttachImage;
+  const composerCanAttachVideo = comparisonActive
+    ? comparisonRuntimes.every((runtime) => runtime.model.capabilities.includes('video-input'))
+    : canAttachVideo;
+  const composerCanAttachFile = comparisonActive
+    ? comparisonRuntimes.every(
+        (runtime) =>
+          runtime.model.capabilities.includes('file-input') &&
+          isOfficialOpenAiProvider(runtime.provider)
+      )
+    : canAttachFile;
+  const composerCanAttachAny = composerCanAttachImage || composerCanAttachVideo || composerCanAttachFile;
+  const webSearchReady = useMemo(() => {
+    const runtimes = comparisonActive
+      ? comparisonRuntimes
+      : activeProvider && activeModel && activeModelTask === 'chat'
+        ? [{ provider: activeProvider, model: activeModel }]
+        : [];
+    if (!runtimes.length) {
+      return false;
+    }
+    return runtimes.every((runtime) => {
+      if (!runtime.provider.apiKey?.trim() || !runtime.model.capabilities.includes('web-search')) {
+        return false;
+      }
+      try {
+        resolveProviderWebSearchProtocol(runtime.provider);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }, [activeModel, activeModelTask, activeProvider, comparisonActive, comparisonRuntimes]);
+  const webSearchContextSizeApplies = useMemo(() => {
+    const runtimes = comparisonActive
+      ? comparisonRuntimes
+      : activeProvider && activeModel && activeModelTask === 'chat'
+        ? [{ provider: activeProvider, model: activeModel }]
+        : [];
+    return Boolean(
+      runtimes.length &&
+      runtimes.every((runtime) => {
+        try {
+          return resolveProviderWebSearchProtocol(runtime.provider) === 'openai-official';
+        } catch {
+          return false;
+        }
+      })
+    );
+  }, [activeModel, activeModelTask, activeProvider, comparisonActive, comparisonRuntimes]);
+  const configuredSpeechProtocol = useMemo(() => {
+    const target = workspace.voice.speechTarget;
+    const provider = target
+      ? workspace.providers.find((item) => item.id === target.providerId)
+      : undefined;
+    if (!provider) {
+      return undefined;
+    }
+    try {
+      return resolveProviderAudioProtocol(provider);
+    } catch {
+      return undefined;
+    }
+  }, [workspace.providers, workspace.voice.speechTarget]);
   const recentConversations = useMemo(
     () =>
       sortConversations(workspace.conversations.filter(hasConversationHistory)),
@@ -1275,6 +1612,50 @@ export default function App() {
 
     return recentConversations.filter((conversation) => conversationSearchText(conversation).includes(query));
   }, [historySearchQuery, recentConversations]);
+  const usageAggregation = useMemo(
+    () => aggregateUsage(workspace.conversations, workspace.modelPricing),
+    [workspace.conversations, workspace.modelPricing]
+  );
+  const knownCostRequestCount = Math.max(
+    0,
+    usageAggregation.totals.requestCount - usageAggregation.totals.unknown.cost
+  );
+  const generationTasks = useMemo(
+    () => deriveGenerationTasks(workspace.conversations),
+    [workspace.conversations]
+  );
+  const visibleGenerationTasks = useMemo(
+    () => filterGenerationTasks(generationTasks, generationTaskFilter),
+    [generationTaskFilter, generationTasks]
+  );
+  const activeModelPricing = useMemo(
+    () =>
+      workspace.modelPricing
+        .filter(
+          (pricing) =>
+            pricing.providerId === activeProvider?.id && pricing.modelId === activeModelId
+        )
+        .sort((left, right) => right.updatedAt - left.updatedAt)[0],
+    [activeModelId, activeProvider?.id, workspace.modelPricing]
+  );
+
+  useEffect(() => {
+    setPricingInputDraft(
+      activeModelPricing?.inputPerMillion !== undefined
+        ? String(activeModelPricing.inputPerMillion)
+        : ''
+    );
+    setPricingCachedDraft(
+      activeModelPricing?.cachedInputPerMillion !== undefined
+        ? String(activeModelPricing.cachedInputPerMillion)
+        : ''
+    );
+    setPricingOutputDraft(
+      activeModelPricing?.outputPerMillion !== undefined
+        ? String(activeModelPricing.outputPerMillion)
+        : ''
+    );
+  }, [activeModelPricing]);
 
   useEffect(() => {
     if (!canConfigureReasoning && reasoningMenuOpen) {
@@ -1339,6 +1720,252 @@ export default function App() {
     }));
     clearPendingAttachments();
     setModelPickerOpen(false);
+  }
+
+  function toggleComparisonTarget(providerId: string, modelId: string) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+    const key = `${providerId}:${modelId}`;
+    const alreadySelected = workspace.comparisonTargets.some(
+      (target) => `${target.providerId}:${target.modelId}` === key
+    );
+    if (!alreadySelected && workspace.comparisonTargets.length >= 4) {
+      setNotice('对比模式最多选择 4 个模型。');
+      return;
+    }
+    setWorkspace((current) => {
+      const exists = current.comparisonTargets.some(
+        (target) => `${target.providerId}:${target.modelId}` === key
+      );
+      if (exists) {
+        const comparisonTargets = current.comparisonTargets.filter(
+          (target) => `${target.providerId}:${target.modelId}` !== key
+        );
+        return {
+          ...current,
+          comparisonTargets,
+          comparisonEnabled: current.comparisonEnabled && comparisonTargets.length >= 2,
+        };
+      }
+      return {
+        ...current,
+        comparisonTargets: [...current.comparisonTargets, { providerId, modelId }],
+      };
+    });
+  }
+
+  function setComparisonEnabled(enabled: boolean) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+    if (enabled && comparisonRuntimes.length < 2) {
+      setNotice('请先在设置中选择至少 2 个对话模型。');
+      return;
+    }
+    setWorkspace((current) => ({ ...current, comparisonEnabled: enabled }));
+    setNotice(
+      enabled
+        ? `已开启 ${workspace.comparisonTargets.length} 模型对比；每次发送会产生同等数量的独立服务商请求。`
+        : ''
+    );
+  }
+
+  function setWebSearchEnabled(enabled: boolean) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+    if (enabled && !webSearchReady) {
+      setNotice(
+        '联网搜索未启用：当前每个目标都必须使用已适配的官方服务商地址、用户自己的 API Key，并明确标记 Web Search 能力。'
+      );
+      return;
+    }
+    setWorkspace((current) => ({
+      ...current,
+      webSearch: { ...current.webSearch, enabled },
+    }));
+    setNotice(
+      enabled
+        ? '已开启服务商联网搜索；搜索工具调用和模型用量均由你的服务商账户结算。'
+        : ''
+    );
+  }
+
+  function savePromptTemplate() {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+    try {
+      const promptTemplates = createPromptTemplate(
+        workspace.promptTemplates,
+        {
+          name: promptTemplateName,
+          content: promptTemplateContent,
+          mode: promptTemplateMode,
+        },
+        { id: createId('prompt'), now: Date.now() }
+      );
+      setWorkspace((current) => ({ ...current, promptTemplates }));
+      setPromptTemplateName('');
+      setPromptTemplateContent('');
+      setNotice('提示词模板已保存在本机。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '提示词模板保存失败。');
+    }
+  }
+
+  function applyPromptTemplate(templateId: string) {
+    const template = workspace.promptTemplates.find((item) => item.id === templateId);
+    if (!template) {
+      return;
+    }
+    const rendered = renderPromptTemplate(template.content, {});
+    if (template.mode === 'composer') {
+      setInput((current) => current.trim() ? `${current}\n\n${rendered}` : rendered);
+      setSettingsOpen(false);
+      setNotice('模板已插入输入框；变量占位符可在发送前直接编辑。');
+      return;
+    }
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+    const conversationId = workspace.activeConversationId || createId('conversation');
+    const existing = workspace.messages.find((message) => message.promptTemplateId === template.id);
+    const systemMessage: ChatMessage = {
+      id: existing?.id ?? createId('system'),
+      role: 'system',
+      content: rendered,
+      createdAt: existing?.createdAt ?? Date.now(),
+      status: 'ready',
+      promptTemplateId: template.id,
+    };
+    setWorkspace((current) => {
+      const withoutExisting = current.messages.filter(
+        (message) => message.promptTemplateId !== template.id
+      );
+      const welcome = withoutExisting.filter((message) => message.id === 'welcome');
+      const remaining = withoutExisting.filter((message) => message.id !== 'welcome');
+      const messages = [...welcome, systemMessage, ...remaining];
+      return {
+        ...current,
+        activeConversationId: conversationId,
+        messages,
+        conversations: upsertConversation(current.conversations, conversationId, messages, Date.now()),
+      };
+    });
+    setNotice('会话指令已启用；同一模板在当前对话中只保留一份。');
+    setSettingsOpen(false);
+  }
+
+  function removePromptTemplate(templateId: string) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+    try {
+      setWorkspace((current) => ({
+        ...current,
+        promptTemplates: deletePromptTemplate(current.promptTemplates, templateId),
+      }));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '模板删除失败。');
+    }
+  }
+
+  function togglePromptTemplatePinned(templateId: string, pinned: boolean) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+    setWorkspace((current) => ({
+      ...current,
+      promptTemplates: setPromptTemplatePinned(
+        current.promptTemplates,
+        templateId,
+        pinned ? undefined : Date.now()
+      ),
+    }));
+  }
+
+  function updateActiveModelPricing(
+    patch: Partial<Pick<ModelPricing, 'currency' | 'inputPerMillion' | 'cachedInputPerMillion' | 'outputPerMillion'>>
+  ) {
+    if (!ensureWorkspaceWritable() || !activeProvider || !activeModelId) {
+      return;
+    }
+    setWorkspace((current) => {
+      const matching = current.modelPricing
+        .filter(
+          (pricing) => pricing.providerId === activeProvider.id && pricing.modelId === activeModelId
+        )
+        .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+      const next: ModelPricing = {
+        ...(matching ?? {}),
+        ...patch,
+        providerId: activeProvider.id,
+        modelId: activeModelId,
+        currency: patch.currency ?? matching?.currency ?? 'CNY',
+        updatedAt: Date.now(),
+      };
+      const remaining = current.modelPricing.filter(
+        (pricing) => !(pricing.providerId === activeProvider.id && pricing.modelId === activeModelId)
+      );
+      const hasRate =
+        next.inputPerMillion !== undefined ||
+        next.cachedInputPerMillion !== undefined ||
+        next.outputPerMillion !== undefined;
+      return {
+        ...current,
+        modelPricing: hasRate ? [...remaining, next] : remaining,
+      };
+    });
+  }
+
+  function updatePricingText(
+    field: 'inputPerMillion' | 'cachedInputPerMillion' | 'outputPerMillion',
+    value: string
+  ) {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      updateActiveModelPricing({ [field]: undefined });
+      return;
+    }
+    const parsed = Number(trimmed.replace(',', '.'));
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      setNotice('价格必须是非负数字，单位为每百万 Token。');
+      return;
+    }
+    updateActiveModelPricing({ [field]: parsed });
+  }
+
+  function setActivePricingCurrency(currency: PricingCurrency) {
+    updateActiveModelPricing({ currency });
+  }
+
+  function applyComparisonSelection(groupId: string, messageId: string) {
+    setWorkspace((current) => {
+      const selectInMessages = (messages: ChatMessage[]) =>
+        messages.map((candidate) =>
+          candidate.role === 'assistant' && candidate.comparisonGroupId === groupId
+            ? { ...candidate, selectedForContext: candidate.id === messageId }
+            : candidate
+        );
+      return {
+        ...current,
+        messages: selectInMessages(current.messages),
+        conversations: current.conversations.map((conversation) => ({
+          ...conversation,
+          messages: selectInMessages(conversation.messages),
+        })),
+      };
+    });
+  }
+
+  function selectComparisonAnswer(message: ChatMessage) {
+    if (!message.comparisonGroupId || message.role !== 'assistant' || message.status !== 'ready') {
+      return;
+    }
+    applyComparisonSelection(message.comparisonGroupId, message.id);
+    showToast('后续对话将使用这个回答');
   }
 
   function setActiveReasoningEffort(effort: ReasoningEffort) {
@@ -1604,6 +2231,8 @@ export default function App() {
     const taskCapabilities: Partial<Record<ModelTask, Capability>> = {
       'image-generation': 'image-generation',
       'video-generation': 'video-generation',
+      'audio-transcription': 'speech-to-text',
+      'speech-generation': 'text-to-speech',
       embedding: 'embedding',
       rerank: 'rerank',
     };
@@ -1917,18 +2546,21 @@ export default function App() {
 
     setNotice('');
 
-    if (!activeModel) {
+    if (!activeModel && !comparisonActive) {
       setNotice('请先添加并选择模型。');
       return;
     }
 
-    if (activeModelTask === 'image-generation') {
+    if (!comparisonActive && activeModelTask === 'image-generation') {
       setNotice('当前图片生成适配器只支持文本生图，尚未接入参考图编辑。');
       return;
     }
 
     const capability = kind === 'image' ? 'image-input' : kind === 'video' ? 'video-input' : 'file-input';
-    if (!activeModel.capabilities.includes(capability)) {
+    const capabilityAvailable = comparisonActive
+      ? comparisonRuntimes.every((runtime) => runtime.model.capabilities.includes(capability))
+      : Boolean(activeModel?.capabilities.includes(capability));
+    if (!capabilityAvailable) {
       setNotice(`当前模型未标记为支持${kind === 'image' ? '图片' : kind === 'video' ? '视频' : '文件'}输入。`);
       return;
     }
@@ -1938,7 +2570,13 @@ export default function App() {
       picked = kind === 'image' ? await pickImages() : kind === 'video' ? await pickVideos() : await pickFiles();
       const nextAttachments = [...attachments, ...picked];
       validateAttachments(nextAttachments);
-      assertChatAttachmentsSupported(nextAttachments, activeModel, activeProvider);
+      if (comparisonActive) {
+        for (const runtime of comparisonRuntimes) {
+          assertChatAttachmentsSupported(nextAttachments, runtime.model, runtime.provider);
+        }
+      } else if (activeModel) {
+        assertChatAttachmentsSupported(nextAttachments, activeModel, activeProvider);
+      }
       setAttachments(nextAttachments);
     } catch (error) {
       await discardUncommittedAttachments(picked);
@@ -2045,6 +2683,8 @@ export default function App() {
       content: result.content,
       reasoningContent: result.reasoningContent,
       usage: result.usage,
+      citations: result.citations,
+      webSearchTriggered: result.webSearchTriggered,
       attachments: result.attachments,
       generationTask: result.generationTask,
       status: 'ready',
@@ -2057,12 +2697,18 @@ export default function App() {
     transcript,
     runtime,
     controller,
+    finishRequest = true,
+    announceCancellation = true,
   }: {
     assistantMessage: ChatMessage;
     transcript: ChatMessage[];
     runtime: NonNullable<ReturnType<typeof resolveMessageRuntime>>;
     controller: AbortController;
+    finishRequest?: boolean;
+    announceCancellation?: boolean;
   }): Promise<AssistantRequestOutcome> {
+    const startedAt = Date.now();
+    let firstTokenAt: number | undefined;
     let latestUpdate:
       | Pick<ChatCompletionResult, 'content' | 'reasoningContent' | 'usage'>
       | undefined;
@@ -2088,7 +2734,11 @@ export default function App() {
         messages: transcript,
         reasoningEffort: runtime.reasoningEffort,
         parameterSettings,
+        webSearch: workspaceRef.current.webSearch,
         onStreamUpdate: (update) => {
+          if (update.content || update.reasoningContent) {
+            firstTokenAt ??= Date.now();
+          }
           latestUpdate = update;
           if (!streamTimer) {
             streamTimer = setTimeout(() => {
@@ -2104,7 +2754,35 @@ export default function App() {
         clearTimeout(streamTimer);
         streamTimer = null;
       }
-      applyAssistantResult(assistantMessage.id, result);
+      const requestMetrics = {
+        durationMs: Date.now() - startedAt,
+        ...(firstTokenAt !== undefined ? { timeToFirstTokenMs: firstTokenAt - startedAt } : {}),
+      };
+      const completedMessage: ChatMessage = {
+        ...assistantMessage,
+        content: result.content,
+        reasoningContent: result.reasoningContent,
+        usage: result.usage,
+        status: 'ready',
+        requestMetrics,
+      };
+      const costEstimate = estimateMessageCost(
+        completedMessage,
+        workspaceRef.current.modelPricing
+          .filter(
+            (pricing) =>
+              pricing.providerId === assistantMessage.providerId &&
+              pricing.modelId === assistantMessage.modelId
+          )
+          .sort((left, right) => right.updatedAt - left.updatedAt)[0]
+      );
+      applyAssistantResult(assistantMessage.id, {
+        ...result,
+      });
+      updateAssistantMessage(assistantMessage.id, {
+        requestMetrics,
+        ...(costEstimate ? { costEstimate } : { costEstimate: undefined }),
+      });
       return { status: 'success' };
     } catch (error) {
       if (streamTimer) {
@@ -2119,8 +2797,14 @@ export default function App() {
           usage: latestUpdate?.usage,
           status: 'cancelled',
           error: undefined,
+          requestMetrics: {
+            durationMs: Date.now() - startedAt,
+            ...(firstTokenAt !== undefined ? { timeToFirstTokenMs: firstTokenAt - startedAt } : {}),
+          },
         });
-        setNotice('已停止生成，已保留收到的内容。');
+        if (announceCancellation) {
+          setNotice('已停止生成，已保留收到的内容。');
+        }
         return { status: 'cancelled' };
       }
 
@@ -2131,10 +2815,16 @@ export default function App() {
         usage: latestUpdate?.usage,
         status: 'error',
         error: message,
+        requestMetrics: {
+          durationMs: Date.now() - startedAt,
+          ...(firstTokenAt !== undefined ? { timeToFirstTokenMs: firstTokenAt - startedAt } : {}),
+        },
       });
       return { status: 'error', error: message };
     } finally {
-      finishActiveRequest(controller);
+      if (finishRequest) {
+        finishActiveRequest(controller);
+      }
     }
   }
 
@@ -2308,6 +2998,10 @@ export default function App() {
       content: '',
       reasoningContent: undefined,
       usage: undefined,
+      citations: undefined,
+      webSearchTriggered: undefined,
+      requestMetrics: undefined,
+      costEstimate: undefined,
       attachments: undefined,
       generationTask: undefined,
       status: 'pending',
@@ -2652,6 +3346,586 @@ export default function App() {
     }
   }
 
+  function refreshTaskCenterItem(conversationId: string, messageId: string) {
+    const conversation = workspace.conversations.find((item) => item.id === conversationId);
+    const message = conversation?.messages.find((item) => item.id === messageId);
+    if (!message?.generationTask) {
+      setNotice('找不到这条媒体任务的本地记录。');
+      return;
+    }
+    void refreshGenerationTask(message, message.generationTask);
+  }
+
+  async function exportTaskCenterAttachment(attachment: MediaAttachment) {
+    try {
+      const result = await saveAttachmentToDevice(attachment);
+      setNotice(
+        result.status === 'cancelled'
+          ? '已取消保存。'
+          : result.status === 'shared'
+            ? '已打开系统分享面板。'
+            : '媒体文件已保存。'
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '媒体文件导出失败。');
+    }
+  }
+
+  async function exportEncryptedBackup() {
+    if (!ensureWorkspaceWritable() || backupBusy) {
+      return;
+    }
+    setBackupBusy(true);
+    setNotice('正在本机加密备份…');
+    try {
+      const serialized = await exportEncryptedWorkspaceBackup(
+        workspaceRef.current,
+        backupPassword
+      );
+      const result = await exportWorkspaceBackupFile(serialized);
+      setNotice(result === 'downloaded' ? '加密备份已下载。' : '已打开系统分享面板，可保存加密备份文件。');
+      setBackupPassword('');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '加密备份导出失败。');
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function importEncryptedBackup() {
+    if (!ensureWorkspaceWritable() || backupBusy) {
+      return;
+    }
+    setBackupBusy(true);
+    setNotice('');
+    try {
+      const serialized = await pickWorkspaceBackupFile();
+      if (serialized === null) {
+        setNotice('已取消选择备份文件。');
+        return;
+      }
+      const confirmed = await confirmDestructiveAction(
+        '导入并替换本机工作区？',
+        '将替换当前配置、模板与对话。API Key 不从备份导入；只有服务商 ID、类型和地址都一致时才会继续使用本机安全存储中的 Key，MCP 授权也必须端点一致。媒体文件不包含在备份中。'
+      );
+      if (!confirmed) {
+        setNotice('已取消导入。');
+        return;
+      }
+      const imported = await importEncryptedWorkspaceBackup(
+        serialized,
+        backupPassword,
+        workspaceRef.current
+      );
+      await saveWorkspace(imported);
+      clearPendingAttachments();
+      workspaceRef.current = imported;
+      setWorkspace(imported);
+      setBackupPassword('');
+      setNotice('加密备份已验证并导入；API Key 仍来自本机安全存储。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '备份验证或导入失败，现有工作区未改动。');
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  function addRemoteMcpServer() {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+    const name = mcpName.trim();
+    if (!name) {
+      setNotice('请填写 MCP 服务名称。');
+      return;
+    }
+    const endpointInput = mcpEndpoint.trim();
+    if (!endpointInput || endpointInput.length > 8_192 || /[\u0000-\u0020\u007f]/.test(endpointInput)) {
+      setNotice('MCP Endpoint 为空、过长或包含不安全字符。');
+      return;
+    }
+    let endpoint: URL;
+    try {
+      endpoint = new URL(endpointInput);
+    } catch {
+      setNotice('MCP Endpoint 不是有效网址。');
+      return;
+    }
+    if (
+      endpoint.protocol !== 'https:' ||
+      endpoint.username ||
+      endpoint.password ||
+      endpoint.search ||
+      endpoint.hash ||
+      isPrivateMcpHostname(endpoint.hostname)
+    ) {
+      setNotice('MCP Endpoint 必须是无凭据、查询参数、片段和私网地址的 HTTPS URL。');
+      return;
+    }
+    const id = createId('mcp');
+    setWorkspace((current) => ({
+      ...current,
+      plugins: [
+        ...current.plugins,
+        {
+          id,
+          name,
+          version: '1.0.0',
+          type: 'remote-mcp',
+          permissions: ['network', 'tools'],
+          transport: 'streamable-http',
+          endpoint: endpoint.toString(),
+          serverLabel: `mcp_${id.replace(/[^A-Za-z0-9_-]/g, '_')}`,
+          providerId: activeProvider.id,
+          authorization: mcpAuthorization.trim() || undefined,
+          approvalPolicy: 'always',
+          enabled: false,
+        },
+      ],
+    }));
+    setMcpName('');
+    setMcpEndpoint('');
+    setMcpAuthorization('');
+    setNotice('MCP 服务已安全保存，默认关闭且不会自动调用。');
+  }
+
+  async function toggleRemoteMcpServer(pluginId: string, enabled: boolean) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+    const plugin = workspace.plugins.find((item) => item.id === pluginId);
+    if (!plugin) {
+      return;
+    }
+    if (enabled) {
+      const confirmed = await confirmDestructiveAction(
+        '授权这个 MCP 服务？',
+        `服务：${plugin.name}\n地址：${plugin.endpoint ?? '未配置'}\n权限：仅网络与工具。每次真实工具调用仍必须再次展示工具名、参数和发送数据并由你确认。当前版本只保存授权配置，不会自动执行工具。`
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+    setWorkspace((current) => ({
+      ...current,
+      plugins: current.plugins.map((item) =>
+        item.id === pluginId ? { ...item, enabled } : item
+      ),
+    }));
+    setNotice(enabled ? 'MCP 配置已授权，但工具执行仍保持关闭等待逐次审批适配。' : 'MCP 服务已关闭。');
+  }
+
+  function removeRemoteMcpServer(pluginId: string) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+    setWorkspace((current) => ({
+      ...current,
+      plugins: current.plugins.filter((plugin) => plugin.id !== pluginId),
+    }));
+    setNotice('MCP 配置及其本机安全存储授权已移除。');
+  }
+
+  function setVoiceTarget(kind: 'transcription' | 'speech') {
+    if (!ensureWorkspaceWritable() || !activeModel || !activeProvider) {
+      return;
+    }
+    const capability = kind === 'transcription' ? 'speech-to-text' : 'text-to-speech';
+    if (!activeModel.capabilities.includes(capability)) {
+      setNotice(`当前模型未明确标记为${kind === 'transcription' ? '语音转写' : '语音合成'}能力。`);
+      return;
+    }
+    const readiness = getProviderAudioReadiness(activeProvider);
+    if (kind === 'transcription' ? !readiness.canTranscribe : !readiness.canSynthesize) {
+      setNotice(readiness.message ?? '当前服务商尚未接通这个语音协议。');
+      return;
+    }
+    const target = { providerId: activeProvider.id, modelId: activeModel.id };
+    setWorkspace((current) => {
+      const voice = {
+        ...current.voice,
+        ...(kind === 'transcription'
+          ? { transcriptionTarget: target }
+          : { speechTarget: target }),
+      };
+      if (kind === 'speech' && readiness.protocol === 'bailian-compatible' &&
+        (!voice.speechVoice.trim() || voice.speechVoice === 'alloy')) {
+        voice.speechVoice = 'Cherry';
+      }
+      if (kind === 'speech' && readiness.protocol === 'openai-official' &&
+        (!voice.speechVoice.trim() || voice.speechVoice === 'Cherry')) {
+        voice.speechVoice = 'alloy';
+      }
+      return { ...current, voice };
+    });
+    setNotice(`已将当前模型设为${kind === 'transcription' ? '语音输入转写' : '回答朗读'}目标。`);
+  }
+
+  function clearVoiceTarget(kind: 'transcription' | 'speech') {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+    setWorkspace((current) => {
+      const voice = { ...current.voice };
+      if (kind === 'transcription') {
+        delete voice.transcriptionTarget;
+      } else {
+        delete voice.speechTarget;
+      }
+      return { ...current, voice };
+    });
+  }
+
+  function resolveConfiguredVoiceTarget(kind: 'transcription' | 'speech') {
+    const current = workspaceRef.current;
+    const target = kind === 'transcription'
+      ? current.voice.transcriptionTarget
+      : current.voice.speechTarget;
+    if (!target) {
+      return null;
+    }
+    const provider = current.providers.find((item) => item.id === target.providerId);
+    if (!provider) {
+      return null;
+    }
+    return { provider, modelId: target.modelId };
+  }
+
+  async function toggleVoiceInput() {
+    const activeOperation = activeAudioOperationRef.current;
+    if (activeOperation?.kind === 'recording') {
+      if (!voiceRecorder.isRecording && !voiceRecorderState.isRecording) {
+        activeOperation.controller.abort();
+        setNotice('正在取消录音准备…');
+        return;
+      }
+      if (!transitionAudioOperation(activeOperation, 'transcribing')) {
+        return;
+      }
+      let recordedUri: string | null = null;
+      try {
+        await voiceRecorder.stop();
+        await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+        assertAudioOperationCurrent(activeOperation);
+        const uri = voiceRecorder.uri;
+        if (!uri) {
+          throw new Error('没有生成可转写的录音文件。');
+        }
+        recordedUri = uri;
+        const target = resolveConfiguredVoiceTarget('transcription');
+        if (!target) {
+          throw new Error('请先在设置中选择语音转写模型。');
+        }
+        const readiness = getProviderAudioReadiness(target.provider);
+        if (!readiness.canTranscribe) {
+          throw new Error(readiness.message ?? '当前服务商语音转写尚未就绪。');
+        }
+        setNotice('正在使用你的服务商账号转写录音…');
+        const result = await transcribeAudio({
+          provider: target.provider,
+          modelId: target.modelId,
+          source: {
+            uri,
+            name: `voice-input-${Date.now()}.m4a`,
+            mimeType: 'audio/mp4',
+          },
+          signal: activeOperation.controller.signal,
+        });
+        assertAudioOperationCurrent(activeOperation);
+        setInput((current) => current.trim() ? `${current}\n${result.text}` : result.text);
+        setNotice('语音已转写到输入框，尚未自动发送。');
+      } catch (error) {
+        const aborted = error instanceof Error && error.name === 'AbortError';
+        setNotice(aborted ? '语音转写已停止。' : error instanceof Error ? error.message : '语音转写失败。');
+      } finally {
+        try {
+          if (voiceRecorder.isRecording) await voiceRecorder.stop();
+          await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+        } catch {
+          // The primary result remains authoritative; cleanup is best effort.
+        }
+        await deleteTemporaryAudioFile(recordedUri);
+        finishAudioOperation(activeOperation);
+      }
+      return;
+    }
+
+    if (activeOperation) {
+      activeOperation.controller.abort();
+      setNotice(
+        activeOperation.kind === 'synthesizing'
+          ? '正在停止语音合成请求…'
+          : '正在停止语音转写请求…'
+      );
+      return;
+    }
+
+    const target = resolveConfiguredVoiceTarget('transcription');
+    if (!target) {
+      setNotice('请先在设置中选择语音转写模型。');
+      return;
+    }
+    const readiness = getProviderAudioReadiness(target.provider);
+    if (!readiness.canTranscribe) {
+      setNotice(readiness.message ?? '当前服务商语音转写尚未就绪。');
+      return;
+    }
+    const operation = beginAudioOperation('recording');
+    if (!operation) {
+      return;
+    }
+    let recordingStarted = false;
+    try {
+      const permission = await requestRecordingPermissionsAsync();
+      assertAudioOperationCurrent(operation);
+      if (!permission.granted) {
+        setNotice('未获得麦克风权限，无法录制语音。');
+        return;
+      }
+      speechPlayerRef.current?.release();
+      speechPlayerRef.current = null;
+      void deleteTemporaryAudioFile(speechCacheUriRef.current);
+      speechCacheUriRef.current = null;
+      setSpeakingMessageId(null);
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      assertAudioOperationCurrent(operation);
+      await voiceRecorder.prepareToRecordAsync();
+      assertAudioOperationCurrent(operation);
+      voiceRecorder.record();
+      recordingStarted = true;
+      setNotice('正在录音；再次点击麦克风即可停止并转写。');
+    } catch (error) {
+      const aborted = error instanceof Error && error.name === 'AbortError';
+      setNotice(aborted ? '录音准备已停止。' : error instanceof Error ? error.message : '无法开始录音。');
+    } finally {
+      if (!recordingStarted) {
+        finishAudioOperation(operation);
+      }
+    }
+  }
+
+  async function readAssistantMessageAloud(message: ChatMessage) {
+    if (speakingMessageId === message.id && speechPlayerRef.current) {
+      speechPlayerRef.current.pause();
+      speechPlayerRef.current.release();
+      speechPlayerRef.current = null;
+      void deleteTemporaryAudioFile(speechCacheUriRef.current);
+      speechCacheUriRef.current = null;
+      setSpeakingMessageId(null);
+      setNotice('已停止朗读。');
+      return;
+    }
+    if (activeAudioOperationRef.current?.kind === 'recording' || voiceRecorderState.isRecording) {
+      setNotice('正在录音，不能同时生成朗读；请先停止录音并完成或取消转写。');
+      return;
+    }
+    const activeOperation = activeAudioOperationRef.current;
+    if (activeOperation) {
+      if (activeOperation.kind === 'synthesizing' && speakingMessageId === message.id) {
+        activeOperation.controller.abort();
+        setNotice('正在停止语音合成请求…');
+      } else {
+        setNotice('另一项语音操作仍在进行中。');
+      }
+      return;
+    }
+    const text = message.content.trim();
+    if (!text) {
+      return;
+    }
+    const target = resolveConfiguredVoiceTarget('speech');
+    if (!target) {
+      setNotice('请先在设置中选择语音合成模型。');
+      return;
+    }
+    const readiness = getProviderAudioReadiness(target.provider);
+    if (!readiness.canSynthesize) {
+      setNotice(readiness.message ?? '当前服务商语音合成尚未就绪。');
+      return;
+    }
+    speechPlayerRef.current?.release();
+    speechPlayerRef.current = null;
+    await deleteTemporaryAudioFile(speechCacheUriRef.current);
+    speechCacheUriRef.current = null;
+    const operation = beginAudioOperation('synthesizing');
+    if (!operation) {
+      setNotice('另一项语音操作仍在进行中。');
+      return;
+    }
+    setSpeakingMessageId(message.id);
+    setNotice('正在使用你的服务商账号生成 AI 合成语音…');
+    let generatedUri: string | null = null;
+    try {
+      const result = await synthesizeSpeech({
+        provider: target.provider,
+        modelId: target.modelId,
+        text,
+        voice: workspaceRef.current.voice.speechVoice,
+        responseFormat: workspaceRef.current.voice.speechFormat,
+        signal: operation.controller.signal,
+      });
+      generatedUri = result.uri;
+      assertAudioOperationCurrent(operation);
+      await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+      assertAudioOperationCurrent(operation);
+      const player = createAudioPlayer(result.uri);
+      speechPlayerRef.current = player;
+      speechCacheUriRef.current = result.uri;
+      setSpeakingMessageId(message.id);
+      const subscription = player.addListener('playbackStatusUpdate', (status) => {
+        if (!status.didJustFinish || speechPlayerRef.current !== player) {
+          return;
+        }
+        subscription.remove();
+        player.release();
+        speechPlayerRef.current = null;
+        void deleteTemporaryAudioFile(speechCacheUriRef.current);
+        speechCacheUriRef.current = null;
+        setSpeakingMessageId(null);
+      });
+      player.play();
+      setNotice('正在播放 AI 合成语音。');
+    } catch (error) {
+      const aborted = error instanceof Error && error.name === 'AbortError';
+      if (speechCacheUriRef.current === generatedUri) {
+        speechPlayerRef.current?.release();
+        speechPlayerRef.current = null;
+      }
+      await deleteTemporaryAudioFile(generatedUri);
+      if (speechCacheUriRef.current === generatedUri) {
+        speechCacheUriRef.current = null;
+      }
+      setSpeakingMessageId(null);
+      setNotice(aborted ? '语音生成已停止。' : error instanceof Error ? error.message : '语音生成失败。');
+    } finally {
+      finishAudioOperation(operation);
+    }
+  }
+
+  async function sendComparisonMessage(content: string) {
+    if (comparisonRuntimes.length < 2 || comparisonRuntimes.length > 4) {
+      setNotice('对比模式需要 2–4 个当前可用的对话模型，请先检查设置。');
+      return;
+    }
+    if (workspace.webSearch.enabled && !webSearchReady) {
+      setNotice('对比请求未发出：至少一个目标尚未满足可信联网搜索条件。');
+      return;
+    }
+
+    try {
+      validateAttachments(attachments);
+      const preflightUserMessage: ChatMessage = {
+        id: 'comparison-preflight',
+        role: 'user',
+        content,
+        attachments,
+        createdAt: Date.now(),
+        status: 'ready',
+      };
+      for (const runtime of comparisonRuntimes) {
+        assertChatAttachmentsSupported(attachments, runtime.model, runtime.provider);
+        if (workspace.webSearch.enabled) {
+          assertProviderWebSearchMessagesSupported(
+            runtime.provider,
+            buildChatTranscript(
+              [...workspace.messages, preflightUserMessage],
+              runtime.model.contextWindow
+            )
+          );
+        }
+      }
+    } catch (error) {
+      setNotice(
+        `对比请求未发出：${error instanceof Error ? error.message : '至少一个模型不支持当前附件。'}`
+      );
+      return;
+    }
+
+    const controller = beginActiveRequest('多模型对比');
+    if (!controller) {
+      return;
+    }
+
+    const conversationId = workspace.activeConversationId || createId('conversation');
+    const comparisonGroupId = createId('compare');
+    const createdAt = Date.now();
+    const userMessage: ChatMessage = {
+      id: createId('msg'),
+      role: 'user',
+      content,
+      attachments,
+      createdAt,
+      status: 'ready',
+    };
+    const assistantMessages = comparisonRuntimes.map((runtime, index): ChatMessage => ({
+      id: createId('msg'),
+      role: 'assistant',
+      content: '',
+      createdAt: createdAt + index + 1,
+      status: 'pending',
+      modelId: runtime.modelId,
+      providerId: runtime.provider.id,
+      providerName: runtime.provider.name,
+      comparisonGroupId,
+    }));
+    const baseMessages = [...workspace.messages, userMessage];
+
+    setInput('');
+    setAttachments([]);
+    shouldAutoScrollRef.current = true;
+    setNotice(
+      `正在发起 ${assistantMessages.length} 次独立调用；费用由对应服务商从你的账户结算。`
+    );
+    setWorkspace((current) => {
+      const messages = [
+        ...current.messages.filter((message) => message.id !== 'welcome'),
+        userMessage,
+        ...assistantMessages,
+      ];
+      return {
+        ...current,
+        activeConversationId: conversationId,
+        messages,
+        conversations: upsertConversation(current.conversations, conversationId, messages, createdAt),
+      };
+    });
+
+    try {
+      const outcomes = await Promise.all(
+        assistantMessages.map((assistantMessage, index) =>
+          runAssistantRequest({
+            assistantMessage,
+            transcript: buildChatTranscript(
+              baseMessages,
+              comparisonRuntimes[index].model.contextWindow
+            ),
+            runtime: comparisonRuntimes[index],
+            controller,
+            finishRequest: false,
+            announceCancellation: false,
+          })
+        )
+      );
+      const firstSuccessIndex = outcomes.findIndex((outcome) => outcome.status === 'success');
+      if (firstSuccessIndex >= 0) {
+        applyComparisonSelection(comparisonGroupId, assistantMessages[firstSuccessIndex].id);
+      }
+      const failedCount = outcomes.filter((outcome) => outcome.status === 'error').length;
+      const cancelledCount = outcomes.filter((outcome) => outcome.status === 'cancelled').length;
+      if (cancelledCount === outcomes.length) {
+        setNotice('已停止整组对比请求，并保留已收到的内容。');
+      } else if (firstSuccessIndex < 0) {
+        setNotice('本次对比没有模型成功返回，请查看各候选错误信息。');
+      } else if (failedCount || cancelledCount) {
+        setNotice(`对比已完成；${failedCount + cancelledCount} 个候选未完整返回。`);
+      } else {
+        setNotice('对比已完成；默认使用首个成功回答作为后续上下文。');
+      }
+    } finally {
+      finishActiveRequest(controller);
+    }
+  }
+
   async function sendMessage() {
     if (!ensureWorkspaceWritable()) {
       return;
@@ -2659,6 +3933,11 @@ export default function App() {
 
     const content = input.trim();
     if (!content && attachments.length === 0) {
+      return;
+    }
+
+    if (comparisonActive) {
+      await sendComparisonMessage(content);
       return;
     }
 
@@ -2674,6 +3953,10 @@ export default function App() {
 
     if (activeModelTask === 'embedding' || activeModelTask === 'rerank') {
       setNotice('当前模型不是对话模型，请切换到聊天或生成模型。');
+      return;
+    }
+    if (workspace.webSearch.enabled && !webSearchReady) {
+      setNotice('请求未发出：当前模型尚未满足可信联网搜索条件。');
       return;
     }
     if (activeModelTask === 'image-generation' && attachments.length) {
@@ -2775,7 +4058,11 @@ export default function App() {
 
   function handleChatContentSizeChange() {
     if (shouldAutoScrollRef.current) {
-      chatScrollRef.current?.scrollToEnd({ animated: true });
+      if (Platform.OS === 'web') {
+        chatScrollRef.current?.scrollTo({ y: Number.MAX_SAFE_INTEGER, animated: false });
+      } else {
+        chatScrollRef.current?.scrollToEnd({ animated: true });
+      }
     }
   }
 
@@ -2977,6 +4264,635 @@ export default function App() {
                     <Text style={styles.providerDeleteButtonText}>删除此服务商</Text>
                   </AnimatedPressable>
                 ) : null}
+              </View>
+
+              <View style={styles.settingsCard} testID="comparison-settings-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>多模型同问对比</Text>
+                  <Text style={styles.modelOverrideHint}>{workspace.comparisonTargets.length}/4</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  在各服务商标签间切换并选择 2–4 个聊天模型。发送一次会产生同等数量的独立调用，费用由你的服务商账户结算。
+                </Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.providerRow}
+                >
+                  {getSelectableModels(activeProvider)
+                    .filter((model) => inferModelTask(model) === 'chat')
+                    .map((model) => {
+                      const selected = workspace.comparisonTargets.some(
+                        (target) => target.providerId === activeProvider.id && target.modelId === model.id
+                      );
+                      return (
+                        <AnimatedPressable
+                          key={`compare:${activeProvider.id}:${model.id}`}
+                          accessibilityRole="checkbox"
+                          accessibilityState={{ checked: selected }}
+                          onPress={() => toggleComparisonTarget(activeProvider.id, model.id)}
+                          style={[styles.providerChip, selected && styles.providerChipActive]}
+                        >
+                          <Text
+                            numberOfLines={1}
+                            style={[styles.providerChipText, selected && styles.providerChipTextActive]}
+                          >
+                            {formatCompactModelName(model.id, activeProvider.name)}
+                          </Text>
+                        </AnimatedPressable>
+                      );
+                    })}
+                </ScrollView>
+                <AnimatedPressable
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: comparisonActive }}
+                  disabled={comparisonRuntimes.length < 2 || workspaceReadOnly}
+                  onPress={() => setComparisonEnabled(!comparisonActive)}
+                  style={[
+                    styles.primaryButton,
+                    (comparisonRuntimes.length < 2 || workspaceReadOnly) && styles.buttonDisabled,
+                  ]}
+                >
+                  <Text style={styles.primaryButtonText}>
+                    {comparisonActive ? '关闭对比模式' : '开启对比模式'}
+                  </Text>
+                </AnimatedPressable>
+              </View>
+
+              <View style={styles.settingsCard} testID="web-search-settings-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>服务商联网搜索</Text>
+                  <Text style={styles.modelOverrideHint}>{webSearchReady ? '当前可用' : '条件未满足'}</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  仅调用 OpenAI、火山方舟或阿里百炼的官方 Responses 搜索协议；必须使用你自己的 Key，可能产生的搜索费用由对应服务商从你的账户结算。只有响应提供搜索调用或引用证据时才会标记为已联网。
+                </Text>
+                {webSearchContextSizeApplies ? (
+                  <View style={styles.toolSegmentRow}>
+                    {(['low', 'medium', 'high'] as const).map((size) => {
+                      const selected = workspace.webSearch.searchContextSize === size;
+                      return (
+                        <AnimatedPressable
+                          key={size}
+                          accessibilityRole="button"
+                          disabled={workspaceReadOnly}
+                          onPress={() => {
+                            if (!ensureWorkspaceWritable()) return;
+                            setWorkspace((current) => ({
+                              ...current,
+                              webSearch: { ...current.webSearch, searchContextSize: size },
+                            }));
+                          }}
+                          style={[styles.toolSegment, selected && styles.toolSegmentActive]}
+                        >
+                          <Text style={[styles.toolSegmentText, selected && styles.toolSegmentTextActive]}>
+                            {size === 'low' ? '精简' : size === 'medium' ? '均衡' : '深入'}
+                          </Text>
+                        </AnimatedPressable>
+                      );
+                    })}
+                  </View>
+                ) : (
+                  <Text style={styles.modelOverrideHint}>
+                    搜索范围档位仅适用于全部目标都是 OpenAI 官方协议时；火山方舟使用安全固定上限，百炼使用服务商协议默认值。
+                  </Text>
+                )}
+                <AnimatedPressable
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: workspace.webSearch.enabled, disabled: !webSearchReady }}
+                  disabled={!webSearchReady && !workspace.webSearch.enabled}
+                  onPress={() => setWebSearchEnabled(!workspace.webSearch.enabled)}
+                  style={[
+                    styles.primaryButton,
+                    (!webSearchReady && !workspace.webSearch.enabled) && styles.buttonDisabled,
+                  ]}
+                >
+                  <Text style={styles.primaryButtonText}>
+                    {workspace.webSearch.enabled ? '关闭联网搜索' : '开启联网搜索'}
+                  </Text>
+                </AnimatedPressable>
+              </View>
+
+              <View style={styles.settingsCard} testID="prompt-library-settings-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>本地提示词与角色模板</Text>
+                  <Text style={styles.modelOverrideHint}>{workspace.promptTemplates.length}/100</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  仅保存在本机。输入模板插入草稿但不会自动发送；会话指令作为 system 消息加入当前对话。
+                </Text>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>模板名称</Text>
+                  <TextInput
+                    value={promptTemplateName}
+                    editable={!workspaceReadOnly}
+                    onChangeText={setPromptTemplateName}
+                    placeholder="例如：代码审查"
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.toolSegmentRow}>
+                  {(['composer', 'system'] as const).map((mode) => {
+                    const selected = promptTemplateMode === mode;
+                    return (
+                      <AnimatedPressable
+                        key={mode}
+                        accessibilityRole="button"
+                        onPress={() => setPromptTemplateMode(mode)}
+                        style={[styles.toolSegment, selected && styles.toolSegmentActive]}
+                      >
+                        <Text style={[styles.toolSegmentText, selected && styles.toolSegmentTextActive]}>
+                          {mode === 'composer' ? '插入输入框' : '会话指令'}
+                        </Text>
+                      </AnimatedPressable>
+                    );
+                  })}
+                </View>
+                <TextInput
+                  value={promptTemplateContent}
+                  editable={!workspaceReadOnly}
+                  multiline
+                  onChangeText={setPromptTemplateContent}
+                  placeholder="填写模板正文；可保留 {{变量}} 供发送前编辑"
+                  placeholderTextColor={palette.placeholder}
+                  style={[styles.input, styles.promptTemplateContentInput]}
+                />
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  disabled={workspaceReadOnly}
+                  onPress={savePromptTemplate}
+                  style={[styles.primaryButton, workspaceReadOnly && styles.buttonDisabled]}
+                >
+                  <Text style={styles.primaryButtonText}>保存模板</Text>
+                </AnimatedPressable>
+                {workspace.promptTemplates.map((template) => (
+                  <View key={template.id} style={styles.promptTemplateRow}>
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      onPress={() => applyPromptTemplate(template.id)}
+                      style={styles.promptTemplateMain}
+                    >
+                      <BookOpen size={16} color={palette.text} strokeWidth={2} />
+                      <View style={styles.promptTemplateTextBlock}>
+                        <Text numberOfLines={1} style={styles.promptTemplateName}>{template.name}</Text>
+                        <Text numberOfLines={1} style={styles.modelOverrideHint}>
+                          {template.mode === 'system' ? '会话指令' : '输入模板'} · {template.content}
+                        </Text>
+                      </View>
+                    </AnimatedPressable>
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      accessibilityLabel={template.pinnedAt ? '取消置顶模板' : '置顶模板'}
+                      onPress={() => togglePromptTemplatePinned(template.id, Boolean(template.pinnedAt))}
+                      style={styles.iconButton}
+                    >
+                      <Pin
+                        size={15}
+                        color={template.pinnedAt ? palette.accent : palette.textSecondary}
+                        fill={template.pinnedAt ? palette.accent : 'transparent'}
+                        strokeWidth={2}
+                      />
+                    </AnimatedPressable>
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      accessibilityLabel="删除提示词模板"
+                      onPress={() => removePromptTemplate(template.id)}
+                      style={styles.iconButton}
+                    >
+                      <Trash2 size={15} color={palette.danger} strokeWidth={2} />
+                    </AnimatedPressable>
+                  </View>
+                ))}
+              </View>
+
+              <View style={styles.settingsCard} testID="usage-dashboard-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>本机用量与费用估算</Text>
+                  <Text style={styles.modelOverrideHint}>当前保留对话</Text>
+                </View>
+                <View style={styles.usageSummaryGrid}>
+                  <View style={styles.usageSummaryItem}>
+                    <Text style={styles.usageSummaryValue}>{usageAggregation.totals.requestCount}</Text>
+                    <Text style={styles.usageSummaryLabel}>请求</Text>
+                  </View>
+                  <View style={styles.usageSummaryItem}>
+                    <Text style={styles.usageSummaryValue}>
+                      {formatTokenCount(usageAggregation.totals.totalTokens || undefined)}
+                    </Text>
+                    <Text style={styles.usageSummaryLabel}>Token</Text>
+                  </View>
+                  <View style={styles.usageSummaryItem}>
+                    <Text style={styles.usageSummaryValue}>
+                      {usageAggregation.totals.averageDurationMs !== undefined
+                        ? `${(usageAggregation.totals.averageDurationMs / 1000).toFixed(1)}s`
+                        : '—'}
+                    </Text>
+                    <Text style={styles.usageSummaryLabel}>平均耗时</Text>
+                  </View>
+                </View>
+                <View style={styles.usageCostRow}>
+                  <Text style={styles.modelOverrideHint}>
+                    {usageAggregation.totals.costSampleCountByCurrency.CNY > 0
+                      ? `CNY 已知小计 ¥${usageAggregation.totals.costByCurrency.CNY.toFixed(6)}`
+                      : 'CNY 费用未知'}
+                  </Text>
+                  <Text style={styles.modelOverrideHint}>
+                    {usageAggregation.totals.costSampleCountByCurrency.USD > 0
+                      ? `USD 已知小计 $${usageAggregation.totals.costByCurrency.USD.toFixed(6)}`
+                      : 'USD 费用未知'}
+                  </Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  已知费用覆盖 {knownCostRequestCount}/{usageAggregation.totals.requestCount} 次请求；其余 {usageAggregation.totals.unknown.cost} 次未知。价格完全由你本地填写，不调用价格或汇率服务；推理 Token 不重复计费。
+                </Text>
+                <Text style={styles.modelOverrideHint}>
+                  小计不包含联网搜索工具费、语音、媒体任务或服务商其他附加费，最终账单以你的服务商控制台为准。
+                </Text>
+                {activeModelId ? (
+                  <>
+                    <Text style={styles.fieldLabel}>
+                      {formatCompactModelName(activeModelId, activeProvider.name)} · 每百万 Token
+                    </Text>
+                    <View style={styles.toolSegmentRow}>
+                      {(['CNY', 'USD'] as const).map((currency) => {
+                        const selected = (activeModelPricing?.currency ?? 'CNY') === currency;
+                        return (
+                          <AnimatedPressable
+                            key={currency}
+                            accessibilityRole="button"
+                            onPress={() => setActivePricingCurrency(currency)}
+                            style={[styles.toolSegment, selected && styles.toolSegmentActive]}
+                          >
+                            <Text style={[styles.toolSegmentText, selected && styles.toolSegmentTextActive]}>
+                              {currency}
+                            </Text>
+                          </AnimatedPressable>
+                        );
+                      })}
+                    </View>
+                    <View style={styles.pricingInputRow}>
+                      <View style={styles.pricingInputGroup}>
+                        <Text style={styles.usageSummaryLabel}>输入</Text>
+                        <TextInput
+                          value={pricingInputDraft}
+                          onChangeText={setPricingInputDraft}
+                          onBlur={() => updatePricingText('inputPerMillion', pricingInputDraft)}
+                          keyboardType="decimal-pad"
+                          placeholder="未设置"
+                          placeholderTextColor={palette.placeholder}
+                          style={styles.input}
+                        />
+                      </View>
+                      <View style={styles.pricingInputGroup}>
+                        <Text style={styles.usageSummaryLabel}>缓存输入</Text>
+                        <TextInput
+                          value={pricingCachedDraft}
+                          onChangeText={setPricingCachedDraft}
+                          onBlur={() => updatePricingText('cachedInputPerMillion', pricingCachedDraft)}
+                          keyboardType="decimal-pad"
+                          placeholder="同输入价"
+                          placeholderTextColor={palette.placeholder}
+                          style={styles.input}
+                        />
+                      </View>
+                      <View style={styles.pricingInputGroup}>
+                        <Text style={styles.usageSummaryLabel}>输出</Text>
+                        <TextInput
+                          value={pricingOutputDraft}
+                          onChangeText={setPricingOutputDraft}
+                          onBlur={() => updatePricingText('outputPerMillion', pricingOutputDraft)}
+                          keyboardType="decimal-pad"
+                          placeholder="未设置"
+                          placeholderTextColor={palette.placeholder}
+                          style={styles.input}
+                        />
+                      </View>
+                    </View>
+                  </>
+                ) : null}
+              </View>
+
+              <View style={styles.settingsCard} testID="media-task-center-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>媒体任务中心</Text>
+                  <Text style={styles.modelOverrideHint}>{generationTasks.length} 项</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  任务直接从本机对话记录派生，不上传到我们的服务器；只在你点击刷新时查询对应服务商。
+                </Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRow}>
+                  {(['all', 'active', 'completed', 'failed'] as const).map((filter) => {
+                    const selected = generationTaskFilter === filter;
+                    return (
+                      <AnimatedPressable
+                        key={filter}
+                        accessibilityRole="button"
+                        onPress={() => setGenerationTaskFilter(filter)}
+                        style={[styles.providerChip, selected && styles.providerChipActive]}
+                      >
+                        <Text style={[styles.providerChipText, selected && styles.providerChipTextActive]}>
+                          {filter === 'all' ? '全部' : filter === 'active' ? '进行中' : filter === 'completed' ? '已完成' : '失败'}
+                        </Text>
+                      </AnimatedPressable>
+                    );
+                  })}
+                </ScrollView>
+                {visibleGenerationTasks.length ? (
+                  visibleGenerationTasks.slice(0, 20).map((item) => (
+                    <View key={item.key} style={styles.mediaTaskRow}>
+                      <View style={styles.mediaTaskInfo}>
+                        <Text numberOfLines={1} style={styles.promptTemplateName}>{item.title}</Text>
+                        <Text numberOfLines={1} style={styles.modelOverrideHint}>
+                          {item.task.modelId} · {item.task.status ?? 'submitted'}
+                        </Text>
+                      </View>
+                      <Text
+                        style={[
+                          styles.mediaTaskState,
+                          item.state === 'failed' && styles.messageErrorText,
+                        ]}
+                      >
+                        {item.state === 'active' ? '进行中' : item.state === 'completed' ? '已完成' : '失败'}
+                      </Text>
+                      {item.attachment ? (
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          accessibilityLabel="导出媒体任务结果"
+                          onPress={() => void exportTaskCenterAttachment(item.attachment!)}
+                          style={styles.iconButton}
+                        >
+                          <Download size={15} color={palette.text} strokeWidth={2} />
+                        </AnimatedPressable>
+                      ) : item.state === 'active' ? (
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          accessibilityLabel="刷新媒体任务"
+                          disabled={Boolean(queryingTaskByMessageId[item.messageId])}
+                          onPress={() => refreshTaskCenterItem(item.conversationId, item.messageId)}
+                          style={styles.iconButton}
+                        >
+                          <RefreshCw size={15} color={palette.text} strokeWidth={2} />
+                        </AnimatedPressable>
+                      ) : null}
+                      <AnimatedPressable
+                        accessibilityRole="button"
+                        accessibilityLabel="打开任务所在对话"
+                        onPress={() => {
+                          selectConversation(item.conversationId);
+                          setSettingsOpen(false);
+                        }}
+                        style={styles.iconButton}
+                      >
+                        <MessageSquare size={15} color={palette.text} strokeWidth={2} />
+                      </AnimatedPressable>
+                    </View>
+                  ))
+                ) : (
+                  <Text style={styles.modelOverrideHint}>当前筛选下暂无媒体任务。</Text>
+                )}
+              </View>
+
+              <View style={styles.settingsCard} testID="encrypted-backup-card">
+                <Text style={styles.settingsCardTitle}>本地加密备份</Text>
+                <Text style={styles.modelOverrideHint}>
+                  使用密码在本机完成认证加密。备份包含配置、文字对话、模板和任务 ID，但永远不包含 API Key、MCP 授权或媒体文件。
+                </Text>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>备份密码（至少 8 个字符）</Text>
+                  <TextInput
+                    value={backupPassword}
+                    editable={!backupBusy && !workspaceReadOnly}
+                    onChangeText={setBackupPassword}
+                    secureTextEntry
+                    autoCapitalize="none"
+                    placeholder="密码不会保存，遗失后无法找回"
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.updateActionRow}>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    disabled={backupBusy || workspaceReadOnly}
+                    onPress={() => void exportEncryptedBackup()}
+                    style={[styles.secondaryButton, styles.updateActionButton, (backupBusy || workspaceReadOnly) && styles.buttonDisabled]}
+                  >
+                    <Download size={16} color={palette.text} strokeWidth={2} />
+                    <Text style={styles.secondaryButtonText}>{backupBusy ? '处理中' : '导出备份'}</Text>
+                  </AnimatedPressable>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    disabled={backupBusy || workspaceReadOnly}
+                    onPress={() => void importEncryptedBackup()}
+                    style={[styles.primaryButton, styles.updateActionButton, (backupBusy || workspaceReadOnly) && styles.buttonDisabled]}
+                  >
+                    <FileText size={16} color={palette.textOnAccent} strokeWidth={2} />
+                    <Text style={styles.primaryButtonText}>{backupBusy ? '处理中' : '验证并导入'}</Text>
+                  </AnimatedPressable>
+                </View>
+              </View>
+
+              <View style={styles.settingsCard} testID="voice-settings-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>用户服务商语音</Text>
+                  <Text style={styles.modelOverrideHint}>Android 请求式 · BYOK</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  录音和朗读仅调用你配置的 OpenAI 或阿里百炼账号，可能产生的费用由对应服务商从你的账户结算；我们不提供语音 API、不设中转服务器。正式 Web 端保持关闭。
+                </Text>
+                <View style={styles.voiceTargetRow}>
+                  <View style={styles.mediaTaskInfo}>
+                    <Text style={styles.fieldLabel}>语音输入转写</Text>
+                    <Text numberOfLines={1} style={styles.modelOverrideHint}>
+                      {workspace.voice.transcriptionTarget
+                        ? `${workspace.voice.transcriptionTarget.providerId} · ${workspace.voice.transcriptionTarget.modelId}`
+                        : '未配置'}
+                    </Text>
+                  </View>
+                  {workspace.voice.transcriptionTarget ? (
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      onPress={() => clearVoiceTarget('transcription')}
+                      style={styles.iconButton}
+                    >
+                      <X size={15} color={palette.textSecondary} strokeWidth={2} />
+                    </AnimatedPressable>
+                  ) : null}
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    disabled={!activeModel?.capabilities.includes('speech-to-text')}
+                    onPress={() => setVoiceTarget('transcription')}
+                    style={[
+                      styles.providerChip,
+                      !activeModel?.capabilities.includes('speech-to-text') && styles.buttonDisabled,
+                    ]}
+                  >
+                    <Text style={styles.providerChipText}>使用当前模型</Text>
+                  </AnimatedPressable>
+                </View>
+                <View style={styles.voiceTargetRow}>
+                  <View style={styles.mediaTaskInfo}>
+                    <Text style={styles.fieldLabel}>回答朗读</Text>
+                    <Text numberOfLines={1} style={styles.modelOverrideHint}>
+                      {workspace.voice.speechTarget
+                        ? `${workspace.voice.speechTarget.providerId} · ${workspace.voice.speechTarget.modelId}`
+                        : '未配置'}
+                    </Text>
+                  </View>
+                  {workspace.voice.speechTarget ? (
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      onPress={() => clearVoiceTarget('speech')}
+                      style={styles.iconButton}
+                    >
+                      <X size={15} color={palette.textSecondary} strokeWidth={2} />
+                    </AnimatedPressable>
+                  ) : null}
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    disabled={!activeModel?.capabilities.includes('text-to-speech')}
+                    onPress={() => setVoiceTarget('speech')}
+                    style={[
+                      styles.providerChip,
+                      !activeModel?.capabilities.includes('text-to-speech') && styles.buttonDisabled,
+                    ]}
+                  >
+                    <Text style={styles.providerChipText}>使用当前模型</Text>
+                  </AnimatedPressable>
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>服务商 Voice ID</Text>
+                  <TextInput
+                    value={workspace.voice.speechVoice}
+                    editable={!workspaceReadOnly}
+                    onChangeText={(speechVoice) => {
+                      if (!ensureWorkspaceWritable()) return;
+                      setWorkspace((current) => ({
+                        ...current,
+                        voice: { ...current.voice, speechVoice },
+                      }));
+                    }}
+                    autoCapitalize="none"
+                    placeholder="alloy / Cherry / 服务商音色 ID"
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                {configuredSpeechProtocol === 'bailian-compatible' ? (
+                  <Text style={styles.modelOverrideHint}>
+                    百炼语音格式由服务商响应决定；上方格式选项只适用于 OpenAI 官方语音接口。
+                  </Text>
+                ) : (
+                  <View style={styles.toolSegmentRow}>
+                    {(['mp3', 'aac', 'wav', 'opus'] as const).map((format) => {
+                      const selected = workspace.voice.speechFormat === format;
+                      return (
+                        <AnimatedPressable
+                          key={format}
+                          accessibilityRole="button"
+                          disabled={workspaceReadOnly}
+                          onPress={() => {
+                            if (!ensureWorkspaceWritable()) return;
+                            setWorkspace((current) => ({
+                              ...current,
+                              voice: { ...current.voice, speechFormat: format },
+                            }));
+                          }}
+                          style={[styles.toolSegment, selected && styles.toolSegmentActive]}
+                        >
+                          <Text style={[styles.toolSegmentText, selected && styles.toolSegmentTextActive]}>
+                            {format.toUpperCase()}
+                          </Text>
+                        </AnimatedPressable>
+                      );
+                    })}
+                  </View>
+                )}
+                <Text style={styles.modelOverrideHint}>朗读音频为 AI 合成语音，并非真人录音。</Text>
+              </View>
+
+              <View style={styles.settingsCard} testID="mcp-tool-center-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>MCP 工具中心</Text>
+                  <Text style={styles.modelOverrideHint}>默认关闭 · 逐次审批</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  这里只保存远程 MCP 配置和最小权限授权。当前版本不会自动执行工具；待服务商审批循环接通后，每次调用仍须展示工具、参数与发送数据并由你确认。
+                </Text>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>服务名称</Text>
+                  <TextInput
+                    value={mcpName}
+                    onChangeText={setMcpName}
+                    placeholder="例如：我的知识库"
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>HTTPS Endpoint</Text>
+                  <TextInput
+                    value={mcpEndpoint}
+                    onChangeText={setMcpEndpoint}
+                    autoCapitalize="none"
+                    placeholder="https://mcp.example.com/mcp"
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>Authorization（可选）</Text>
+                  <TextInput
+                    value={mcpAuthorization}
+                    onChangeText={setMcpAuthorization}
+                    autoCapitalize="none"
+                    secureTextEntry
+                    placeholder={
+                      Platform.OS === 'web'
+                        ? 'Web 仅当前标签页保存；不进入备份'
+                        : 'Android 系统安全存储；不进入备份'
+                    }
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  disabled={workspaceReadOnly}
+                  onPress={addRemoteMcpServer}
+                  style={[styles.primaryButton, workspaceReadOnly && styles.buttonDisabled]}
+                >
+                  <Wrench size={16} color={palette.textOnAccent} strokeWidth={2} />
+                  <Text style={styles.primaryButtonText}>添加为关闭状态</Text>
+                </AnimatedPressable>
+                {workspace.plugins.filter((plugin) => plugin.type === 'remote-mcp').map((plugin) => (
+                  <View key={plugin.id} style={styles.mediaTaskRow}>
+                    <Wrench size={16} color={palette.text} strokeWidth={2} />
+                    <View style={styles.mediaTaskInfo}>
+                      <Text numberOfLines={1} style={styles.promptTemplateName}>{plugin.name}</Text>
+                      <Text numberOfLines={1} style={styles.modelOverrideHint}>{plugin.endpoint}</Text>
+                    </View>
+                    <AnimatedPressable
+                      accessibilityRole="switch"
+                      accessibilityState={{ checked: plugin.enabled === true }}
+                      onPress={() => void toggleRemoteMcpServer(plugin.id, plugin.enabled !== true)}
+                      style={[styles.providerChip, plugin.enabled && styles.providerChipActive]}
+                    >
+                      <Text style={[styles.providerChipText, plugin.enabled && styles.providerChipTextActive]}>
+                        {plugin.enabled ? '已授权' : '关闭'}
+                      </Text>
+                    </AnimatedPressable>
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      accessibilityLabel="删除 MCP 配置"
+                      onPress={() => removeRemoteMcpServer(plugin.id)}
+                      style={styles.iconButton}
+                    >
+                      <Trash2 size={15} color={palette.danger} strokeWidth={2} />
+                    </AnimatedPressable>
+                  </View>
+                ))}
               </View>
 
               {notice ? <Text style={styles.settingsNotice}>{notice}</Text> : null}
@@ -3281,7 +5197,11 @@ export default function App() {
                     animate={Platform.OS !== 'android' && animatedMessageIds.has(message.id)}
                     style={[
                       styles.messageBubble,
-                      message.role === 'user' ? styles.userMessageBlock : styles.assistantBubble,
+                      message.role === 'user'
+                        ? styles.userMessageBlock
+                        : message.role === 'system'
+                          ? styles.systemMessageBlock
+                          : styles.assistantBubble,
                       message.status === 'error' && styles.errorBubble,
                     ]}
                   >
@@ -3336,6 +5256,25 @@ export default function App() {
                           />
                         ) : null}
                       </>
+                    ) : message.role === 'system' ? (
+                      <View style={styles.systemInstructionCard}>
+                        <View style={styles.systemInstructionHeader}>
+                          <View style={styles.systemInstructionTitleRow}>
+                            <BookOpen size={15} color={palette.text} strokeWidth={2} />
+                            <Text style={styles.systemInstructionTitle}>会话指令</Text>
+                          </View>
+                          <AnimatedPressable
+                            accessibilityRole="button"
+                            accessibilityLabel="移除会话指令"
+                            disabled={busy || workspaceReadOnly}
+                            onPress={() => removeMessage(message)}
+                            style={styles.iconButton}
+                          >
+                            <X size={15} color={palette.textSecondary} strokeWidth={2} />
+                          </AnimatedPressable>
+                        </View>
+                        <Text style={styles.systemInstructionText}>{message.content}</Text>
+                      </View>
                     ) : (
                       <>
                         <AssistantMessageHeader
@@ -3343,6 +5282,34 @@ export default function App() {
                           providerName={messageProviderName}
                           createdAt={message.createdAt}
                         />
+                        {message.comparisonGroupId ? (
+                          <AnimatedPressable
+                            accessibilityRole="button"
+                            accessibilityState={{
+                              selected: message.selectedForContext === true,
+                              disabled: message.status !== 'ready',
+                            }}
+                            disabled={message.status !== 'ready'}
+                            onPress={() => selectComparisonAnswer(message)}
+                            style={[
+                              styles.comparisonContextButton,
+                              message.selectedForContext && styles.comparisonContextButtonSelected,
+                              message.status !== 'ready' && styles.buttonDisabled,
+                            ]}
+                          >
+                            {message.selectedForContext ? (
+                              <Check size={12} color={palette.textOnAccent} strokeWidth={2.8} />
+                            ) : null}
+                            <Text
+                              style={[
+                                styles.comparisonContextButtonText,
+                                message.selectedForContext && styles.comparisonContextButtonTextSelected,
+                              ]}
+                            >
+                              {message.selectedForContext ? '用于后续上下文' : '以此回答继续'}
+                            </Text>
+                          </AnimatedPressable>
+                        ) : null}
                         {message.reasoningContent ? (
                           <View style={styles.reasoningPanel}>
                             <AnimatedPressable
@@ -3376,6 +5343,11 @@ export default function App() {
                         ) : (
                           <Text accessibilityLiveRegion="polite" style={styles.messageText}>{message.content}</Text>
                         )}
+                        {message.citations?.length ? (
+                          <WebCitationList citations={message.citations} />
+                        ) : message.webSearchTriggered === false ? (
+                          <Text style={styles.messageStatusText}>本次响应未提供已触发联网搜索的证据。</Text>
+                        ) : null}
                         {message.status === 'cancelled' ? (
                           <Text style={styles.messageStatusText}>已停止生成</Text>
                         ) : message.error && message.content !== message.error ? (
@@ -3407,16 +5379,47 @@ export default function App() {
                           </View>
                         ) : null}
                         <View style={styles.assistantFooterRow}>
-                          <MessageActions
-                            role="assistant"
-                            copied={copiedMessageId === message.id}
-                            onCopy={() => void copyMessage(message)}
-                            onRetry={() => retryMessage(message)}
-                            onEdit={() => beginEditUserMessage(message)}
-                            onShare={() => void shareMessage(message)}
-                            onMore={() => openMessageActionMenu(message)}
-                          />
+                          <View style={styles.messageActions}>
+                            <MessageActions
+                              role="assistant"
+                              copied={copiedMessageId === message.id}
+                              onCopy={() => void copyMessage(message)}
+                              onRetry={() => retryMessage(message)}
+                              onEdit={() => beginEditUserMessage(message)}
+                              onShare={() => void shareMessage(message)}
+                              onMore={() => openMessageActionMenu(message)}
+                            />
+                            {workspace.voice.speechTarget && message.status === 'ready' && message.content.trim() ? (
+                              <AnimatedPressable
+                                accessibilityRole="button"
+                                disabled={
+                                  voiceRecorderState.isRecording ||
+                                  (audioBusy && speakingMessageId !== message.id)
+                                }
+                                accessibilityLabel={
+                                  speakingMessageId === message.id ? '停止 AI 朗读' : '使用服务商生成 AI 朗读'
+                                }
+                                onPress={() => void readAssistantMessageAloud(message)}
+                                style={[
+                                  styles.messageActionButton,
+                                  (voiceRecorderState.isRecording ||
+                                    (audioBusy && speakingMessageId !== message.id)) && styles.buttonDisabled,
+                                ]}
+                              >
+                                <Volume2
+                                  size={15}
+                                  color={speakingMessageId === message.id ? palette.accent : palette.textSecondary}
+                                  strokeWidth={2}
+                                />
+                              </AnimatedPressable>
+                            ) : null}
+                          </View>
                           {message.usage ? <TokenUsageLine usage={message.usage} /> : null}
+                          {message.requestMetrics?.durationMs !== undefined ? (
+                            <Text style={styles.tokenUsageText}>
+                              {(message.requestMetrics.durationMs / 1000).toFixed(1)}s
+                            </Text>
+                          ) : null}
                         </View>
                         {messageActionMenuId === message.id ? (
                           <MessageActionMenu
@@ -3508,7 +5511,7 @@ export default function App() {
                       transition={{ type: 'timing', duration: 160 }}
                       style={styles.attachMenu}
                     >
-                      {canAttachImage ? (
+                      {composerCanAttachImage ? (
                         <AnimatedPressable
                         accessibilityRole="button"
                         accessibilityLabel="添加图片"
@@ -3519,7 +5522,7 @@ export default function App() {
                         <Text style={styles.attachMenuText}>照片</Text>
                         </AnimatedPressable>
                       ) : null}
-                      {canAttachVideo ? (
+                      {composerCanAttachVideo ? (
                         <AnimatedPressable
                         accessibilityRole="button"
                         accessibilityLabel="添加视频"
@@ -3530,7 +5533,7 @@ export default function App() {
                         <Text style={styles.attachMenuText}>视频</Text>
                         </AnimatedPressable>
                       ) : null}
-                      {canAttachFile ? (
+                      {composerCanAttachFile ? (
                         <AnimatedPressable
                         accessibilityRole="button"
                         accessibilityLabel="添加文件"
@@ -3620,20 +5623,27 @@ export default function App() {
                   ) : null}
                 </AnimatePresence>
                 <View style={styles.composer}>
-                  {!activeModelSupportsComposer ? (
+                  {comparisonActive ? (
                     <Text accessibilityLiveRegion="polite" style={styles.messageStatusText}>
-                      当前是 {activeModelTask === 'embedding' ? 'Embedding' : 'Rerank'} 模型；聊天输入已停用，专用工作流尚未开放。
+                      对比模式：将向 {comparisonRuntimes.length} 个模型分别发起请求，费用由你的服务商账户结算。
+                    </Text>
+                  ) : null}
+                  {!composerSupportsMessages ? (
+                    <Text accessibilityLiveRegion="polite" style={styles.messageStatusText}>
+                      当前是 {modelTaskLabel[activeModelTask]} 模型；聊天输入已停用，请使用对应专用入口。
                     </Text>
                   ) : null}
                   <TextInput
                     accessibilityLabel="消息输入框"
-                    editable={!workspaceReadOnly && activeModelSupportsComposer}
+                    editable={!workspaceReadOnly && composerSupportsMessages}
                     multiline
                     placeholder={
                       workspaceReadOnly
                         ? '只读模式下无法发送消息'
-                        : activeModelSupportsComposer
-                          ? '今天如何？'
+                        : composerSupportsMessages
+                          ? comparisonActive
+                            ? `向 ${comparisonRuntimes.length} 个模型提问…`
+                            : '今天如何？'
                           : '当前模型需要专用任务界面'
                     }
                     placeholderTextColor={palette.placeholder}
@@ -3643,6 +5653,76 @@ export default function App() {
                   />
                   <View style={styles.composerFooter}>
                     <View style={styles.composerLeftTools}>
+                      <AnimatedPressable
+                        accessibilityRole="button"
+                        accessibilityLabel={comparisonActive ? '关闭多模型对比' : '开启多模型对比'}
+                        accessibilityState={{ selected: comparisonActive }}
+                        onPress={() => setComparisonEnabled(!comparisonActive)}
+                        style={[
+                          styles.composerToolButton,
+                          comparisonActive && styles.composerToolButtonActive,
+                        ]}
+                      >
+                        <Columns3
+                          size={15}
+                          color={comparisonActive ? palette.accentText : palette.textSecondary}
+                          strokeWidth={2.2}
+                        />
+                      </AnimatedPressable>
+                      {(webSearchReady || workspace.webSearch.enabled) ? (
+                        <AnimatedPressable
+                          accessibilityRole="switch"
+                          accessibilityLabel={workspace.webSearch.enabled ? '关闭联网搜索' : '开启联网搜索'}
+                          accessibilityState={{
+                            checked: workspace.webSearch.enabled,
+                            disabled: !webSearchReady && !workspace.webSearch.enabled,
+                          }}
+                          disabled={!webSearchReady && !workspace.webSearch.enabled}
+                          onPress={() => setWebSearchEnabled(!workspace.webSearch.enabled)}
+                          style={[
+                            styles.composerToolButton,
+                            workspace.webSearch.enabled && styles.composerToolButtonActive,
+                          ]}
+                        >
+                          <Globe2
+                            size={15}
+                            color={workspace.webSearch.enabled ? palette.accentText : palette.textSecondary}
+                            strokeWidth={2.2}
+                          />
+                        </AnimatedPressable>
+                      ) : null}
+                      {workspace.voice.transcriptionTarget && composerSupportsMessages ? (
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          accessibilityLabel={
+                            voiceRecorderState.isRecording
+                              ? '停止录音并转写'
+                              : audioOperation === 'recording'
+                                ? '取消录音准备'
+                              : audioOperation === 'transcribing'
+                                ? '停止语音转写请求'
+                                : audioOperation === 'synthesizing'
+                                  ? '停止语音合成请求'
+                                : '开始语音输入'
+                          }
+                          disabled={workspaceReadOnly}
+                          onPress={() => void toggleVoiceInput()}
+                          style={[
+                            styles.composerToolButton,
+                            (voiceRecorderState.isRecording || audioBusy) && styles.composerToolButtonActive,
+                          ]}
+                        >
+                          {voiceRecorderState.isRecording || audioOperation === 'recording' ? (
+                            <Square size={12} color={palette.textOnAccent} fill={palette.textOnAccent} strokeWidth={2} />
+                          ) : (
+                            <Mic
+                              size={15}
+                              color={audioBusy ? palette.accentText : palette.textSecondary}
+                              strokeWidth={2.2}
+                            />
+                          )}
+                        </AnimatedPressable>
+                      ) : null}
                       {canConfigureReasoning ? (
                         <AnimatedPressable
                           accessibilityRole="button"
@@ -3665,7 +5745,7 @@ export default function App() {
                           />
                         </AnimatedPressable>
                       ) : null}
-                      {activeModelSupportsComposer && canAttachAny ? (
+                      {composerSupportsMessages && composerCanAttachAny ? (
                         <AnimatedPressable
                           accessibilityRole="button"
                           accessibilityLabel="添加附件"
@@ -3709,11 +5789,11 @@ export default function App() {
                       accessibilityState={{
                         disabled:
                           !busy &&
-                          (workspaceReadOnly || !activeModelSupportsComposer || (!input.trim() && attachments.length === 0)),
+                          (workspaceReadOnly || !composerSupportsMessages || (!input.trim() && attachments.length === 0)),
                       }}
                       disabled={
                         !busy &&
-                        (workspaceReadOnly || !activeModelSupportsComposer || (!input.trim() && attachments.length === 0))
+                        (workspaceReadOnly || !composerSupportsMessages || (!input.trim() && attachments.length === 0))
                       }
                       onPress={busy ? stopActiveRequest : sendMessage}
                       haptic="medium"
@@ -4378,6 +6458,31 @@ function MessageActionMenu({
         <Text style={[styles.messageActionMenuText, styles.messageActionMenuDangerText]}>删除消息</Text>
         <Trash2 size={15} color={palette.danger} strokeWidth={2.2} />
       </AnimatedPressable>
+    </View>
+  );
+}
+
+function WebCitationList({ citations }: { citations: WebCitation[] }) {
+  return (
+    <View style={styles.webCitationPanel}>
+      <Text style={styles.webCitationTitle}>联网来源</Text>
+      {citations.map((citation, index) => (
+        <AnimatedPressable
+          key={`${citation.url}:${index}`}
+          accessibilityRole="link"
+          accessibilityLabel={`打开来源 ${citation.title ?? citation.url}`}
+          onPress={() => {
+            void Linking.openURL(citation.url);
+          }}
+          style={styles.webCitationRow}
+        >
+          <Text style={styles.webCitationIndex}>{index + 1}</Text>
+          <Text numberOfLines={2} style={styles.webCitationText}>
+            {citation.title ?? citation.url}
+          </Text>
+          <ExternalLink size={13} color={palette.textSecondary} strokeWidth={2} />
+        </AnimatedPressable>
+      ))}
     </View>
   );
 }
@@ -5417,6 +7522,117 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  promptTemplateContentInput: {
+    minHeight: 112,
+    textAlignVertical: 'top',
+    paddingTop: 12,
+  },
+  promptTemplateRow: {
+    minHeight: 56,
+    borderWidth: 1,
+    borderColor: palette.border,
+    borderRadius: radii.md,
+    backgroundColor: palette.bg,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingLeft: 12,
+    paddingRight: 4,
+  },
+  promptTemplateMain: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 54,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+  },
+  promptTemplateTextBlock: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  promptTemplateName: {
+    color: palette.text,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '700',
+  },
+  usageSummaryGrid: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  usageSummaryItem: {
+    flex: 1,
+    minWidth: 0,
+    borderRadius: radii.md,
+    backgroundColor: palette.bg,
+    paddingHorizontal: 10,
+    paddingVertical: 12,
+    gap: 3,
+  },
+  usageSummaryValue: {
+    color: palette.text,
+    fontSize: 18,
+    lineHeight: 23,
+    fontWeight: '800',
+  },
+  usageSummaryLabel: {
+    color: palette.textSecondary,
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '600',
+  },
+  usageCostRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  pricingInputRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  pricingInputGroup: {
+    flex: 1,
+    minWidth: 0,
+    gap: 5,
+  },
+  mediaTaskRow: {
+    minHeight: 58,
+    borderWidth: 1,
+    borderColor: palette.border,
+    borderRadius: radii.md,
+    backgroundColor: palette.bg,
+    paddingLeft: 12,
+    paddingRight: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  mediaTaskInfo: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  mediaTaskState: {
+    color: palette.textSecondary,
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '700',
+  },
+  voiceTargetRow: {
+    minHeight: 54,
+    borderWidth: 1,
+    borderColor: palette.border,
+    borderRadius: radii.md,
+    backgroundColor: palette.bg,
+    paddingLeft: 12,
+    paddingRight: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
   providerRow: {
     gap: 10,
     paddingRight: 18,
@@ -6031,6 +8247,38 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     gap: 12,
   },
+  systemMessageBlock: {
+    alignSelf: 'stretch',
+  },
+  systemInstructionCard: {
+    borderWidth: 1,
+    borderColor: palette.borderStrong,
+    borderRadius: radii.lg,
+    backgroundColor: palette.surface,
+    padding: 12,
+    gap: 8,
+  },
+  systemInstructionHeader: {
+    minHeight: 26,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  systemInstructionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  systemInstructionTitle: {
+    color: palette.text,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  systemInstructionText: {
+    color: palette.textSecondary,
+    fontSize: 13,
+    lineHeight: 20,
+  },
   errorBubble: {
     alignSelf: 'stretch',
     backgroundColor: palette.dangerBg,
@@ -6107,6 +8355,31 @@ const styles = StyleSheet.create({
   messageErrorText: {
     color: palette.danger,
   },
+  comparisonContextButton: {
+    alignSelf: 'flex-start',
+    minHeight: 28,
+    paddingHorizontal: 10,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: palette.borderStrong,
+    backgroundColor: palette.surface,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  comparisonContextButtonSelected: {
+    borderColor: palette.accent,
+    backgroundColor: palette.accent,
+  },
+  comparisonContextButtonText: {
+    color: palette.textSecondary,
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '700',
+  },
+  comparisonContextButtonTextSelected: {
+    color: palette.textOnAccent,
+  },
   userMessageText: {
     color: palette.text,
     fontSize: 15,
@@ -6167,6 +8440,43 @@ const styles = StyleSheet.create({
     color: palette.textSecondary,
     fontSize: 13,
     lineHeight: 20,
+  },
+  webCitationPanel: {
+    borderWidth: 1,
+    borderColor: palette.border,
+    borderRadius: radii.md,
+    backgroundColor: palette.surface,
+    padding: 10,
+    gap: 7,
+  },
+  webCitationTitle: {
+    color: palette.textSecondary,
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '800',
+  },
+  webCitationRow: {
+    minHeight: 30,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  webCitationIndex: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: palette.surfaceAlt,
+    color: palette.text,
+    fontSize: 10,
+    lineHeight: 20,
+    textAlign: 'center',
+    fontWeight: '800',
+  },
+  webCitationText: {
+    flex: 1,
+    color: palette.text,
+    fontSize: 12,
+    lineHeight: 17,
   },
   tokenUsageRow: {
     flexDirection: 'row',

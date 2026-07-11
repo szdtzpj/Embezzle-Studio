@@ -29,6 +29,13 @@ import {
   openAiResponsesLimits,
   parseOpenAiResponsesResponse,
 } from './openAiResponses';
+import {
+  assertProviderWebSearchMessagesSupported,
+  buildProviderWebSearchRequest,
+  parseProviderWebSearchResponse,
+  resolveProviderWebSearchProtocol,
+  type OpenAiWebSearchContextSize,
+} from './providerWebSearch';
 
 interface ChatCompletionArgs {
   provider: ProviderProfile;
@@ -38,6 +45,10 @@ interface ChatCompletionArgs {
   reasoningEffort: ReasoningEffort;
   parameterSettings?: ModelParameterSettings;
   onStreamUpdate?: (update: ChatStreamUpdate) => void;
+  webSearch?: {
+    enabled: boolean;
+    searchContextSize: OpenAiWebSearchContextSize;
+  };
   signal?: AbortSignal;
 }
 
@@ -85,6 +96,16 @@ const maxStreamOutputCharacters = 2_000_000;
 const bailianMaxInlineVideoDataUrlBytes = 10 * 1024 * 1024;
 const responseAbortCleanups = new WeakMap<Response, () => void>();
 
+interface WebDevelopmentProxyRuntime {
+  platform?: string;
+  development?: boolean;
+  explicitlyEnabled?: boolean;
+  location?: {
+    protocol: string;
+    hostname: string;
+  };
+}
+
 function createAbortError(message = '请求已取消。'): Error {
   const error = new Error(message);
   error.name = 'AbortError';
@@ -98,6 +119,24 @@ export function isAbortError(error: unknown): boolean {
 function isLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
   return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
+}
+
+export function isWebDevelopmentProxyAllowed({
+  platform = Platform.OS,
+  development = typeof __DEV__ !== 'undefined' && __DEV__ === true,
+  explicitlyEnabled = process.env.EXPO_PUBLIC_ENABLE_WEB_DEV_PROXY === '1',
+  location = typeof window !== 'undefined'
+    ? { protocol: window.location.protocol, hostname: window.location.hostname }
+    : undefined,
+}: WebDevelopmentProxyRuntime = {}): boolean {
+  return Boolean(
+    platform === 'web' &&
+    development &&
+    explicitlyEnabled &&
+    location &&
+    (location.protocol === 'http:' || location.protocol === 'https:') &&
+    isLoopbackHostname(location.hostname)
+  );
 }
 
 function parseProviderBaseUrl(rawBaseUrl: string): URL {
@@ -292,6 +331,11 @@ async function providerFetch(
     if (Platform.OS !== 'web') {
       response = await fetch(url, { ...init, signal: controller.signal });
     } else {
+      if (!isWebDevelopmentProxyAllowed()) {
+        throw new Error(
+          '正式 Web 构建不会发送 API Key 或模型请求。仅可在本机通过 npm run web 显式启动受限调试代理。'
+        );
+      }
       try {
         response = await fetch(webDevProxyUrl, {
           method: 'POST',
@@ -1713,6 +1757,7 @@ export async function sendOpenAiCompatibleChat({
   reasoningEffort,
   parameterSettings,
   onStreamUpdate,
+  webSearch,
   signal,
 }: ChatCompletionArgs): Promise<ChatCompletionResult> {
   if (!modelId) {
@@ -1721,6 +1766,10 @@ export async function sendOpenAiCompatibleChat({
 
   const requestModel = model ?? createModelInfoFromId(provider, modelId, 'manual');
   const task = inferModelTask(requestModel);
+
+  if (webSearch?.enabled && task !== 'chat') {
+    throw new Error('联网搜索只适用于聊天模型，已拒绝发起请求。');
+  }
 
   if (task === 'image-generation') {
     return sendImageGenerationRequest(provider, modelId, messages, signal);
@@ -1737,9 +1786,59 @@ export async function sendOpenAiCompatibleChat({
   if (task === 'embedding' || task === 'rerank') {
     throw new Error('当前模型不是对话模型，不能在聊天窗口中调用。请切换到文本/多模态对话模型。');
   }
+  if (task === 'audio-transcription' || task === 'speech-generation') {
+    throw new Error('当前是语音专用模型，请使用语音输入或朗读入口。');
+  }
 
   const chatAttachments = messages.flatMap((message) => message.attachments ?? []);
   assertChatAttachmentsSupported(chatAttachments, requestModel, provider);
+
+  if (webSearch?.enabled) {
+    if (!provider.apiKey?.trim()) {
+      throw new Error('联网搜索必须使用你在当前服务商中配置的 API Key。');
+    }
+    if (!requestModel.capabilities.includes('web-search')) {
+      throw new Error('当前模型未明确标记为支持联网搜索，已拒绝发起可能计费的搜索请求。');
+    }
+    assertProviderWebSearchMessagesSupported(provider, messages);
+    const requestMessages = await materializeMessagesForRequest(messages, provider);
+    const searchProtocol = resolveProviderWebSearchProtocol(provider);
+    const request = buildProviderWebSearchRequest({
+      provider,
+      modelId,
+      messages: requestMessages,
+      ...(searchProtocol === 'openai-official'
+        ? { searchContextSize: webSearch.searchContextSize }
+        : {}),
+    });
+    const response = await providerFetch(
+      request.url,
+      {
+        method: 'POST',
+        headers: authHeaders(provider),
+        body: JSON.stringify(request.body),
+        signal,
+      },
+      openAiProRequestTimeoutMs
+    );
+    const responseBody = await readLimitedResponseText(
+      response,
+      response.ok ? openAiResponsesLimits.maxResponseJsonBytes : maxErrorResponseBytes,
+      '联网搜索'
+    );
+    if (!response.ok) {
+      throw new Error(`联网搜索请求失败：${response.status} ${compactResponseText(responseBody)}`);
+    }
+    const result = parseProviderWebSearchResponse({ provider, payload: responseBody });
+    return {
+      content: result.content,
+      reasoningContent: result.reasoningContent,
+      usage: result.usage,
+      citations: result.citations,
+      webSearchTriggered: result.webSearchTriggered,
+      raw: result,
+    };
+  }
 
   if (isOpenAiResponsesOnlyModel(provider, modelId)) {
     const requestMessages = await materializeMessagesForRequest(messages, provider);

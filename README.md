@@ -10,6 +10,8 @@ Embezzle Studio 是一个面向 Android 的移动端 AI 对话客户端。项目
 - 模型获取：OpenAI/兼容服务商尝试模型列表接口；火山方舟只在精确官方数据面主机上尝试未列入官方 API 参考的兼容 `/models` 探测，失败或响应不兼容时回退到根据官方目录维护的本地精选候选，并始终支持手动添加 Model ID 或 Endpoint ID。
 - 模型选择：聊天页可按服务商查看已添加模型，并切换当前激活模型。
 - 对话协议：Chat Completions 默认流式输出；OpenAI Responses-only Pro 模型自动切换 `/responses` 非流式协议，并记录 Token 用量。
+- 多模型同问：可选择 2–4 个用户服务商模型并行回答；整组共用停止控制，单个失败不丢弃其它结果，后续对话只携带用户选中的一个候选。界面会在发送前明确本次将产生多少次独立服务商调用。
+- 可信联网搜索：使用用户自己的 Key 调用 OpenAI、火山方舟或阿里百炼官方 Responses 搜索协议；只有响应包含搜索调用、有效引用或百炼搜索计数证据时才标记为已联网，并把 HTTPS 来源展示为可点击链接。
 - 思考设置：按精确模型系列保存思考强度，区分 `off`、`none`、`minimal`、`xhigh`、`max`，并分别映射 OpenAI、火山方舟和百炼协议。
 - 参数调整：按服务商和模型只显示已适配的温度、top_p、惩罚参数及其真实范围；思考模式或固定参数模型会明确提示或隐藏无效控件，关闭后交给服务商默认值处理。
 - 多模态入口：按模型能力显示图片、视频和文件选择入口；图片可发送给视觉模型，百炼兼容模式支持有界的本地视频 `video_url` 输入，文件输入仅对显式具备 `file-input` 能力的 OpenAI 官方模型开放。另支持文本生图，以及带参考图片/视频的火山方舟视频任务提交和后续查询。
@@ -17,14 +19,20 @@ Embezzle Studio 是一个面向 Android 的移动端 AI 对话客户端。项目
 - Android 布局与切页：主聊天区和改名对话框使用键盘避让，Android 配置为 `resize`；聊天页在打开设置后保持挂载，设置页首次打开后复用，并限制远端候选模型的单批渲染量以降低切页和大列表压力。
 - 对话记录：本地保存历史会话，支持搜索用户和模型回复内容，并支持置顶、改名、分享、删除。
 - 消息操作：支持原生/网页复制、分享、停止生成、保留流式部分内容、重新生成、编辑和按因果分支删除。
+- 本地生产力中心：提示词/角色模板、跨对话媒体任务中心、Token/延迟聚合和用户自填价格的 CNY/USD 费用估算均在本机完成，不调用 Embezzle Studio 的服务。
+- 请求式语音：Android 可用用户自己的 OpenAI 或阿里百炼账号完成录音转写与回答朗读；转写只写入草稿、不自动发送，朗读音频先下载到本机缓存并明确标识为 AI 合成语音。火山语音因使用独立 AppID/Token 协议而不会错误复用 Ark Key。
+- 加密备份与 MCP 安全配置：配置/文字对话/模板可做带密码的本地认证加密导出，API Key、MCP 授权和媒体文件永不进入备份。远程 MCP 配置默认关闭、授权前展示权限，实际工具执行在逐次审批闭环完成前保持 fail-closed。
 - 更新检查：从固定的公共 Pages 更新清单检查版本和已校验 APK 元数据，并跳转到受信任的发布页面；应用本身不会伪装成 APK 校验器或安装器。
 - 本地存储：Android API Key 使用 SecureStore；Web API Key 只保留在当前标签页的 `sessionStorage`/内存中，并会迁移清除旧版持久化值。工作区使用带版本和备份的 AsyncStorage；原生附件复制到应用文件目录，Web 附件以 Blob 存入 IndexedDB，避免把大型 Base64 写进工作区 JSON。
 
 ## 仍在完善
 
+当前开发分支已进入 `1.1.0` / Android versionCode 7，但尚未 tag、发布或替换公开 Latest；下文所有 `v1.0.6` APK、签名和 Pages 数据仍描述当前公开稳定版，不应与本地 `1.1.0` 候选混用。
+
 - 对话视频附件目前只为百炼兼容模式实现 `video_url` 传输；其他服务商仍需各自的上传、转码或引用协议适配。
 - 用户已在一台 Android 真机上确认键盘避让、Seedance 预览/下载、图片预览尺寸和设置/聊天切换的主路径解决；更多机型、系统目录取消/失败/空间不足、远程媒体过期和长时间压力矩阵仍需验收。Web 回归不能替代这些扩展原生验证。
-- MCP、插件系统和联网搜索服务商还没有作为稳定功能接入。
+- MCP 远程配置和权限确认已接入，但真实工具调用/审批响应循环尚未开放；百炼 MCP 缺少同等逐次审批契约时尤其不会启用写工具。
+- 联网搜索与语音的协议和解析已有自动化测试，但用户账号是否开通对应付费产品、真实搜索计费证据、麦克风/播放和长时间并发仍需代表性账号与 Android 真机验收。
 - OpenAI 官方接口不会返回原始隐藏思考链；应用只能展示接口返回的思考摘要、reasoning_content 或 Token 用量。
 - Android 安装包构建需要本机 Android 工具链，或通过 CI/EAS 等方式构建。
 
@@ -44,6 +52,8 @@ Embezzle Studio 是一个面向 Android 的移动端 AI 对话客户端。项目
 - React Native Reanimated
 - React Native Gesture Handler
 - Expo Video
+- Expo Audio
+- Expo Crypto + Noble Ciphers/Hashes
 - AsyncStorage
 - SecureStore
 
@@ -112,7 +122,7 @@ keytool -list -v -keystore $keystore -alias embezzle-studio | Select-String 'SHA
 
 1. 同步更新 `app.json` 的 `expo.version` 和递增的 `android.versionCode`、`package.json`/`package-lock.json` 的版本，以及 `src/data/appInfo.ts` 的版本。
 2. 在本地通过与 CI 相同的质量检查，通过 Pull Request 合并到 `main`，再等待该合并提交的 Quality 与 push-triggered Pages 工作流都成功。
-3. 暂停其它 `main` 合并和新版本 Release；从最新 `origin/main` 的精确提交创建并推送与应用版本一致的 tag，例如下一版本 `v1.0.7`。
+3. 暂停其它 `main` 合并和新版本 Release；从最新 `origin/main` 的精确提交创建并推送与应用版本一致的 tag，例如当前开发版本 `v1.1.0`。
 4. 确认仓库已启用 Immutable Releases，由 `szdtzpj` 创建同名、非 prerelease 的空 draft Release，再从默认分支 `main` 手动运行 Android 工作流；不要提前发布空 Release。
 5. 工作流会检出与当前 `origin/main` 完全相同的 tag 提交，生成未签名 APK，使用正式 keystore 签名，并在冻结前后重复核对 tag/main 提交以及每个 GitHub asset 的 digest、状态与 uploader，然后才把 draft 发布为 latest immutable Release。等该工作流、自动触发的 Pages 工作流、Release attestation 和公开 APK 字节校验都成功后，才结束发布冻结。
 
@@ -121,11 +131,11 @@ keytool -list -v -keystore $keystore -alias embezzle-studio | Select-String 'SHA
 ```powershell
 git fetch origin
 $mergeSha = git rev-parse origin/main
-git tag -a v1.0.7 $mergeSha -m "Embezzle Studio v1.0.7"
-git push origin v1.0.7
+git tag -a v1.1.0 $mergeSha -m "Embezzle Studio v1.1.0"
+git push origin v1.1.0
 gh api --method PUT repos/szdtzpj/Embezzle-Studio/immutable-releases
-gh release create v1.0.7 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.0.7" --notes "Android production release v1.0.7."
-gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.0.7
+gh release create v1.1.0 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.1.0" --notes "Android production release v1.1.0."
+gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.1.0
 ```
 
 Release 标题、正文与发布时间会被复制到公开 Pages 清单和下载页。创建 draft 前必须把这些文字当作公开内容审阅，不得包含私有仓库、账号、客户或密钥信息；不要未经检查直接使用自动生成的 release notes。
@@ -142,4 +152,5 @@ GitHub Release 的多个资产上传不是事务操作。工作流仅在 owner-a
 
 - [Product and Architecture](./docs/product-architecture.md)
 - [Provider Protocol Matrix](./docs/provider-protocols.md)
+- [BYOK Productivity Suite](./docs/byok-productivity-suite.md)
 - [Roadmap](./docs/roadmap.md)

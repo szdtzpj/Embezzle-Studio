@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ChatMessage, ProviderProfile } from '../src/domain/types';
 import { createModelInfoFromId } from '../src/services/modelCapabilities';
-import { sendOpenAiCompatibleChat } from '../src/services/openAiCompatible';
+import {
+  isWebDevelopmentProxyAllowed,
+  sendOpenAiCompatibleChat,
+} from '../src/services/openAiCompatible';
 
 const platform = vi.hoisted(() => ({ OS: 'android' }));
 
@@ -27,8 +30,53 @@ const message: ChatMessage = {
 };
 
 afterEach(() => {
+  platform.OS = 'android';
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe('Web development proxy boundary', () => {
+  it('requires development mode, an explicit launcher flag, and a loopback page', () => {
+    expect(isWebDevelopmentProxyAllowed({
+      platform: 'web',
+      development: true,
+      explicitlyEnabled: true,
+      location: { protocol: 'http:', hostname: '127.0.0.1' },
+    })).toBe(true);
+    expect(isWebDevelopmentProxyAllowed({
+      platform: 'web',
+      development: false,
+      explicitlyEnabled: true,
+      location: { protocol: 'http:', hostname: '127.0.0.1' },
+    })).toBe(false);
+    expect(isWebDevelopmentProxyAllowed({
+      platform: 'web',
+      development: true,
+      explicitlyEnabled: false,
+      location: { protocol: 'http:', hostname: '127.0.0.1' },
+    })).toBe(false);
+    expect(isWebDevelopmentProxyAllowed({
+      platform: 'web',
+      development: true,
+      explicitlyEnabled: true,
+      location: { protocol: 'https:', hostname: 'szdtzpj.github.io' },
+    })).toBe(false);
+  });
+
+  it('fails closed before contacting a proxy from a production-style Web runtime', async () => {
+    platform.OS = 'web';
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(sendOpenAiCompatibleChat({
+      provider,
+      modelId: 'gpt-4.1',
+      model: createModelInfoFromId(provider, 'gpt-4.1', 'manual'),
+      messages: [message],
+      reasoningEffort: 'default',
+    })).rejects.toThrow(/正式 Web 构建不会发送 API Key/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('official OpenAI endpoint routing', () => {
@@ -138,5 +186,67 @@ describe('official OpenAI endpoint routing', () => {
       reasoningEffort: 'default',
     })).rejects.toThrow(/只在 OpenAI 官方 API/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('provider Responses Web Search integration', () => {
+  it.each([
+    {
+      label: 'Volcengine Ark',
+      provider: {
+        ...provider,
+        id: 'ark',
+        name: 'Volcengine Ark',
+        kind: 'volcengine-ark' as const,
+        baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+        capabilities: ['text', 'web-search'] as ProviderProfile['capabilities'],
+      },
+      modelId: 'doubao-seed-2-0-pro-260215',
+      expectedTool: { type: 'web_search', max_keyword: 3, limit: 10 },
+    },
+    {
+      label: 'Alibaba Bailian',
+      provider: {
+        ...provider,
+        id: 'bailian',
+        name: 'Alibaba Bailian',
+        kind: 'bailian-compatible' as const,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        capabilities: ['text', 'web-search'] as ProviderProfile['capabilities'],
+      },
+      modelId: 'qwen-plus',
+      expectedTool: { type: 'web_search' },
+    },
+  ])('does not send OpenAI-only search_context_size to $label', async ({
+    provider: searchProvider,
+    modelId,
+    expectedTool,
+  }) => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: 'resp_search',
+      status: 'completed',
+      output: [{
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'Search result.' }],
+      }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const searchModel = createModelInfoFromId(searchProvider, modelId, 'manual');
+    searchModel.capabilities = Array.from(new Set([...searchModel.capabilities, 'web-search']));
+
+    const result = await sendOpenAiCompatibleChat({
+      provider: searchProvider,
+      modelId,
+      model: searchModel,
+      messages: [message],
+      reasoningEffort: 'default',
+      webSearch: { enabled: true, searchContextSize: 'high' },
+    });
+
+    const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
+    expect(body.tools).toEqual([expectedTool]);
+    expect(JSON.stringify(body)).not.toContain('search_context_size');
+    expect(result.content).toBe('Search result.');
   });
 });

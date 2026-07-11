@@ -87,5 +87,17 @@ export function createDefaultWorkspace(): AppWorkspace {
     ],
     messages: [welcomeMessage],
     plugins: [],
+    promptTemplates: [],
+    comparisonEnabled: false,
+    comparisonTargets: [],
+    modelPricing: [],
+    webSearch: {
+      enabled: false,
+      searchContextSize: 'medium',
+    },
+    voice: {
+      speechVoice: 'alloy',
+      speechFormat: 'mp3',
+    },
   };
 }

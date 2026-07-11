@@ -15,6 +15,8 @@ export type Capability =
   | 'web-search'
   | 'image-generation'
   | 'video-generation'
+  | 'speech-to-text'
+  | 'text-to-speech'
   | 'embedding'
   | 'rerank'
   | 'streaming'
@@ -37,7 +39,14 @@ export type ReasoningEffort =
   | 'xhigh'
   | 'max';
 
-export type ModelTask = 'chat' | 'image-generation' | 'video-generation' | 'embedding' | 'rerank';
+export type ModelTask =
+  | 'chat'
+  | 'image-generation'
+  | 'video-generation'
+  | 'audio-transcription'
+  | 'speech-generation'
+  | 'embedding'
+  | 'rerank';
 
 export interface ModelParameterSettings {
   enabled: boolean;
@@ -90,6 +99,64 @@ export interface ChatTokenUsage {
   totalTokens?: number;
 }
 
+export interface ModelTargetRef {
+  providerId: string;
+  modelId: string;
+}
+
+export interface RequestMetrics {
+  durationMs?: number;
+  timeToFirstTokenMs?: number;
+}
+
+export type PricingCurrency = 'CNY' | 'USD';
+
+export interface ModelPricing {
+  providerId: string;
+  modelId: string;
+  currency: PricingCurrency;
+  inputPerMillion?: number;
+  cachedInputPerMillion?: number;
+  outputPerMillion?: number;
+  updatedAt: number;
+}
+
+export interface CostEstimate {
+  amount: number;
+  currency: PricingCurrency;
+  source: 'user-configured';
+  pricingUpdatedAt: number;
+}
+
+export interface PromptTemplate {
+  id: string;
+  name: string;
+  content: string;
+  mode: 'composer' | 'system';
+  createdAt: number;
+  updatedAt: number;
+  pinnedAt?: number;
+}
+
+export interface WebCitation {
+  url: string;
+  title?: string;
+  startIndex?: number;
+  endIndex?: number;
+}
+
+export interface WebSearchSettings {
+  enabled: boolean;
+  searchContextSize: 'low' | 'medium' | 'high';
+}
+
+export interface VoiceSettings {
+  transcriptionTarget?: ModelTargetRef;
+  speechTarget?: ModelTargetRef;
+  speechVoice: string;
+  speechFormat: 'mp3' | 'opus' | 'aac' | 'wav';
+}
+
 export interface GenerationTaskInfo {
   providerId: string;
   modelId: string;
@@ -107,6 +174,13 @@ export interface ChatMessage {
   attachments?: MediaAttachment[];
   reasoningContent?: string;
   usage?: ChatTokenUsage;
+  citations?: WebCitation[];
+  webSearchTriggered?: boolean;
+  promptTemplateId?: string;
+  comparisonGroupId?: string;
+  selectedForContext?: boolean;
+  requestMetrics?: RequestMetrics;
+  costEstimate?: CostEstimate;
   generationTask?: GenerationTaskInfo;
   modelId?: string;
   providerId?: string;
@@ -132,6 +206,11 @@ export interface PluginManifest {
   permissions: Array<'network' | 'files' | 'clipboard' | 'tools'>;
   transport?: 'streamable-http' | 'sse';
   endpoint?: string;
+  enabled?: boolean;
+  serverLabel?: string;
+  providerId?: string;
+  authorization?: string;
+  approvalPolicy?: 'always';
 }
 
 export interface AppWorkspace {
@@ -145,12 +224,20 @@ export interface AppWorkspace {
   conversations: ChatConversation[];
   messages: ChatMessage[];
   plugins: PluginManifest[];
+  promptTemplates: PromptTemplate[];
+  comparisonEnabled: boolean;
+  comparisonTargets: ModelTargetRef[];
+  modelPricing: ModelPricing[];
+  webSearch: WebSearchSettings;
+  voice: VoiceSettings;
 }
 
 export interface ChatCompletionResult {
   content: string;
   reasoningContent?: string;
   usage?: ChatTokenUsage;
+  citations?: WebCitation[];
+  webSearchTriggered?: boolean;
   attachments?: MediaAttachment[];
   generationTask?: GenerationTaskInfo;
   raw: unknown;

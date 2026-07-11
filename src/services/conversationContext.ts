@@ -13,6 +13,22 @@ function isUsableMessage(message: ChatMessage): boolean {
   );
 }
 
+function comparisonContextSelection(messages: ChatMessage[]): Set<string> {
+  const selectedByGroup = new Map<string, string>();
+  for (const message of messages) {
+    if (
+      message.role === 'assistant' &&
+      message.comparisonGroupId &&
+      message.selectedForContext === true &&
+      message.status === 'ready' &&
+      !selectedByGroup.has(message.comparisonGroupId)
+    ) {
+      selectedByGroup.set(message.comparisonGroupId, message.id);
+    }
+  }
+  return new Set(selectedByGroup.values());
+}
+
 function messageCharacterCost(message: ChatMessage): number {
   const attachmentCost = (message.attachments ?? []).reduce((total, attachment) => {
     const bytes = attachment.size ?? (attachment.base64 ? Math.ceil(attachment.base64.length * 0.75) : 750);
@@ -47,7 +63,16 @@ export function buildChatTranscript(
   contextWindow?: number,
   maxMessages = defaultMaxMessages
 ): ChatMessage[] {
-  const usable = messages.filter(isUsableMessage);
+  const selectedComparisonMessages = comparisonContextSelection(messages);
+  const usable = messages.filter(
+    (message) =>
+      isUsableMessage(message) &&
+      (
+        message.role !== 'assistant' ||
+        !message.comparisonGroupId ||
+        selectedComparisonMessages.has(message.id)
+      )
+  );
   const systemMessages = usable.filter((message) => message.role === 'system');
   const conversational = usable.filter((message) => message.role !== 'system');
   const turns: ChatMessage[][] = [];

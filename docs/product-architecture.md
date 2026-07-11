@@ -15,6 +15,7 @@ Embezzle Studio is a personal Android AI client for people who already own multi
 - Mobile constraints are real: remote MCP transports are first-class; local stdio MCP is not part of the first mobile milestone because Android process and binary management would make the first version brittle.
 - Native runtime UX is part of correctness: the Android IME must resize/avoid the composer, media controls must remain reachable inside narrow message cards, and navigation must avoid repeatedly rebuilding expensive chat, player, animation, or model-list subtrees.
 - Web development needs a local proxy: Expo Web runs in a browser and would otherwise hit CORS on provider APIs. Android builds call providers directly.
+- Zero owned inference cost: Embezzle Studio does not supply a model/search/voice key or operate a production proxy, tool gateway, sync backend, or background worker. Provider-backed features activate only with a user-owned credential and an implemented exact protocol.
 
 ## MVP Scope
 
@@ -103,9 +104,10 @@ Discovery enriches remote model IDs through local metadata/rules. Ark treats its
 
 - `ProviderProfile`: provider identity, adapter kind, base URL, API key, transport capability hints, and model list.
 - `ModelInfo`: model ID plus resolved capability hints and optional supported reasoning effort hints.
-- `ChatMessage`: role, content, status, attachments, and error information.
+- `ChatMessage`: role, content, status, attachments, citations, comparison selection, request metrics, usage, and error information.
 - `MediaAttachment`: attachment kind, durable URI, MIME type, size/dimensions, and optional request-time Base64 payload.
 - `PluginManifest`: mobile-safe plugin or remote MCP entry.
+- `PromptTemplate`, `ModelPricing`, `ModelTargetRef`, `WebSearchSettings`, and `VoiceSettings`: local productivity configuration without copied provider secrets.
 
 ## Attachment Lifecycle and Limits
 
@@ -122,6 +124,17 @@ Discovery enriches remote model IDs through local metadata/rules. Ark treats its
 - The app icon, adaptive foreground/background, Android 13 monochrome icon, favicon, and explicit native splash screen are derived from the same double-ribbon S mark. The splash background matches the app background canvas (`#F4F4F4`) to avoid an intentional white-template flash.
 - The user confirmed that the originally reported Settings/Chat freeze path is resolved on their phone and later authorized `v1.0.6` publication. That authorization is not a connected-device test log for the final Actions APK; additional-device and sustained stress coverage, player cleanup under failure, large native attachment sessions, system-bar variants, launcher masks, splash rendering, and native-animation profiling remain independent real-device work.
 
+## BYOK Productivity and Tool Boundary
+
+- Multi-model comparison performs complete preflight before any of 2–4 independent calls, shares one group `AbortController`, records per-candidate timing/usage, and passes only the selected successful candidate into later context.
+- Search uses exact official Responses endpoints for OpenAI, Ark, and Bailian. Capability inference, adapter support, user credential readiness, and response evidence are separate checks. Citations are structured, visible, clickable, and restricted to safe HTTPS URLs.
+- Android request-based audio supports official OpenAI and Bailian only. Recording is foreground-only and transcribed text is never auto-sent. Synthesized speech is cached before playback. Volcengine speech remains disabled until a separate speech credential profile exists; OpenAI Realtime remains disabled because safe ephemeral tokens require a broker.
+- The task center is a projection of durable conversation messages; it has no duplicate cloud job database and performs no background polling. The usage dashboard aggregates only locally retained conversations and treats user-entered prices as estimates, without a price or FX service.
+- External backups are authenticated encrypted files, but secrets and media are removed before encryption. Internal workspace schema v3 migrates v2, stores provider/MCP secrets separately, and strictly normalizes new productivity fields.
+- MCP configuration permits only remote HTTPS endpoints, rejects embedded credentials/query strings/private destinations, stores authorization separately, defaults disabled, and displays a permission confirmation. Actual provider-hosted MCP calls remain disabled until per-tool argument preview and approval-response handling are implemented and real-server tested.
+
+The full matrix and official contracts are recorded in [BYOK Productivity Suite](./byok-productivity-suite.md).
+
 ## Release and Update Trust Boundary
 
 - The Android release workflow is owner-triggered from `main`, repeats its owner/rerun gate before every signing or publication boundary, requires the version tag to equal the exact current `origin/main`, and accepts only an empty owner-authored draft. Draft inspection is isolated in a short `release_contract` job with `contents: write`; preflight and publication are constrained by the main-only `android-release` Environment, checkout credentials are not persisted, signing has no repository-token permission, and the npm/Expo/Gradle build remains read-only. It builds an unsigned APK with pinned Build Tools 36.0.0, proves the input is unsigned, signs only inside `android-release`, and requires exactly one expected production certificate. Before and after publishing the draft as the latest GitHub Immutable Release, it rechecks the resolved tag/main commit plus the exact asset set, GitHub digests, states, and uploaders.
@@ -132,6 +145,12 @@ Discovery enriches remote model IDs through local metadata/rules. Ark treats its
 - Stable `v1.0.6` is the current immutable Latest Release. PR #10 merged as exact release commit `888db913c154fc60fdc7fa4b9de947be55ab10c0`; annotated tag and `main` matched that commit at freeze. Android run `29092367202` passed the complete protected build/sign/publish contract, and Pages run `29094337390` staged the same verified APK bytes into the public manifest and trusted download page.
 
 ## Current Verification Boundary
+
+- Local development is now version `1.1.0` / code 7. It is not a tagged or public release. Its new BYOK features have automated protocol, parsing, context, analytics, encryption, storage, and static UI coverage, while real provider-product activation and Android microphone/playback remain external acceptance boundaries.
+
+- The `1.1.0` development source passes `npm.cmd run check` with 21 test files / 423 tests, zero TypeScript errors, and zero ESLint warnings. The final Web export passes at 3,249 modules / 7.2 MB; Expo Doctor is 20/20 and `expo install --check` passes. A clean 390×844 exported-Web session covered the new productivity settings, saved/applied a prompt template, and proved a production-style provider send fails before contacting the local proxy; browser console evidence is 0 errors / 0 warnings. All 3 workflow YAML files, 35 Bash blocks, and `git diff --check` pass.
+
+- Clean Android prebuild and `NODE_ENV=production` unsigned Release assembly pass for `1.1.0`. The production-signed local candidate is `D:\EmbezzleStudio-Releases\v1.1.0-candidate\Embezzle-Studio-v1.1.0-candidate-release.apk`, 97,198,551 bytes, SHA-256 `f4a0062fc03d320bb5e3915b6b9a0cdb3a80ee16b4ad18cce78edfd79f92cd80`. `aapt` reports version `1.1.0`/code 7, minSdk 24, targetSdk 36, intentional `RECORD_AUDIO`, and no camera/overlay permission. It has one expected production signer, v2/v3, and valid zip alignment. This is not a public asset.
 
 - Local automation passes for the `1.0.6` release source: `npm.cmd run check` reports 15 test files / 252 tests with zero TypeScript or ESLint errors/warnings; Web export reports 3137 modules and a 6.9 MB main bundle; Expo Doctor is 20/20 and `expo install --check` passes. All 3 workflow YAML files and 35 embedded Bash blocks parse successfully, and `git diff --check` passes.
 - A clean 390×844 exported-Web session covered Chat, the model picker, Settings, and return navigation with zero console errors or warnings. A separate loopback proxy with a delayed fake response exercised the new folding glyph in a real browser and completed with the expected assistant text; this proves the Web animation path, not Android Reanimated rendering.
@@ -145,5 +164,6 @@ Discovery enriches remote model IDs through local metadata/rules. Ark treats its
 - Android API keys are saved through SecureStore; inability to use secure storage is a hard failure rather than a plaintext fallback.
 - Web API keys are scoped to the current tab session through `sessionStorage`/memory. Legacy Web keys are removed from AsyncStorage during migration, so closing the tab/session requires entering them again.
 - Workspace and chat snapshots remain in AsyncStorage, but provider `apiKey` fields are stripped before serialization.
-- Chat history does not currently encrypt message content; local encrypted history is a later milestone.
-- No key export/sync is included in the first milestone.
+- Chat history in the live workspace is not encrypted at rest; encrypted export is available but is not equivalent to an encrypted live database.
+- API keys and MCP authorization are never included in export/sync, even inside an encrypted backup.
+- Encrypted import reuses a local provider key only when provider ID, provider kind, and canonical Base URL all match. MCP authorization additionally requires matching plugin type, transport, and canonical endpoint; a same-ID backup entry at another endpoint never inherits a secret.

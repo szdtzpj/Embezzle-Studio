@@ -10,24 +10,38 @@ import type {
   Capability,
   ChatConversation,
   ChatMessage,
+  ChatTokenUsage,
+  CostEstimate,
   MediaAttachment,
+  ModelPricing,
   ModelInfo,
   ModelParameterSettings,
+  ModelTargetRef,
   ModelTask,
   PluginManifest,
+  PricingCurrency,
+  PromptTemplate,
   ProviderKind,
   ProviderProfile,
+  RequestMetrics,
   ReasoningEffort,
+  VoiceSettings,
+  WebCitation,
+  WebSearchSettings,
 } from '../domain/types';
 import { createModelInfoFromId, inferModelTask } from './modelCapabilities';
 import { attachmentForPersistence, flushPendingAttachmentDeletions } from './mediaStorage';
 
-const LEGACY_WORKSPACE_KEY = '@embezzle-studio/workspace-v1';
-const WORKSPACE_KEY = '@embezzle-studio/workspace-v2';
-const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v2.backup';
-const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v2';
+const LEGACY_WORKSPACE_KEYS = ['@embezzle-studio/workspace-v2', '@embezzle-studio/workspace-v1'] as const;
+const LEGACY_WORKSPACE_BACKUPS: Partial<Record<(typeof LEGACY_WORKSPACE_KEYS)[number], string>> = {
+  '@embezzle-studio/workspace-v2': '@embezzle-studio/workspace-v2.backup',
+};
+const WORKSPACE_KEY = '@embezzle-studio/workspace-v3';
+const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v3.backup';
+const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v3';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
-const STORAGE_SCHEMA_VERSION = 2;
+const PLUGIN_SECRET_PREFIX = 'embezzle-studio.plugin-authorization';
+const STORAGE_SCHEMA_VERSION = 3;
 const INTERRUPTED_MESSAGE = '上次请求在应用退出前未完成，已标记为中断。';
 
 const providerKinds = new Set<ProviderKind>([
@@ -47,6 +61,8 @@ const capabilities = new Set<Capability>([
   'web-search',
   'image-generation',
   'video-generation',
+  'speech-to-text',
+  'text-to-speech',
   'embedding',
   'rerank',
   'streaming',
@@ -63,13 +79,26 @@ const reasoningEfforts = new Set<ReasoningEffort>([
   'xhigh',
   'max',
 ]);
-const modelTasks = new Set<ModelTask>(['chat', 'image-generation', 'video-generation', 'embedding', 'rerank']);
+const modelTasks = new Set<ModelTask>([
+  'chat',
+  'image-generation',
+  'video-generation',
+  'audio-transcription',
+  'speech-generation',
+  'embedding',
+  'rerank',
+]);
 const attachmentKinds = new Set<AttachmentKind>(['image', 'video', 'file']);
 const pluginPermissions = new Set<PluginManifest['permissions'][number]>(['network', 'files', 'clipboard', 'tools']);
+const pricingCurrencies = new Set<PricingCurrency>(['CNY', 'USD']);
+const speechFormats = new Set<VoiceSettings['speechFormat']>(['mp3', 'opus', 'aac', 'wav']);
+const searchContextSizes = new Set<WebSearchSettings['searchContextSize']>(['low', 'medium', 'high']);
 
 type PersistedProvider = Omit<ProviderProfile, 'apiKey'>;
-type PersistedWorkspace = Omit<AppWorkspace, 'providers' | 'messages'> & {
+type PersistedPlugin = Omit<PluginManifest, 'authorization'>;
+type PersistedWorkspace = Omit<AppWorkspace, 'providers' | 'messages' | 'plugins'> & {
   providers: PersistedProvider[];
+  plugins: PersistedPlugin[];
 };
 
 interface PersistedWorkspaceEnvelope {
@@ -90,6 +119,7 @@ let recoveryNotice: string | null = null;
 let saveQueue: Promise<void> = Promise.resolve();
 let requestedRevision = 0;
 const secretValues = new Map<string, string | undefined>();
+const pluginSecretValues = new Map<string, string | undefined>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -275,6 +305,203 @@ function normalizeAttachment(value: unknown, label: string): MediaAttachment {
   };
 }
 
+function nonNegativeFiniteNumber(value: unknown): number | undefined {
+  const normalized = optionalFiniteNumber(value);
+  return normalized !== undefined && normalized >= 0 ? normalized : undefined;
+}
+
+function normalizeTokenUsage(value: unknown, label: string): ChatTokenUsage | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw shapeError(`${label} 必须是对象。`);
+  }
+  const usage: ChatTokenUsage = {
+    inputTokens: nonNegativeFiniteNumber(value.inputTokens),
+    outputTokens: nonNegativeFiniteNumber(value.outputTokens),
+    reasoningTokens: nonNegativeFiniteNumber(value.reasoningTokens),
+    cachedInputTokens: nonNegativeFiniteNumber(value.cachedInputTokens),
+    totalTokens: nonNegativeFiniteNumber(value.totalTokens),
+  };
+  return Object.values(usage).some((item) => item !== undefined) ? usage : undefined;
+}
+
+function normalizeGenerationTask(value: unknown, label: string): ChatMessage['generationTask'] {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw shapeError(`${label} 必须是对象。`);
+  }
+  const providerId = nonEmptyString(value.providerId);
+  const modelId = nonEmptyString(value.modelId);
+  const taskId = nonEmptyString(value.taskId);
+  if (!providerId || !modelId || !taskId || value.kind !== 'video') {
+    throw shapeError(`${label} 缺少有效的 providerId、modelId、taskId 或 kind。`);
+  }
+  return {
+    providerId,
+    modelId,
+    taskId,
+    kind: 'video',
+    ...(nonEmptyString(value.status) ? { status: nonEmptyString(value.status) } : {}),
+  };
+}
+
+function isPrivateOrReservedHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (
+    !host ||
+    (!host.includes('.') && !host.includes(':')) ||
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    host.endsWith('.lan') ||
+    host.endsWith('.home.arpa')
+  ) {
+    return true;
+  }
+
+  if (host.includes(':')) {
+    const segments = host.split(':');
+    const first = Number.parseInt(segments[0] || '0', 16);
+    const second = Number.parseInt(segments[1] || '0', 16);
+    const third = Number.parseInt(segments[2] || '0', 16);
+    return (
+      host.startsWith('::') ||
+      host.startsWith('64:ff9b:') ||
+      host.startsWith('100::') ||
+      host.startsWith('2002:') ||
+      first === 0x5f00 ||
+      (first >= 0xfc00 && first <= 0xfdff) ||
+      (first >= 0xfe80 && first <= 0xfeff) ||
+      (first >= 0xff00 && first <= 0xffff) ||
+      (first === 0x3fff && second <= 0x0fff) ||
+      (first === 0x2001 &&
+        (second === 0 ||
+          (second === 2 && third === 0) ||
+          second === 0x0db8 ||
+          (second >= 0x10 && second <= 0x2f)))
+    );
+  }
+
+  const octets = host.split('.').map(Number);
+  if (
+    octets.length !== 4 ||
+    octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)
+  ) {
+    return /^[0-9.]+$/.test(host);
+  }
+  const [a, b, c] = octets;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 192 && b === 0 && (c === 0 || c === 2)) ||
+    (a === 192 && b === 88 && c === 99) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    (a === 198 && b === 51 && c === 100) ||
+    (a === 203 && b === 0 && c === 113) ||
+    a >= 224
+  );
+}
+
+function parseSafePublicHttpsUrl(value: string, allowQueryAndFragment: boolean): URL | undefined {
+  if (
+    !value ||
+    value.length > 8_192 ||
+    /[\u0000-\u0020\u007f]/.test(value)
+  ) {
+    return undefined;
+  }
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== 'https:' ||
+      url.username ||
+      url.password ||
+      !url.hostname ||
+      isPrivateOrReservedHostname(url.hostname) ||
+      (!allowQueryAndFragment && (value.includes('?') || value.includes('#')))
+    ) {
+      return undefined;
+    }
+    return url;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeCitations(value: unknown, label: string): WebCitation[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const normalized = arrayField(value, label).slice(0, 100).flatMap((citation, index) => {
+    if (!isRecord(citation)) {
+      throw shapeError(`${label}[${index}] 必须是对象。`);
+    }
+    const rawUrl = nonEmptyString(citation.url);
+    if (!rawUrl) {
+      return [];
+    }
+    const url = parseSafePublicHttpsUrl(rawUrl, true);
+    if (!url) {
+      return [];
+    }
+    const startIndex = nonNegativeFiniteNumber(citation.startIndex);
+    const endIndex = nonNegativeFiniteNumber(citation.endIndex);
+    return [{
+      url: url.toString(),
+      ...(nonEmptyString(citation.title) ? { title: nonEmptyString(citation.title) } : {}),
+      ...(startIndex !== undefined ? { startIndex: Math.trunc(startIndex) } : {}),
+      ...(endIndex !== undefined ? { endIndex: Math.trunc(endIndex) } : {}),
+    }];
+  });
+  return normalized.length ? normalized : undefined;
+}
+
+function normalizeRequestMetrics(value: unknown, label: string): RequestMetrics | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw shapeError(`${label} 必须是对象。`);
+  }
+  const durationMs = nonNegativeFiniteNumber(value.durationMs);
+  const timeToFirstTokenMs = nonNegativeFiniteNumber(value.timeToFirstTokenMs);
+  const metrics: RequestMetrics = {
+    ...(durationMs !== undefined ? { durationMs: Math.min(durationMs, 24 * 60 * 60 * 1_000) } : {}),
+    ...(timeToFirstTokenMs !== undefined
+      ? { timeToFirstTokenMs: Math.min(timeToFirstTokenMs, 24 * 60 * 60 * 1_000) }
+      : {}),
+  };
+  return Object.keys(metrics).length ? metrics : undefined;
+}
+
+function normalizeCostEstimate(value: unknown, label: string): CostEstimate | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw shapeError(`${label} 必须是对象。`);
+  }
+  const amount = nonNegativeFiniteNumber(value.amount);
+  const pricingUpdatedAt = nonNegativeFiniteNumber(value.pricingUpdatedAt);
+  const currency = typeof value.currency === 'string' && pricingCurrencies.has(value.currency as PricingCurrency)
+    ? (value.currency as PricingCurrency)
+    : undefined;
+  if (amount === undefined || pricingUpdatedAt === undefined || !currency || value.source !== 'user-configured') {
+    return undefined;
+  }
+  return { amount, currency, source: 'user-configured', pricingUpdatedAt };
+}
+
 function normalizeMessage(value: unknown, label: string, fallbackCreatedAt: number): ChatMessage {
   if (!isRecord(value)) {
     throw shapeError(`${label} 必须是对象。`);
@@ -292,6 +519,11 @@ function normalizeMessage(value: unknown, label: string, fallbackCreatedAt: numb
     : arrayField(value.attachments, `${label}.attachments`).map((attachment, index) =>
         normalizeAttachment(attachment, `${label}.attachments[${index}]`)
       );
+  const usage = normalizeTokenUsage(value.usage, `${label}.usage`);
+  const citations = normalizeCitations(value.citations, `${label}.citations`);
+  const generationTask = normalizeGenerationTask(value.generationTask, `${label}.generationTask`);
+  const requestMetrics = normalizeRequestMetrics(value.requestMetrics, `${label}.requestMetrics`);
+  const costEstimate = normalizeCostEstimate(value.costEstimate, `${label}.costEstimate`);
 
   return {
     id: nonEmptyString(value.id) ?? label.replace(/[^A-Za-z0-9]+/g, '-'),
@@ -301,8 +533,17 @@ function normalizeMessage(value: unknown, label: string, fallbackCreatedAt: numb
     status: interrupted ? 'error' : storedStatus,
     ...(attachments ? { attachments } : {}),
     ...(typeof value.reasoningContent === 'string' ? { reasoningContent: value.reasoningContent } : {}),
-    ...(isRecord(value.usage) ? { usage: value.usage as unknown as ChatMessage['usage'] } : {}),
-    ...(isRecord(value.generationTask) ? { generationTask: value.generationTask as unknown as ChatMessage['generationTask'] } : {}),
+    ...(usage ? { usage } : {}),
+    ...(citations ? { citations } : {}),
+    ...(typeof value.webSearchTriggered === 'boolean'
+      ? { webSearchTriggered: value.webSearchTriggered }
+      : {}),
+    ...(nonEmptyString(value.promptTemplateId) ? { promptTemplateId: nonEmptyString(value.promptTemplateId) } : {}),
+    ...(generationTask ? { generationTask } : {}),
+    ...(nonEmptyString(value.comparisonGroupId) ? { comparisonGroupId: nonEmptyString(value.comparisonGroupId) } : {}),
+    ...(value.selectedForContext === true ? { selectedForContext: true } : {}),
+    ...(requestMetrics ? { requestMetrics } : {}),
+    ...(costEstimate ? { costEstimate } : {}),
     ...(typeof value.modelId === 'string' ? { modelId: value.modelId } : {}),
     ...(typeof value.providerId === 'string' ? { providerId: value.providerId } : {}),
     ...(typeof value.providerName === 'string' ? { providerName: value.providerName } : {}),
@@ -435,6 +676,20 @@ function normalizePlugins(value: unknown): PluginManifest[] {
     const transport = plugin.transport === 'streamable-http' || plugin.transport === 'sse'
       ? plugin.transport
       : undefined;
+    let endpoint: string | undefined;
+    if (typeof plugin.endpoint === 'string' && plugin.endpoint.trim()) {
+      try {
+        const parsed = parseSafePublicHttpsUrl(plugin.endpoint.trim(), false);
+        if (!parsed) {
+          throw new Error('MCP endpoint 必须是无内嵌凭据、查询参数和片段的远程公网 HTTPS URL。');
+        }
+        endpoint = parsed.toString();
+      } catch (error) {
+        throw shapeError(
+          `plugins[${index}].endpoint 无效：${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
     return {
       id,
       name: nonEmptyString(plugin.name) ?? id,
@@ -442,7 +697,11 @@ function normalizePlugins(value: unknown): PluginManifest[] {
       type,
       permissions,
       ...(transport ? { transport } : {}),
-      ...(typeof plugin.endpoint === 'string' ? { endpoint: plugin.endpoint.trim() } : {}),
+      ...(endpoint ? { endpoint } : {}),
+      ...(plugin.enabled === true && endpoint && type === 'remote-mcp' ? { enabled: true } : {}),
+      ...(nonEmptyString(plugin.serverLabel) ? { serverLabel: nonEmptyString(plugin.serverLabel) } : {}),
+      ...(nonEmptyString(plugin.providerId) ? { providerId: nonEmptyString(plugin.providerId) } : {}),
+      ...(plugin.approvalPolicy === 'always' ? { approvalPolicy: 'always' as const } : {}),
     };
   });
 }
@@ -519,6 +778,138 @@ function normalizeActiveModels(value: unknown, providers: ProviderProfile[]): Re
   );
 }
 
+function normalizePromptTemplates(value: unknown): PromptTemplate[] {
+  const seen = new Set<string>();
+  return arrayField(value, 'promptTemplates').slice(0, 100).flatMap((template, index) => {
+    if (!isRecord(template)) {
+      throw shapeError(`promptTemplates[${index}] 必须是对象。`);
+    }
+    const id = nonEmptyString(template.id);
+    const name = nonEmptyString(template.name);
+    const content = typeof template.content === 'string' ? template.content : '';
+    if (!id || seen.has(id) || !name || name.length > 60 || !content.trim() || content.length > 20_000) {
+      return [];
+    }
+    seen.add(id);
+    const createdAt = nonNegativeFiniteNumber(template.createdAt) ?? Date.now();
+    const updatedAt = nonNegativeFiniteNumber(template.updatedAt) ?? createdAt;
+    const pinnedAt = nonNegativeFiniteNumber(template.pinnedAt);
+    return [{
+      id,
+      name,
+      content,
+      mode: template.mode === 'system' ? 'system' as const : 'composer' as const,
+      createdAt,
+      updatedAt,
+      ...(pinnedAt !== undefined ? { pinnedAt } : {}),
+    }];
+  });
+}
+
+function normalizeModelTarget(
+  value: unknown,
+  providers: ProviderProfile[]
+): ModelTargetRef | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const providerId = nonEmptyString(value.providerId);
+  const modelId = nonEmptyString(value.modelId);
+  const provider = providers.find((candidate) => candidate.id === providerId);
+  if (!provider || !modelId || !provider.models.some((model) => model.id === modelId)) {
+    return undefined;
+  }
+  return { providerId: provider.id, modelId };
+}
+
+function normalizeComparisonTargets(value: unknown, providers: ProviderProfile[]): ModelTargetRef[] {
+  const seen = new Set<string>();
+  return arrayField(value, 'comparisonTargets').slice(0, 4).flatMap((target, index) => {
+    const normalized = normalizeModelTarget(target, providers);
+    if (!normalized) {
+      return [];
+    }
+    const provider = providers.find((candidate) => candidate.id === normalized.providerId)!;
+    const model = provider.models.find((candidate) => candidate.id === normalized.modelId)!;
+    const key = `${normalized.providerId}:${normalized.modelId}`;
+    if (seen.has(key) || inferModelTask(model) !== 'chat') {
+      return [];
+    }
+    seen.add(key);
+    return [normalized];
+  });
+}
+
+function normalizeModelPricing(value: unknown, providers: ProviderProfile[]): ModelPricing[] {
+  const seen = new Set<string>();
+  return arrayField(value, 'modelPricing').slice(0, 1_000).flatMap((entry, index) => {
+    if (!isRecord(entry)) {
+      throw shapeError(`modelPricing[${index}] 必须是对象。`);
+    }
+    const target = normalizeModelTarget(entry, providers);
+    const currency = typeof entry.currency === 'string' && pricingCurrencies.has(entry.currency as PricingCurrency)
+      ? (entry.currency as PricingCurrency)
+      : undefined;
+    if (!target || !currency) {
+      return [];
+    }
+    const key = `${target.providerId}:${target.modelId}:${currency}`;
+    if (seen.has(key)) {
+      return [];
+    }
+    const boundedPrice = (candidate: unknown) => {
+      const price = nonNegativeFiniteNumber(candidate);
+      return price === undefined ? undefined : Math.min(price, 1_000_000_000);
+    };
+    const inputPerMillion = boundedPrice(entry.inputPerMillion);
+    const cachedInputPerMillion = boundedPrice(entry.cachedInputPerMillion);
+    const outputPerMillion = boundedPrice(entry.outputPerMillion);
+    if (inputPerMillion === undefined && cachedInputPerMillion === undefined && outputPerMillion === undefined) {
+      return [];
+    }
+    seen.add(key);
+    return [{
+      ...target,
+      currency,
+      ...(inputPerMillion !== undefined ? { inputPerMillion } : {}),
+      ...(cachedInputPerMillion !== undefined ? { cachedInputPerMillion } : {}),
+      ...(outputPerMillion !== undefined ? { outputPerMillion } : {}),
+      updatedAt: nonNegativeFiniteNumber(entry.updatedAt) ?? Date.now(),
+    }];
+  });
+}
+
+function normalizeWebSearchSettings(value: unknown): WebSearchSettings {
+  const settings = recordField(value, 'webSearch');
+  const searchContextSize = typeof settings.searchContextSize === 'string' &&
+      searchContextSizes.has(settings.searchContextSize as WebSearchSettings['searchContextSize'])
+    ? (settings.searchContextSize as WebSearchSettings['searchContextSize'])
+    : 'medium';
+  return {
+    enabled: settings.enabled === true,
+    searchContextSize,
+  };
+}
+
+function normalizeVoiceSettings(value: unknown, providers: ProviderProfile[]): VoiceSettings {
+  const settings = recordField(value, 'voice');
+  const transcriptionTarget = normalizeModelTarget(
+    settings.transcriptionTarget,
+    providers
+  );
+  const speechTarget = normalizeModelTarget(settings.speechTarget, providers);
+  const speechFormat = typeof settings.speechFormat === 'string' &&
+      speechFormats.has(settings.speechFormat as VoiceSettings['speechFormat'])
+    ? (settings.speechFormat as VoiceSettings['speechFormat'])
+    : 'mp3';
+  return {
+    ...(transcriptionTarget ? { transcriptionTarget } : {}),
+    ...(speechTarget ? { speechTarget } : {}),
+    speechVoice: nonEmptyString(settings.speechVoice)?.slice(0, 120) ?? 'alloy',
+    speechFormat,
+  };
+}
+
 function normalizeWorkspace(snapshot: Record<string, unknown>, providers: ProviderProfile[]): AppWorkspace {
   const now = Date.now();
   const modelCandidatesByProvider = normalizeModelCandidates(snapshot.modelCandidatesByProvider, providers);
@@ -547,6 +938,7 @@ function normalizeWorkspace(snapshot: Record<string, unknown>, providers: Provid
   const activeProviderId = normalizedProviders.some((provider) => provider.id === requestedProviderId)
     ? requestedProviderId!
     : normalizedProviders[0].id;
+  const comparisonTargets = normalizeComparisonTargets(snapshot.comparisonTargets, normalizedProviders);
 
   return {
     providers: normalizedProviders,
@@ -559,11 +951,21 @@ function normalizeWorkspace(snapshot: Record<string, unknown>, providers: Provid
     conversations,
     messages: activeConversation.messages,
     plugins: normalizePlugins(snapshot.plugins),
+    promptTemplates: normalizePromptTemplates(snapshot.promptTemplates),
+    comparisonEnabled: snapshot.comparisonEnabled === true && comparisonTargets.length >= 2,
+    comparisonTargets,
+    modelPricing: normalizeModelPricing(snapshot.modelPricing, normalizedProviders),
+    webSearch: normalizeWebSearchSettings(snapshot.webSearch),
+    voice: normalizeVoiceSettings(snapshot.voice, normalizedProviders),
   };
 }
 
 function secretKey(providerId: string): string {
   return `${SECRET_PREFIX}.${providerId}`;
+}
+
+function pluginSecretKey(pluginId: string): string {
+  return `${PLUGIN_SECRET_PREFIX}.${pluginId}`;
 }
 
 function browserSessionStorage(): Storage | undefined {
@@ -649,6 +1051,49 @@ async function writeSecret(providerId: string, value?: string): Promise<void> {
   secretValues.set(providerId, value);
 }
 
+async function readPluginSecret(pluginId: string): Promise<string | undefined> {
+  if (pluginSecretValues.has(pluginId)) {
+    return pluginSecretValues.get(pluginId);
+  }
+  const key = pluginSecretKey(pluginId);
+  let value: string | null;
+  if (Platform.OS === 'web') {
+    value = browserSessionStorage()?.getItem(key) ?? null;
+    await AsyncStorage.removeItem(key);
+  } else {
+    await requireNativeSecureStore();
+    value = await SecureStore.getItemAsync(key);
+  }
+  const normalized = value ?? undefined;
+  pluginSecretValues.set(pluginId, normalized);
+  return normalized;
+}
+
+async function writePluginSecret(pluginId: string, value?: string): Promise<void> {
+  const key = pluginSecretKey(pluginId);
+  if (Platform.OS === 'web') {
+    const session = browserSessionStorage();
+    try {
+      if (value) {
+        session?.setItem(key, value);
+      } else {
+        session?.removeItem(key);
+      }
+    } catch {
+      // Keep the authorization in memory for this tab only.
+    }
+    await AsyncStorage.removeItem(key);
+  } else {
+    await requireNativeSecureStore();
+    if (value) {
+      await SecureStore.setItemAsync(key, value);
+    } else {
+      await SecureStore.deleteItemAsync(key);
+    }
+  }
+  pluginSecretValues.set(pluginId, value);
+}
+
 function decodeWorkspace(raw: string): DecodedWorkspace {
   let parsed: unknown;
   try {
@@ -661,7 +1106,7 @@ function decodeWorkspace(raw: string): DecodedWorkspace {
   }
 
   if (parsed.schemaVersion !== undefined) {
-    if (parsed.schemaVersion !== STORAGE_SCHEMA_VERSION) {
+    if (parsed.schemaVersion !== 2 && parsed.schemaVersion !== STORAGE_SCHEMA_VERSION) {
       throw shapeError(`不支持 schemaVersion=${String(parsed.schemaVersion)}。`);
     }
     if (!isRecord(parsed.workspace)) {
@@ -713,6 +1158,12 @@ async function hydrateWorkspace(decoded: DecodedWorkspace): Promise<AppWorkspace
     }))
   );
   const workspace = normalizeWorkspace(decoded.snapshot, providers);
+  workspace.plugins = await Promise.all(
+    workspace.plugins.map(async (plugin) => ({
+      ...plugin,
+      authorization: await readPluginSecret(plugin.id),
+    }))
+  );
   requestedRevision = Math.max(requestedRevision, decoded.revision);
   return workspace;
 }
@@ -732,8 +1183,14 @@ export async function loadWorkspace(): Promise<AppWorkspace | null> {
   try {
     raw = await AsyncStorage.getItem(WORKSPACE_KEY);
     if (raw === null) {
-      sourceKey = LEGACY_WORKSPACE_KEY;
-      raw = await AsyncStorage.getItem(LEGACY_WORKSPACE_KEY);
+      for (const legacyKey of LEGACY_WORKSPACE_KEYS) {
+        const legacyRaw = await AsyncStorage.getItem(legacyKey);
+        if (legacyRaw !== null) {
+          sourceKey = legacyKey;
+          raw = legacyRaw;
+          break;
+        }
+      }
     }
     if (raw === null) {
       loadFailure = null;
@@ -750,9 +1207,12 @@ export async function loadWorkspace(): Promise<AppWorkspace | null> {
     const normalizedError = error instanceof Error ? error : new Error(String(error));
     await preserveFailedSnapshot(sourceKey, raw, normalizedError);
 
-    if (sourceKey === WORKSPACE_KEY) {
+    const backupKey = sourceKey === WORKSPACE_KEY
+      ? WORKSPACE_BACKUP_KEY
+      : LEGACY_WORKSPACE_BACKUPS[sourceKey as (typeof LEGACY_WORKSPACE_KEYS)[number]];
+    if (backupKey) {
       try {
-        const backupRaw = await AsyncStorage.getItem(WORKSPACE_BACKUP_KEY);
+        const backupRaw = await AsyncStorage.getItem(backupKey);
         if (backupRaw) {
           const workspace = await hydrateWorkspace(decodeWorkspace(backupRaw));
           loadFailure = null;
@@ -776,6 +1236,12 @@ function stripSecret(provider: ProviderProfile): PersistedProvider {
   const persistedProvider = { ...provider };
   delete persistedProvider.apiKey;
   return persistedProvider;
+}
+
+function stripPluginSecret(plugin: PluginManifest): PersistedPlugin {
+  const persistedPlugin = { ...plugin };
+  delete persistedPlugin.authorization;
+  return persistedPlugin;
 }
 
 function messagesForPersistence(messages: ChatMessage[]): ChatMessage[] {
@@ -830,12 +1296,24 @@ function createEnvelope(workspace: AppWorkspace, revision: number): PersistedWor
         ? workspace.activeConversationId
         : conversations[0].id,
       conversations,
-      plugins: [...workspace.plugins],
+      plugins: workspace.plugins.map(stripPluginSecret),
+      promptTemplates: [...workspace.promptTemplates],
+      comparisonEnabled: workspace.comparisonEnabled,
+      comparisonTargets: workspace.comparisonTargets.map((target) => ({ ...target })),
+      modelPricing: workspace.modelPricing.map((pricing) => ({ ...pricing })),
+      webSearch: { ...workspace.webSearch },
+      voice: {
+        ...workspace.voice,
+        ...(workspace.voice.transcriptionTarget
+          ? { transcriptionTarget: { ...workspace.voice.transcriptionTarget } }
+          : {}),
+        ...(workspace.voice.speechTarget ? { speechTarget: { ...workspace.voice.speechTarget } } : {}),
+      },
     },
   };
 }
 
-async function persistSecrets(providers: ProviderProfile[]): Promise<void> {
+async function persistSecrets(providers: ProviderProfile[], plugins: PluginManifest[]): Promise<void> {
   const currentIds = new Set(providers.map((provider) => provider.id));
   for (const providerId of Array.from(secretValues.keys())) {
     if (!currentIds.has(providerId)) {
@@ -847,6 +1325,19 @@ async function persistSecrets(providers: ProviderProfile[]): Promise<void> {
     const value = provider.apiKey || undefined;
     if (!secretValues.has(provider.id) || secretValues.get(provider.id) !== value) {
       await writeSecret(provider.id, value);
+    }
+  }
+  const currentPluginIds = new Set(plugins.map((plugin) => plugin.id));
+  for (const pluginId of Array.from(pluginSecretValues.keys())) {
+    if (!currentPluginIds.has(pluginId)) {
+      await writePluginSecret(pluginId, undefined);
+      pluginSecretValues.delete(pluginId);
+    }
+  }
+  for (const plugin of plugins) {
+    const value = plugin.authorization?.trim() || undefined;
+    if (!pluginSecretValues.has(plugin.id) || pluginSecretValues.get(plugin.id) !== value) {
+      await writePluginSecret(plugin.id, value);
     }
   }
 }
@@ -866,7 +1357,7 @@ export function saveWorkspace(workspace: AppWorkspace): Promise<void> {
       if (loadFailure) {
         throw blockedSaveError();
       }
-      await persistSecrets(providers);
+      await persistSecrets(providers, workspace.plugins);
       const previous = await AsyncStorage.getItem(WORKSPACE_KEY);
       if (previous && previous !== serialized) {
         await AsyncStorage.setItem(WORKSPACE_BACKUP_KEY, previous);

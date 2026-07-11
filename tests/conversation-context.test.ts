@@ -52,4 +52,36 @@ describe('buildChatTranscript', () => {
 
     expect(transcript).toEqual([latest]);
   });
+
+  it('keeps only the comparison candidate selected for future context', () => {
+    const first = {
+      ...message('a1', 'assistant', 'first answer'),
+      comparisonGroupId: 'compare-1',
+    };
+    const selected = {
+      ...message('a2', 'assistant', 'selected answer'),
+      comparisonGroupId: 'compare-1',
+      selectedForContext: true,
+    };
+
+    const transcript = buildChatTranscript([
+      message('u1', 'user', 'question'),
+      first,
+      selected,
+      message('u2', 'user', 'follow-up'),
+    ]);
+
+    expect(transcript.map(({ id }) => id)).toEqual(['u1', 'a2', 'u2']);
+  });
+
+  it('fails closed when a comparison group has no selected candidate', () => {
+    const transcript = buildChatTranscript([
+      message('u1', 'user', 'question'),
+      { ...message('a1', 'assistant', 'candidate one'), comparisonGroupId: 'compare-1' },
+      { ...message('a2', 'assistant', 'candidate two'), comparisonGroupId: 'compare-1' },
+      message('u2', 'user', 'follow-up'),
+    ]);
+
+    expect(transcript.map(({ id }) => id)).toEqual(['u1', 'u2']);
+  });
 });

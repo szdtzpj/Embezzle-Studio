@@ -10,6 +10,8 @@ Embezzle Studio is an Android-focused mobile AI chat client. The project is stil
 - Model discovery: OpenAI and compatible providers attempt to use their model-list endpoints. Volcengine Ark probes the undocumented compatibility `/models` response only on an exact official data-plane host, falls back to curated candidates maintained from the official catalog when the probe is unavailable or incompatible, and always allows manual Model ID or Endpoint ID entry.
 - Model selection: the chat page lists added models by provider and lets users switch the currently active model.
 - Conversation protocols: Chat Completions streams by default; OpenAI Responses-only Pro models automatically switch to the non-streaming `/responses` protocol, with token usage recorded.
+- Multi-model comparison: 2–4 user-provider models can answer one prompt independently, share one cancel lifecycle, survive partial failure, and expose one explicitly selected answer to later conversation context. The UI states the number of provider-billed calls before sending.
+- Evidence-backed web search: the user's key calls official OpenAI, Volcengine Ark, or Alibaba Bailian Responses search protocols. The UI claims a search only when the response contains a search call, a valid citation, or Bailian search-count evidence, and renders HTTPS sources as visible links.
 - Reasoning settings: reasoning effort is saved per exact model family, with distinct support for `off`, `none`, `minimal`, `xhigh`, and `max`, and is mapped separately to the OpenAI, Volcengine Ark, and Bailian protocols.
 - Parameter tuning: only provider/model parameters and ranges implemented on the wire are shown. Active reasoning or fixed-parameter models display an explicit notice or hide ineffective controls; disabling tuning leaves values to provider defaults.
 - Multimodal entry points: image, video, and file pickers are shown according to model capabilities. Images can be sent to vision models; Bailian compatible mode supports bounded local-video `video_url` input; file input is available only to explicitly `file-input`-capable official OpenAI models. The app also supports text-to-image generation and submitting and later querying Volcengine Ark video tasks with reference images or videos.
@@ -17,14 +19,20 @@ Embezzle Studio is an Android-focused mobile AI chat client. The project is stil
 - Android layout and navigation: the main chat surface and rename dialog avoid the software keyboard, while Android uses `resize` window behavior. Chat stays mounted when Settings opens, Settings is reused after its first mount, and remote model candidates render in bounded batches to reduce page-switch and large-list pressure.
 - Conversation history: historical conversations are saved locally, with search across user and model responses, plus pin, rename, share, and delete actions.
 - Message actions: supports native/Web copy, sharing, stopping generation, retaining partial streamed content, regenerating, editing, and causal-branch deletion.
+- Local productivity tools: prompt/persona templates, a cross-conversation media-task center, token/latency analytics, and user-entered CNY/USD price estimates run entirely on-device.
+- Request-based voice: Android can use the user's official OpenAI or Bailian account for transcription and synthesized read-aloud. Transcription edits the composer without auto-sending; generated speech is cached locally and disclosed as AI-generated. Ark keys are never misused as Volcengine speech credentials.
+- Encrypted backup and MCP safety: password-protected local exports exclude API keys, MCP authorization, and media. Remote MCP configuration is disabled by default and permission-gated; tool execution remains fail closed until a provider-specific per-call approval loop is complete.
 - Update checks: checks a fixed public Pages manifest for version and verified APK metadata, then opens a trusted release page. The app does not present itself as an APK verifier or installer.
 - Local storage: Android API keys use SecureStore. Web API keys remain only in the current tab's `sessionStorage`/memory, and legacy persistent values are migrated and removed. The workspace uses versioned AsyncStorage snapshots with backups; native attachments are copied into the app's files directory, while Web attachments are stored as Blobs in IndexedDB so large Base64 payloads are not written into workspace JSON.
 
 ## Still Being Improved
 
+The development branch is now `1.1.0` / Android versionCode 7, but it has not been tagged or released and has not replaced public Latest. All later `v1.0.6` APK/signature/Pages evidence still describes the current stable release.
+
 - Chat video attachments currently implement `video_url` transport only for Bailian compatible mode; other providers still require their own upload, transcoding, or reference protocols.
 - The user has confirmed on one Android phone that the main IME-avoidance, Seedance preview/download, image-sizing, and Chat/Settings-switching paths are fixed. Additional devices, system-directory cancellation/failure/low-space behavior, remote-media expiry, and sustained stress still require acceptance; Web evidence does not replace those extended native checks.
-- MCP, the plugin system, and web-search providers have not yet been integrated as stable features.
+- Remote MCP configuration and permission confirmation are implemented, but the actual tool-call/approval-response loop is not enabled yet.
+- Search and voice wire contracts have automated coverage, while paid-product activation, real billing evidence, microphone/playback behavior, and sustained parallel use still need representative provider accounts and Android devices.
 - The official OpenAI API does not return the original hidden chain of thought; the app can only display returned reasoning summaries, `reasoning_content`, or token usage.
 - Building an Android installation package requires a local Android toolchain, or a CI/EAS-based build flow.
 
@@ -44,6 +52,8 @@ Embezzle Studio is an Android-focused mobile AI chat client. The project is stil
 - React Native Reanimated
 - React Native Gesture Handler
 - Expo Video
+- Expo Audio
+- Expo Crypto + Noble Ciphers/Hashes
 - AsyncStorage
 - SecureStore
 
@@ -112,7 +122,7 @@ For each release, follow this order:
 
 1. Update `expo.version` in `app.json`, increment `android.versionCode`, and update the versions in `package.json`, `package-lock.json`, and `src/data/appInfo.ts` together.
 2. Pass the same quality checks locally as CI, merge through a Pull Request into `main`, and wait for both Quality and the push-triggered Pages workflow on that merge commit to succeed.
-3. Pause other `main` merges and newer-version Releases. Create and push a tag matching the application version, such as the next release `v1.0.7`, from the exact latest `origin/main` commit.
+3. Pause other `main` merges and newer-version Releases. Create and push a tag matching the application version, such as the current development version `v1.1.0`, from the exact latest `origin/main` commit.
 4. Confirm Immutable Releases is enabled, then have `szdtzpj` create an empty same-name draft that is not a prerelease. Run the Android workflow from the default `main` branch; never publish an empty Release first.
 5. The workflow requires the tag to equal the exact current `origin/main`, builds and signs the APK, and rechecks the tag/main commit plus every GitHub asset digest, state, and uploader both before and after freezing the draft as the latest immutable Release. End the freeze only after Android, the automatically triggered Pages deployment, the Release attestation, and the public APK byte checks all succeed.
 
@@ -121,11 +131,11 @@ Example:
 ```powershell
 git fetch origin
 $mergeSha = git rev-parse origin/main
-git tag -a v1.0.7 $mergeSha -m "Embezzle Studio v1.0.7"
-git push origin v1.0.7
+git tag -a v1.1.0 $mergeSha -m "Embezzle Studio v1.1.0"
+git push origin v1.1.0
 gh api --method PUT repos/szdtzpj/Embezzle-Studio/immutable-releases
-gh release create v1.0.7 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.0.7" --notes "Android production release v1.0.7."
-gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.0.7
+gh release create v1.1.0 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.1.0" --notes "Android production release v1.1.0."
+gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.1.0
 ```
 
 The Release title, body, and publication time are copied into the public Pages manifest and download page. Review them as public content before creating the draft, never include private repository, account, customer, or secret information, and do not use automatically generated release notes without inspecting them first.
@@ -142,4 +152,5 @@ Uploading multiple Release assets is not transactional. The workflow uploads onl
 
 - [Product and Architecture](./docs/product-architecture.md)
 - [Provider Protocol Matrix](./docs/provider-protocols.md)
+- [BYOK Productivity Suite](./docs/byok-productivity-suite.md)
 - [Roadmap](./docs/roadmap.md)
