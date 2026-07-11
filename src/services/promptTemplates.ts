@@ -1,4 +1,5 @@
 import type { PromptTemplate } from '../domain/types';
+import { unicodeCharacterLength } from './textBounds';
 
 export type { PromptTemplate } from '../domain/types';
 
@@ -20,16 +21,12 @@ export interface PromptTemplateUpdate {
 
 const templateVariablePattern = /\{\{\s*([^{}\r\n]+?)\s*\}\}/g;
 
-function characterLength(value: string): number {
-  return Array.from(value).length;
-}
-
 function validatedName(value: string): string {
   const name = value.trim();
   if (!name) {
     throw new Error('模板名称不能为空。');
   }
-  if (characterLength(name) > MAX_PROMPT_TEMPLATE_NAME_LENGTH) {
+  if (unicodeCharacterLength(name) > MAX_PROMPT_TEMPLATE_NAME_LENGTH) {
     throw new Error(`模板名称不能超过 ${MAX_PROMPT_TEMPLATE_NAME_LENGTH} 个字符。`);
   }
   return name;
@@ -39,7 +36,7 @@ function validatedContent(value: string): string {
   if (!value.trim()) {
     throw new Error('模板内容不能为空。');
   }
-  if (characterLength(value) > MAX_PROMPT_TEMPLATE_CONTENT_LENGTH) {
+  if (unicodeCharacterLength(value) > MAX_PROMPT_TEMPLATE_CONTENT_LENGTH) {
     throw new Error(`模板内容不能超过 ${MAX_PROMPT_TEMPLATE_CONTENT_LENGTH} 个字符。`);
   }
   return value;

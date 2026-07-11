@@ -4,6 +4,8 @@ import type {
   ProviderProfile,
   WorkspaceProject,
 } from '../domain/types';
+import { unicodeCharacterLength } from './textBounds';
+import { isLegacyWorkspaceId } from './workspaceEntityIds';
 
 export type { WorkspaceProject } from '../domain/types';
 
@@ -29,10 +31,6 @@ export interface DeletedWorkspaceProject {
   fallbackProjectId: string;
 }
 
-function characterLength(value: string): number {
-  return Array.from(value).length;
-}
-
 function requireFiniteTimestamp(value: number): number {
   if (!Number.isFinite(value) || value < 0) {
     throw new Error('项目时间戳必须是非负有限数字。');
@@ -42,8 +40,8 @@ function requireFiniteTimestamp(value: number): number {
 
 function validatedProjectId(value: string): string {
   const id = value.trim();
-  if (!id) {
-    throw new Error('项目 ID 不能为空。');
+  if (!isLegacyWorkspaceId(id)) {
+    throw new Error('项目 ID 必须为 1-256 个字符，只能包含字母、数字、点、横线和下划线。');
   }
   return id;
 }
@@ -53,7 +51,7 @@ function validatedProjectName(value: string): string {
   if (!name) {
     throw new Error('项目名称不能为空。');
   }
-  if (characterLength(name) > MAX_WORKSPACE_PROJECT_NAME_LENGTH) {
+  if (unicodeCharacterLength(name) > MAX_WORKSPACE_PROJECT_NAME_LENGTH) {
     throw new Error(`项目名称不能超过 ${MAX_WORKSPACE_PROJECT_NAME_LENGTH} 个字符。`);
   }
   return name;
@@ -63,7 +61,7 @@ function normalizedSystemPrompt(value: string | null | undefined): string | unde
   if (value === null || value === undefined || !value.trim()) {
     return undefined;
   }
-  if (characterLength(value) > MAX_WORKSPACE_PROJECT_SYSTEM_PROMPT_LENGTH) {
+  if (unicodeCharacterLength(value) > MAX_WORKSPACE_PROJECT_SYSTEM_PROMPT_LENGTH) {
     throw new Error(`项目系统提示不能超过 ${MAX_WORKSPACE_PROJECT_SYSTEM_PROMPT_LENGTH} 个字符。`);
   }
   return value;

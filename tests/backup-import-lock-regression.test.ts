@@ -27,10 +27,16 @@ describe('encrypted backup import replacement lock', () => {
     const inFlightChecks = [...importSource.matchAll(/if \(hasInFlightWorkspaceOperation\(\)\)/g)];
     const lockStart = importSource.indexOf('workspaceReplacementInProgressRef.current = true;');
     const lockOwnership = importSource.indexOf('replacementLockAcquired = true;');
-    const workspaceFlush = importSource.indexOf('await flushWorkspace();');
-    const decryptStart = importSource.indexOf('await importEncryptedWorkspaceBackup(');
-    const saveStart = importSource.indexOf('await saveWorkspace(imported);');
-    const stateReplacement = importSource.indexOf('setWorkspace(imported);');
+    const workspaceFlush = importSource.indexOf(
+      'flushCurrentWorkspace: () => flushWorkspace({ propagateFailure: true })'
+    );
+    const decryptStart = importSource.indexOf(
+      'buildImportedWorkspace: () => importEncryptedWorkspaceBackup('
+    );
+    const saveStart = importSource.indexOf('persistImportedWorkspace: saveWorkspace');
+    const stateReplacement = importSource.indexOf(
+      'applyImportedWorkspaceSnapshot(replacement.workspace);'
+    );
     const lockEnd = importSource.indexOf('workspaceReplacementInProgressRef.current = false;');
 
     expect(source).toContain('const workspaceReplacementInProgressRef = useRef(false);');

@@ -2,14 +2,26 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createDefaultWorkspace } from '../src/data/providerCatalog';
 import type { AppWorkspace, ChatMessage } from '../src/domain/types';
+import { createPromptTemplate } from '../src/services/promptTemplates';
+import {
+  buildProjectKnowledgeContext,
+  deleteProjectKnowledgeSource,
+  updateProjectKnowledgeSource,
+} from '../src/services/projectKnowledge';
+import {
+  exportEncryptedWorkspaceBackup,
+  importEncryptedWorkspaceBackup,
+} from '../src/services/workspaceBackup';
+import { createWorkspaceProject } from '../src/services/workspaceProjects';
 
 const LEGACY_WORKSPACE_KEY = '@embezzle-studio/workspace-v1';
 const V2_WORKSPACE_KEY = '@embezzle-studio/workspace-v2';
 const V2_WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v2.backup';
 const V3_WORKSPACE_KEY = '@embezzle-studio/workspace-v3';
-const WORKSPACE_KEY = '@embezzle-studio/workspace-v4';
-const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v4.backup';
-const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v4';
+const V4_WORKSPACE_KEY = '@embezzle-studio/workspace-v4';
+const WORKSPACE_KEY = '@embezzle-studio/workspace-v5';
+const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v5.backup';
+const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v5';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
 const PLUGIN_SECRET_PREFIX = 'embezzle-studio.plugin-authorization';
 
@@ -39,6 +51,10 @@ vi.mock('expo-secure-store', () => ({
   getItemAsync: mocks.secureGet,
   setItemAsync: mocks.secureSet,
   deleteItemAsync: mocks.secureDelete,
+}));
+
+vi.mock('expo-crypto', () => ({
+  getRandomBytesAsync: async (length: number) => new Uint8Array(length).fill(29),
 }));
 
 vi.mock('react-native', () => ({
@@ -136,8 +152,61 @@ beforeEach(() => {
   });
 });
 
+describe('workspace save commit-stage signaling', () => {
+  it('marks a SecureStore failure after the AsyncStorage primary snapshot has committed', async () => {
+    mocks.platform.OS = 'android';
+    const workspace = workspaceWithTitle('public snapshot committed');
+    workspace.providers[0] = {
+      ...workspace.providers[0],
+      apiKey: 'postcommit-provider-secret',
+    };
+    mocks.secureSet.mockRejectedValueOnce(new Error('simulated postcommit SecureStore failure'));
+    const storage = await subject();
+
+    let failure: unknown;
+    try {
+      await storage.saveWorkspace(workspace);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(storage.isWorkspaceSaveError(failure)).toBe(true);
+    expect(failure).toMatchObject({
+      name: 'WorkspaceSaveError',
+      commitStage: 'after-public-commit',
+      publicWorkspaceCommitted: true,
+      message: 'simulated postcommit SecureStore failure',
+    });
+    const committed = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
+    expect(committed.workspace.conversations[0].title).toBe('public snapshot committed');
+  });
+
+  it('marks a failed primary AsyncStorage write as not committed', async () => {
+    mocks.asyncSet.mockImplementation(async (key, value) => {
+      if (key === WORKSPACE_KEY) throw new Error('simulated primary write failure');
+      mocks.values.set(key, value);
+    });
+    const storage = await subject();
+
+    let failure: unknown;
+    try {
+      await storage.saveWorkspace(workspaceWithTitle('must not commit'));
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(storage.isWorkspaceSaveError(failure)).toBe(true);
+    expect(failure).toMatchObject({
+      commitStage: 'before-public-commit',
+      publicWorkspaceCommitted: false,
+      message: 'simulated primary write failure',
+    });
+    expect(mocks.values.has(WORKSPACE_KEY)).toBe(false);
+  });
+});
+
 describe('workspace storage migrations and recovery', () => {
-  it('loads a v2 envelope from the previous key and writes the next save as v4', async () => {
+  it('loads a v2 envelope from the previous key and writes the next save as v5', async () => {
     const workspace = workspaceWithTitle('v2 migration');
     mocks.values.set(V2_WORKSPACE_KEY, JSON.stringify(v2Envelope(workspace, 4)));
     const { loadWorkspace, saveWorkspace } = await subject();
@@ -146,13 +215,13 @@ describe('workspace storage migrations and recovery', () => {
     expect(loaded?.conversations[0].title).toBe('v2 migration');
     await saveWorkspace(loaded!);
 
-    const v4 = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
-    expect(v4.schemaVersion).toBe(4);
-    expect(v4.revision).toBe(5);
+    const v5 = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
+    expect(v5.schemaVersion).toBe(5);
+    expect(v5.revision).toBe(5);
     expect(mocks.values.has(V2_WORKSPACE_KEY)).toBe(true);
   });
 
-  it('loads a v3 envelope, creates the default project, and writes the next save as v4', async () => {
+  it('loads a v3 envelope, creates the default project, and writes the next save as v5', async () => {
     const workspace = workspaceWithTitle('v3 migration');
     const legacy = v3Envelope(workspace, 9);
     delete (legacy.workspace as Partial<AppWorkspace>).projects;
@@ -179,10 +248,33 @@ describe('workspace storage migrations and recovery', () => {
     expect(loaded?.providerUsageEvents).toEqual([]);
 
     await saveWorkspace(loaded!);
-    const v4 = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
-    expect(v4).toMatchObject({ schemaVersion: 4, revision: 10 });
-    expect(v4.workspace.projects).toHaveLength(1);
+    const v5 = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
+    expect(v5).toMatchObject({ schemaVersion: 5, revision: 10 });
+    expect(v5.workspace.projects).toHaveLength(1);
     expect(mocks.values.has(V3_WORKSPACE_KEY)).toBe(true);
+  });
+
+  it('loads the previous v4 key, initializes v1.3 collections, and preserves the legacy snapshot', async () => {
+    const workspace = workspaceWithTitle('v4 migration');
+    const legacy = v4Envelope(workspace, 14);
+    delete (legacy.workspace as Partial<AppWorkspace>).artifacts;
+    delete (legacy.workspace as Partial<AppWorkspace>).knowledgeSources;
+    mocks.values.set(V4_WORKSPACE_KEY, JSON.stringify(legacy));
+    const { loadWorkspace, saveWorkspace } = await subject();
+
+    const loaded = await loadWorkspace();
+
+    expect(loaded?.conversations[0].title).toBe('v4 migration');
+    expect(loaded?.artifacts).toEqual([]);
+    expect(loaded?.knowledgeSources).toEqual([]);
+    await saveWorkspace(loaded!);
+
+    expect(JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}')).toMatchObject({
+      schemaVersion: 5,
+      revision: 15,
+      workspace: { artifacts: [], knowledgeSources: [] },
+    });
+    expect(mocks.values.get(V4_WORKSPACE_KEY)).toBe(JSON.stringify(legacy));
   });
 
   it('can recover a corrupt v2 primary from its v2 backup during migration', async () => {
@@ -415,7 +507,7 @@ describe('workspace storage migrations and recovery', () => {
     (raw.workspace.providerUsageEvents[0] as unknown as Record<string, unknown>).unknownCostComponents = [
       'input-tokens', 'input-tokens', 'not-a-component',
     ];
-    mocks.values.set(WORKSPACE_KEY, JSON.stringify(raw));
+    mocks.values.set(V4_WORKSPACE_KEY, JSON.stringify(raw));
     const { loadWorkspace } = await subject();
 
     const loaded = await loadWorkspace();
@@ -867,7 +959,7 @@ describe('secret storage policy', () => {
 });
 
 describe('versioned and ordered saves', () => {
-  it('writes a v4 envelope without a duplicate top-level messages field or provider secrets', async () => {
+  it('writes a v5 envelope without a duplicate top-level messages field or provider secrets', async () => {
     const workspace = createDefaultWorkspace();
     workspace.providers[0] = { ...workspace.providers[0], apiKey: 'web-only-test-key' };
     const { saveWorkspace } = await subject();
@@ -875,7 +967,7 @@ describe('versioned and ordered saves', () => {
     await saveWorkspace(workspace);
 
     const envelope = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
-    expect(envelope.schemaVersion).toBe(4);
+    expect(envelope.schemaVersion).toBe(5);
     expect(envelope.revision).toBe(1);
     expect(envelope.workspace.messages).toBeUndefined();
     expect(envelope.workspace.conversations[0].messages).toEqual(workspace.messages);
@@ -883,7 +975,7 @@ describe('versioned and ordered saves', () => {
     expect(mocks.values.has(`${SECRET_PREFIX}.${workspace.providers[0].id}`)).toBe(false);
   });
 
-  it('round-trips v4 projects, branch metadata, cost guard, and the device-local usage ledger', async () => {
+  it('round-trips v5 projects, branch metadata, cost guard, and the device-local usage ledger', async () => {
     const workspace = createDefaultWorkspace();
     const providerId = workspace.providers[0].id;
     workspace.providers[0] = {
@@ -988,6 +1080,168 @@ describe('versioned and ordered saves', () => {
     });
     expect(loaded?.costGuard).toEqual(workspace.costGuard);
     expect(loaded?.providerUsageEvents).toEqual(workspace.providerUsageEvents);
+  });
+
+  it('normalizes v5 artifacts, knowledge, context flags, references, active revisions, and text bounds', async () => {
+    const workspace = createDefaultWorkspace();
+    const projectId = workspace.activeProjectId;
+    const conversationId = workspace.activeConversationId;
+    const sourceMessage: ChatMessage = {
+      id: 'source-message',
+      role: 'assistant',
+      content: 'source',
+      createdAt: 2,
+      status: 'ready',
+      excludedFromContext: true,
+      pinnedForContext: true,
+    };
+    workspace.messages = [sourceMessage];
+    workspace.conversations = [{
+      ...workspace.conversations[0],
+      messages: [sourceMessage],
+      knowledgeSourceIds: ['knowledge:one', 'knowledge:one', 'knowledge-two', 'missing'],
+    }];
+    const overlong = 'x'.repeat(500_007);
+    workspace.artifacts = [
+      {
+        id: 'artifact:one',
+        projectId,
+        title: 'Artifact',
+        format: 'markdown',
+        revisions: [
+          { id: 'revision-one', content: overlong, createdAt: 2, author: 'assistant', sourceMessageId: sourceMessage.id },
+          { id: 'revision-one', content: 'duplicate', createdAt: 3, author: 'user' },
+        ],
+        activeRevisionId: 'missing-revision',
+        sourceConversationId: 'missing-conversation',
+        sourceMessageId: 'missing-message',
+        createdAt: 2,
+        updatedAt: 3,
+      },
+      {
+        id: 'artifact:one',
+        projectId,
+        title: 'Duplicate artifact',
+        format: 'plain-text',
+        revisions: [{ id: 'revision-two', content: 'drop', createdAt: 3, author: 'user' }],
+        activeRevisionId: 'revision-two',
+        createdAt: 3,
+        updatedAt: 3,
+      },
+      {
+        id: 'wrong-project-artifact',
+        projectId: 'missing-project',
+        title: 'Wrong project',
+        format: 'plain-text',
+        revisions: [{ id: 'revision-three', content: 'drop', createdAt: 3, author: 'user' }],
+        activeRevisionId: 'revision-three',
+        createdAt: 3,
+        updatedAt: 3,
+      },
+    ];
+    workspace.knowledgeSources = [
+      {
+        id: 'knowledge:one',
+        projectId,
+        title: 'Artifact source',
+        kind: 'artifact',
+        content: overlong,
+        sourceArtifactId: 'artifact:one',
+        sourceConversationId: conversationId,
+        sourceMessageId: sourceMessage.id,
+        createdAt: 3,
+        updatedAt: 3,
+      },
+      {
+        id: 'knowledge:one',
+        projectId,
+        title: 'Duplicate source',
+        kind: 'text',
+        content: 'drop',
+        createdAt: 3,
+        updatedAt: 3,
+      },
+      {
+        id: 'knowledge-two',
+        projectId,
+        title: 'Stale links',
+        kind: 'file',
+        content: 'portable text',
+        sourceArtifactId: 'missing-artifact',
+        sourceConversationId: 'missing-conversation',
+        sourceMessageId: 'missing-message',
+        createdAt: 3,
+        updatedAt: 3,
+      },
+    ];
+    const raw = { ...v4Envelope(workspace, 3), schemaVersion: 5 };
+    mocks.values.set(WORKSPACE_KEY, JSON.stringify(raw));
+    const { loadWorkspace } = await subject();
+
+    const loaded = await loadWorkspace();
+
+    expect(loaded?.messages[0]).toMatchObject({ excludedFromContext: true });
+    expect(loaded?.messages[0].pinnedForContext).toBeUndefined();
+    expect(loaded?.artifacts).toHaveLength(1);
+    expect(loaded?.artifacts[0]).toMatchObject({
+      id: 'artifact:one',
+      activeRevisionId: 'revision-one',
+      revisions: [{ id: 'revision-one', sourceMessageId: sourceMessage.id }],
+    });
+    expect(loaded?.artifacts[0].revisions[0].content).toHaveLength(500_000);
+    expect(loaded?.artifacts[0].sourceConversationId).toBeUndefined();
+    expect(loaded?.artifacts[0].sourceMessageId).toBeUndefined();
+    expect(loaded?.knowledgeSources).toHaveLength(2);
+    expect(loaded?.knowledgeSources[0].content).toHaveLength(500_000);
+    expect(loaded?.knowledgeSources[1]).not.toHaveProperty('sourceArtifactId');
+    expect(loaded?.knowledgeSources[1]).not.toHaveProperty('sourceConversationId');
+    expect(loaded?.knowledgeSources[1]).not.toHaveProperty('sourceMessageId');
+    expect(loaded?.conversations[0].knowledgeSourceIds).toEqual(['knowledge:one', 'knowledge-two']);
+  });
+
+  it('caps v5 artifact, revision, knowledge, and conversation-reference counts', async () => {
+    const workspace = createDefaultWorkspace();
+    const projectId = workspace.activeProjectId;
+    workspace.artifacts = Array.from({ length: 205 }, (_, index) => ({
+      id: `artifact-${index}`,
+      projectId,
+      title: `Artifact ${index}`,
+      format: 'plain-text' as const,
+      revisions: Array.from({ length: index === 0 ? 55 : 1 }, (__, revisionIndex) => ({
+        id: `revision-${index}-${revisionIndex}`,
+        content: 'x',
+        createdAt: revisionIndex,
+        author: 'user' as const,
+      })),
+      activeRevisionId: `revision-${index}-${index === 0 ? 54 : 0}`,
+      createdAt: index,
+      updatedAt: index,
+    }));
+    workspace.knowledgeSources = Array.from({ length: 505 }, (_, index) => ({
+      id: `knowledge-${index}`,
+      projectId,
+      title: `Knowledge ${index}`,
+      kind: 'text' as const,
+      content: 'x',
+      createdAt: index,
+      updatedAt: index,
+    }));
+    workspace.conversations[0] = {
+      ...workspace.conversations[0],
+      knowledgeSourceIds: workspace.knowledgeSources.map((source) => source.id),
+    };
+    workspace.messages = workspace.conversations[0].messages;
+    const raw = { ...v4Envelope(workspace, 4), schemaVersion: 5 };
+    mocks.values.set(WORKSPACE_KEY, JSON.stringify(raw));
+    const { loadWorkspace } = await subject();
+
+    const loaded = await loadWorkspace();
+
+    expect(loaded?.artifacts).toHaveLength(200);
+    expect(loaded?.artifacts[0].revisions).toHaveLength(50);
+    expect(loaded?.artifacts[0].revisions[0].id).toBe('revision-0-5');
+    expect(loaded?.knowledgeSources).toHaveLength(500);
+    expect(loaded?.conversations[0].knowledgeSourceIds).toHaveLength(50);
   });
 
   it('does not embed native attachment base64 blobs in the workspace envelope', async () => {
@@ -1212,6 +1466,169 @@ describe('versioned and ordered saves', () => {
     await expect(loadWorkspace()).rejects.toThrow(/endpoint 无效/);
     expect(mocks.values.get(V2_WORKSPACE_KEY)).toBe(raw);
   });
+
+  it('round-trips 200, 201, and 256-character colon entity IDs through backup import, save, reload, select, update, and delete', async () => {
+    const colonId = (prefix: string, length: number) => `${prefix}:${'x'.repeat(length - prefix.length - 1)}`;
+    const knowledgeIds = [200, 201, 256].map((length) => colonId('knowledge', length));
+    const artifactId = colonId('artifact', 256);
+    const revisionId = colonId('revision', 256);
+    const source = createDefaultWorkspace();
+    source.artifacts = [{
+      id: artifactId,
+      projectId: source.activeProjectId,
+      title: 'Colon ID artifact',
+      format: 'plain-text',
+      revisions: [{ id: revisionId, content: 'artifact content', createdAt: 1, author: 'user' }],
+      activeRevisionId: revisionId,
+      createdAt: 1,
+      updatedAt: 1,
+    }];
+    source.knowledgeSources = knowledgeIds.map((id, index) => ({
+      id,
+      projectId: source.activeProjectId,
+      title: `Knowledge ${id.length}`,
+      kind: 'artifact' as const,
+      content: `knowledge content ${index}`,
+      sourceArtifactId: artifactId,
+      createdAt: index + 1,
+      updatedAt: index + 1,
+    }));
+    source.conversations = source.conversations.map((conversation) => ({
+      ...conversation,
+      knowledgeSourceIds: knowledgeIds,
+    }));
+
+    const encrypted = await exportEncryptedWorkspaceBackup(
+      source,
+      'backup boundary password',
+      { randomBytes: async (length) => new Uint8Array(length).fill(31) }
+    );
+    const imported = await importEncryptedWorkspaceBackup(
+      encrypted,
+      'backup boundary password',
+      createDefaultWorkspace()
+    );
+    expect(
+      buildProjectKnowledgeContext(imported.knowledgeSources, imported.activeProjectId, knowledgeIds)
+        .includedSourceIds
+    ).toEqual(knowledgeIds);
+
+    let updated = imported.knowledgeSources;
+    knowledgeIds.forEach((id, index) => {
+      updated = updateProjectKnowledgeSource(updated, id, { title: `Updated ${index}` }, 20 + index);
+    });
+    const { loadWorkspace, saveWorkspace } = await subject();
+    await saveWorkspace({ ...imported, knowledgeSources: updated });
+    const loaded = await loadWorkspace();
+
+    expect(loaded?.knowledgeSources.map((item) => item.id)).toEqual(knowledgeIds);
+    expect(loaded?.knowledgeSources.map((item) => item.title)).toEqual([
+      'Updated 0', 'Updated 1', 'Updated 2',
+    ]);
+    expect(loaded?.artifacts[0].id).toBe(artifactId);
+    expect(loaded?.artifacts[0].activeRevisionId).toBe(revisionId);
+    expect(loaded?.artifacts[0].revisions[0].id).toBe(revisionId);
+
+    let deleted = loaded!.knowledgeSources;
+    knowledgeIds.forEach((id) => {
+      deleted = deleteProjectKnowledgeSource(deleted, id);
+    });
+    await saveWorkspace({ ...loaded!, knowledgeSources: deleted });
+    const afterDelete = await loadWorkspace();
+    expect(afterDelete?.knowledgeSources).toEqual([]);
+    expect(afterDelete?.conversations[0].knowledgeSourceIds).toBeUndefined();
+  }, 20_000);
+
+  it('round-trips code-point boundaries for emoji project names, system prompts, and prompt templates', async () => {
+    const projectName = '🧠'.repeat(60);
+    const projectPrompt = '📘'.repeat(20_000);
+    const templateName = '🧩'.repeat(60);
+    const templateContent = '✨'.repeat(20_000);
+    const source = createDefaultWorkspace();
+    source.projects = createWorkspaceProject(
+      source.projects,
+      { name: projectName, systemPrompt: projectPrompt },
+      { id: 'emoji-boundary-project', now: 10 }
+    );
+    source.activeProjectId = 'emoji-boundary-project';
+    source.conversations = source.conversations.map((conversation) => ({
+      ...conversation,
+      projectId: source.activeProjectId,
+    }));
+    source.promptTemplates = createPromptTemplate(
+      [],
+      { name: templateName, content: templateContent },
+      { id: 'emoji-boundary-template', now: 10 }
+    );
+    const { loadWorkspace, saveWorkspace } = await subject();
+
+    await saveWorkspace(source);
+    const loaded = await loadWorkspace();
+    const loadedProject = loaded?.projects.find((project) => project.id === 'emoji-boundary-project');
+    expect(loadedProject?.name).toBe(projectName);
+    expect(loadedProject?.systemPrompt).toBe(projectPrompt);
+    expect(loaded?.promptTemplates[0].name).toBe(templateName);
+    expect(loaded?.promptTemplates[0].content).toBe(templateContent);
+
+    const encrypted = await exportEncryptedWorkspaceBackup(
+      loaded!,
+      'emoji boundary password',
+      { randomBytes: async (length) => new Uint8Array(length).fill(33) }
+    );
+    const imported = await importEncryptedWorkspaceBackup(
+      encrypted,
+      'emoji boundary password',
+      createDefaultWorkspace()
+    );
+    const importedProject = imported.projects.find((project) => project.id === 'emoji-boundary-project');
+    expect(importedProject?.name).toBe(projectName);
+    expect(importedProject?.systemPrompt).toBe(projectPrompt);
+    expect(imported.promptTemplates[0].name).toBe(templateName);
+    expect(imported.promptTemplates[0].content).toBe(templateContent);
+  }, 20_000);
+
+  it.each([
+    ['artifact', (workspace: AppWorkspace) => {
+      workspace.artifacts = [{
+        id: 'over-budget-artifact',
+        projectId: workspace.activeProjectId,
+        title: 'Over budget artifact',
+        format: 'plain-text',
+        revisions: Array.from({ length: 5 }, (_, index) => ({
+          id: `over-budget-revision-${index}`,
+          content: 'a'.repeat(500_000),
+          createdAt: index,
+          author: 'user' as const,
+        })),
+        activeRevisionId: 'over-budget-revision-4',
+        createdAt: 1,
+        updatedAt: 1,
+      }];
+    }],
+    ['knowledge', (workspace: AppWorkspace) => {
+      workspace.knowledgeSources = Array.from({ length: 5 }, (_, index) => ({
+        id: `over-budget-knowledge-${index}`,
+        projectId: workspace.activeProjectId,
+        title: `Over budget knowledge ${index}`,
+        kind: 'text' as const,
+        content: 'k'.repeat(500_000),
+        createdAt: index,
+        updatedAt: index,
+      }));
+    }],
+  ] as const)('fails closed instead of silently filtering persisted over-budget %s data', async (_kind, mutate) => {
+    const workspace = createDefaultWorkspace();
+    mutate(workspace);
+    const raw = JSON.stringify(v4Envelope(workspace));
+    mocks.values.set(WORKSPACE_KEY, raw);
+    const { loadWorkspace, saveWorkspace } = await subject();
+
+    await expect(loadWorkspace()).rejects.toThrow(/只读恢复状态/);
+    expect(mocks.values.get(WORKSPACE_KEY)).toBe(raw);
+    expect(JSON.parse(mocks.values.get(WORKSPACE_RECOVERY_KEY) ?? '{}').raw).toBe(raw);
+    await expect(saveWorkspace(createDefaultWorkspace())).rejects.toThrow(/暂停自动保存/);
+    expect(mocks.values.get(WORKSPACE_KEY)).toBe(raw);
+  }, 20_000);
 
   it('serializes concurrent saves so the latest requested workspace is the final primary snapshot', async () => {
     let releaseFirst!: () => void;

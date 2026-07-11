@@ -103,6 +103,8 @@ export function createDefaultWorkspace(): AppWorkspace {
         updatedAt: now,
       },
     ],
+    artifacts: [],
+    knowledgeSources: [],
     activeConversationId: initialConversationId,
     conversations: [
       {

@@ -18,17 +18,20 @@ Embezzle Studio 是一个面向 Android 的移动端 AI 对话客户端。项目
 - 媒体预览与导出：待发送图片显示为方形缩略图；对话中的视频使用 `expo-video` 原生控件在当前页播放并支持全屏。视频卡片把文件名与“保存/分享”操作放在独立操作区；Android 保存通过系统 Storage Access Framework 让用户选择目录，Web 使用浏览器下载，其它原生平台回退到系统分享。
 - Android 布局与切页：主聊天区和改名对话框使用键盘避让，Android 配置为 `resize`；聊天页在打开设置后保持挂载，设置页首次打开后复用，并限制远端候选模型的单批渲染量以降低切页和大列表压力。
 - 本地项目工作区：项目、项目指令、默认模型和会话归属都保存在本机；删除项目时会明确迁移其中会话，不依赖 Embezzle Studio 的同步服务。
+- 本地成果工作台：`1.3.0` 可把消息保存为项目成果，或新建 Markdown/纯文本/代码/JSON/HTML 成果；编辑会追加有界版本，旧版本恢复会生成新版本而不破坏后续历史，并支持有界行级差异和当前版本导出。HTML 以 `.html.txt`/`text/plain` 惰性导出，不执行脚本、代码或网络预览。
+- 项目资料与本地检索：可手写资料、从消息/成果保存快照，或导入受支持的纯文本/代码文件；项目内检索和分块均在本机有界完成。当前不解析 PDF/Word/Excel/PowerPoint/OpenDocument，也不声称这是向量 RAG、自动记忆或云端知识库。
+- 显式上下文控制：资料只在当前会话明确勾选后才可注入聊天请求；检查器展示保守文本 Token 估计、实际纳入/裁剪/排除/置顶消息、附件不确定性与资料纳入/省略状态。比较模型共享最小窗口的一份上下文；图片/视频生成只发送最新提示词。压缩按钮只生成待审阅草稿，不自动扣费。
 - 对话记录与全局搜索：本地保存历史会话，支持置顶、改名、分享、删除，以及对项目、模板、会话和消息做有长度/文档数/结果数上限的字面量全局搜索；搜索内容不会发送给服务商。
 - 消息操作与对话分支：支持原生/网页复制、分享、停止生成、保留流式部分内容、重新生成、编辑、按因果分支删除，以及从任意消息克隆本地对话分支。分支重新生成消息/对比组 ID，并用 canonical `originMessageId` 在用量分析和任务中心去重，避免把同一历史事件重复累计。
 - 本地生产力与费用护栏：提示词/角色模板、跨对话媒体任务中心、Token/延迟聚合、用户自填价格估算和费用护栏均在本机完成。护栏可限制输出 Token、每日请求次数、对比目标数并确认潜在多次收费；CNY/USD 阈值只依据当天已完成请求的本地已知累计，在累计达到阈值后提醒/阻断下一次请求，不预测当前请求是否跨线。本地 attempt ledger 区分已知估算与未知费用，未知费用绝不按 0 处理，也不冒充服务商真实账单。
 - 请求式语音：Android 可用用户自己的 OpenAI 或阿里百炼账号完成录音转写与回答朗读；转写只写入草稿、不自动发送，朗读音频先下载到本机缓存并明确标识为 AI 合成语音。火山语音因使用独立 AppID/Token 协议而不会错误复用 Ark Key。
-- 加密备份与 MCP 安全配置：配置/文字对话/模板可做带密码的本地认证加密导出；专用配置字段中的 API Key/MCP 授权、媒体文件和本机费用尝试账本 `providerUsageEvents` 不进入外部导出备份。普通对话、提示词、模板和错误文字会按原样备份，请勿把密钥粘贴到这些文本中。Android 关闭系统自动应用备份，跨设备迁移应使用显式认证加密导出；`1.2.0` 干净 prebuild 与打包后 Manifest 均已复核 `android:allowBackup="false"`。远程 MCP 配置默认关闭、授权前展示权限，实际工具执行在逐次审批闭环完成前保持 fail-closed。
+- 加密备份与 MCP 安全配置：配置/文字对话/模板可做带密码的本地认证加密导出；专用配置字段中的 API Key/MCP 授权、媒体文件和本机费用尝试账本 `providerUsageEvents` 不进入外部导出备份。普通对话、提示词、模板和错误文字会按原样备份，请勿把密钥粘贴到这些文本中。Android 关闭系统自动应用备份，跨设备迁移应使用显式认证加密导出；`1.2.0` 历史候选和 `1.3.0` 最终本机候选均已独立复核 `android:allowBackup="false"`。远程 MCP 配置默认关闭、授权前展示权限，实际工具执行在逐次审批闭环完成前保持 fail-closed。
 - 更新检查：从固定的公共 Pages 更新清单检查版本和已校验 APK 元数据，并跳转到受信任的发布页面；应用本身不会伪装成 APK 校验器或安装器。
 - 本地存储：Android API Key 使用 SecureStore；Web API Key 只保留在当前标签页的 `sessionStorage`/内存中，并会迁移清除旧版持久化值。工作区使用带版本和备份的 AsyncStorage；原生附件复制到应用文件目录，Web 附件以 Blob 存入 IndexedDB，避免把大型 Base64 写进工作区 JSON。
 
 ## 仍在完善
 
-当前开发分支已进入 `1.2.0` / Android versionCode 8，但尚未 tag、发布或替换公开 Latest。公开稳定版仍是 `v1.0.6`；现有 `1.1.0` 本机候选只属于上一开发阶段的历史证据，不能当作 `1.2.0` APK，也不能与公开 Release 资产混用。
+当前开发分支为 `1.3.0` / Android versionCode 9，并已有本机验证候选，但尚未 push、tag、上传、发布或替换公开 Latest。公开稳定版仍是 `v1.0.6`；现有 `1.2.0` 本机候选只属于上一开发阶段的历史证据，不能当作 `1.3.0` APK，也不能与公开 Release 资产混用。
 
 Embezzle Studio 不购买、转售、补贴或代理模型、搜索、语音和媒体能力，也不运行生产 API、汇率服务、云同步、遥测后端或任务 worker。所有服务商调用和费用都由用户配置的账号承担；本地费用护栏不做汇率换算，且其估算/尝试账本不能替代服务商账单。
 
@@ -93,7 +96,13 @@ Pull Request 和 `main` 分支推送会触发 `.github/workflows/quality.yml`。
 
 发布前的本地 production-signed candidate 保留在 `D:\EmbezzleStudio-Releases\v1.0.6-candidate`，用于证明最终源码和正式证书在本机工具链下也可通过；它不是公开资产。GitHub 正式三项资产已下载到 `D:\EmbezzleStudio-Releases\v1.0.6`，其中 APK 的包名为 `com.szdtzpj.embezzlestudio`、版本 `1.0.6`/versionCode 6、minSdk 24/targetSdk 36；单一正式签名者、v2/v3 和 zipalign 通过，且没有 overlay、camera 或 microphone 权限。用户在 Android 真机上确认此前四个问题的主路径解决，并随后授权当前版本上线；前者属于用户验收，后者不等同于本次会话连接设备产生的最终 APK 测试日志。当前 `adb devices -l` 仍为空，因此新增安全区、桌面/主题图标、启动页、原生动画，以及额外机型、SAF 取消/失败/空间不足、远端媒体过期和长时间压力矩阵仍待独立验证。
 
-当前开发版 `1.2.0` / versionCode 8 已完成本机质量门、Web 导出与 390×844 浏览器回归、Expo Doctor 20/20、3 份 workflow YAML、35 个 Bash 块、干净 Android prebuild/Release 构建和正式证书候选签名。候选 APK 位于 `D:\EmbezzleStudio-Releases\v1.2.0-candidate\Embezzle-Studio-v1.2.0-candidate-release.apk`，97,313,239 字节，SHA-256 `872f32a48320f2a20dadee6fc0f699668666d067a60e546a19467ed922082da0`；`aapt`/打包 Manifest 证明版本、SDK、`RECORD_AUDIO` 与 `allowBackup=false`，CAMERA/overlay 缺席，`apksigner` 证明单一预期正式证书、v2/v3 和 zipalign。它仍是本地候选，不是 GitHub Release，也未推送、tag 或公开。
+历史开发版 `1.2.0` / versionCode 8 已完成本机质量门、Web 导出与 390×844 浏览器回归、Expo Doctor 20/20、3 份 workflow YAML、35 个 Bash 块、干净 Android prebuild/Release 构建和正式证书候选签名。候选 APK 位于 `D:\EmbezzleStudio-Releases\v1.2.0-candidate\Embezzle-Studio-v1.2.0-candidate-release.apk`，97,313,239 字节，SHA-256 `872f32a48320f2a20dadee6fc0f699668666d067a60e546a19467ed922082da0`；`aapt`/打包 Manifest 证明版本、SDK、`RECORD_AUDIO` 与 `allowBackup=false`，CAMERA/overlay 缺席，`apksigner` 证明单一预期正式证书、v2/v3 和 zipalign。它仍是上一源码阶段的本地候选，不是 `1.3.0` 证据、GitHub Release 或公开 APK。
+
+`1.3.0` 最终本机质量门已通过：`npm.cmd run check` 为 38 个测试文件 / 634 个测试，TypeScript/ESLint 干净；Web export 为 3,259 modules / 7.4 MB。全新 390×844 导出 Web 会话验证 HTML `.html.txt` 惰性导出与内容、成果版本历史、成果转资料、有界本地搜索、显式资料选择实际从 0 变为 1，以及上下文压缩只生成草稿而不发送；console 0 error / 0 warning，且没有非静态请求。`expo install --check`、Expo Doctor 20/20、3 份 YAML、35 个 Bash `bash -n`、16 个官方 Action 完整 SHA、diff/密钥边界检查均通过。最终审计还覆盖保守 Unicode/emoji Token 门槛、ID/Unicode 往返、聚合存储预算 fail-closed、备份大小/Endpoint 密钥拒绝和原子导入。
+
+干净 prebuild、`clean assembleRelease` 与正式证书本机签名通过。候选 APK 位于 `D:\EmbezzleStudio-Releases\v1.3.0-candidate\Embezzle-Studio-v1.3.0-candidate-release.apk`，97,448,407 字节，SHA-256 `c95dafe6e6eb77f3a1a4c7504c6ad05c27218b45972de2e247db264ec4c777d4`。包名/版本/code 为 `com.szdtzpj.embezzlestudio` / 1.3.0 / 9，min/target 24/36，`allowBackup=false`，有意 `RECORD_AUDIO`，无 CAMERA/`SYSTEM_ALERT_WINDOW`；只有一个预期正式签名者，证书 SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`，v2/v3 和 zipalign 通过。
+
+`adb devices -l` 为空，因此本轮没有 Android 真机或真实服务商账号/计费验收。也没有 push、tag、上传、创建 GitHub Release、更新 Pages 或公开 `1.3.0` APK；公开稳定版仍是 `v1.0.6`。详细能力与安全边界见[本地知识与成果工作台](./docs/local-knowledge-workbench.md)，完整本机证据与外部边界见[`1.3.0` 续作断点](./docs/CONTINUATION_CHECKPOINT_2026-07-12_V1.3.md)。
 
 当前仓库已经创建 `Settings -> Environments -> android-release`、把 deployment branch policy 限制为 `main`，并配置了下列五个 Environment secrets；以下表格和命令同时作为环境重建或密钥轮换手册。若仓库/组织方案支持 deployment protection rules，还应启用 required reviewers 和 `Prevent self-review`。[GitHub Environments 官方限制](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)说明：Free、Pro 或 Team 方案的 required reviewers 只可用于公开仓库；私有仓库的 Environment secrets 和 deployment branches/tags 至少需要 Pro/Team，保持私有并获得 required reviewers 则需要 Enterprise。个人私有仓库的直接 collaborator 也没有可降级的 read 角色；当前按维护者决定，`BlueOcean223` 保留为明确受信任的 write collaborator，并接受没有双人审批的剩余风险。不要把“仅允许 `main` + owner workflow gate”描述成等价的双人审批。
 
@@ -127,7 +136,7 @@ keytool -list -v -keystore $keystore -alias embezzle-studio | Select-String 'SHA
 
 1. 同步更新 `app.json` 的 `expo.version` 和递增的 `android.versionCode`、`package.json`/`package-lock.json` 的版本，以及 `src/data/appInfo.ts` 的版本。
 2. 在本地通过与 CI 相同的质量检查，通过 Pull Request 合并到 `main`，再等待该合并提交的 Quality 与 push-triggered Pages 工作流都成功。
-3. 暂停其它 `main` 合并和新版本 Release；从最新 `origin/main` 的精确提交创建并推送与应用版本一致的 tag，例如当前开发版本 `v1.2.0`。
+3. 暂停其它 `main` 合并和新版本 Release；从最新 `origin/main` 的精确提交创建并推送与应用版本一致的 tag，例如当前开发版本 `v1.3.0`。
 4. 确认仓库已启用 Immutable Releases，由 `szdtzpj` 创建同名、非 prerelease 的空 draft Release，再从默认分支 `main` 手动运行 Android 工作流；不要提前发布空 Release。
 5. 工作流会检出与当前 `origin/main` 完全相同的 tag 提交，生成未签名 APK，使用正式 keystore 签名，并在冻结前后重复核对 tag/main 提交以及每个 GitHub asset 的 digest、状态与 uploader，然后才把 draft 发布为 latest immutable Release。等该工作流、自动触发的 Pages 工作流、Release attestation 和公开 APK 字节校验都成功后，才结束发布冻结。
 
@@ -136,11 +145,11 @@ keytool -list -v -keystore $keystore -alias embezzle-studio | Select-String 'SHA
 ```powershell
 git fetch origin
 $mergeSha = git rev-parse origin/main
-git tag -a v1.2.0 $mergeSha -m "Embezzle Studio v1.2.0"
-git push origin v1.2.0
+git tag -a v1.3.0 $mergeSha -m "Embezzle Studio v1.3.0"
+git push origin v1.3.0
 gh api --method PUT repos/szdtzpj/Embezzle-Studio/immutable-releases
-gh release create v1.2.0 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.2.0" --notes "Android production release v1.2.0."
-gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.2.0
+gh release create v1.3.0 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.3.0" --notes "Android production release v1.3.0."
+gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.3.0
 ```
 
 Release 标题、正文与发布时间会被复制到公开 Pages 清单和下载页。创建 draft 前必须把这些文字当作公开内容审阅，不得包含私有仓库、账号、客户或密钥信息；不要未经检查直接使用自动生成的 release notes。

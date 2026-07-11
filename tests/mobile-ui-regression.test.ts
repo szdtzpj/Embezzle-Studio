@@ -260,7 +260,7 @@ describe('Android mobile UI regressions', () => {
     expect(appSource).toContain("? 'audio-transcription'");
     expect(appSource).toContain(": 'speech-generation';");
     expect(appSource).toContain('inferModelTask(model) !== expectedTask');
-    expect(appSource).toContain('若父子分支因此跨项目，其关联已安全分离');
+    expect(appSource).toContain('跨项目的资料选择、分支关联和来源追踪已安全清理');
   });
 
   it('removes only the selected system instruction and preserves later conversation history', async () => {

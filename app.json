@@ -3,7 +3,7 @@
     "name": "Embezzle Studio",
     "slug": "embezzle-studio",
     "scheme": "embezzlestudio",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "backgroundColor": "#F4F4F4",
@@ -13,7 +13,7 @@
     },
     "android": {
       "package": "com.szdtzpj.embezzlestudio",
-      "versionCode": 8,
+      "versionCode": 9,
       "allowBackup": false,
       "softwareKeyboardLayoutMode": "resize",
       "blockedPermissions": [

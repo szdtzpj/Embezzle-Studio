@@ -5,8 +5,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { createDefaultWorkspace } from '../src/data/providerCatalog';
 import type { AppWorkspace, ChatConversation, ChatMessage, PluginManifest, ProviderProfile } from '../src/domain/types';
 import {
+  MAX_PROJECT_KNOWLEDGE_SOURCE_CHARACTERS,
+  MAX_PROJECT_KNOWLEDGE_TOTAL_BYTES,
+} from '../src/services/projectKnowledge';
+import {
   MAX_BACKUP_PASSWORD_LENGTH,
   MAX_ENCRYPTED_BACKUP_BYTES,
+  MAX_PLAINTEXT_BACKUP_BYTES,
   WORKSPACE_BACKUP_SCRYPT_PARAMS,
   WorkspaceBackupError,
   createWorkspaceBackupEnvelope,
@@ -16,6 +21,10 @@ import {
   validateWorkspaceBackupEnvelope,
   type WorkspaceBackupEnvelope,
 } from '../src/services/workspaceBackup';
+import {
+  MAX_WORKSPACE_ARTIFACT_CONTENT_LENGTH,
+  MAX_WORKSPACE_ARTIFACT_TOTAL_BYTES,
+} from '../src/services/workspaceArtifacts';
 
 const cryptoMocks = vi.hoisted(() => ({
   getRandomBytesAsync: vi.fn(async (length: number) => new Uint8Array(length).fill(37)),
@@ -103,12 +112,50 @@ function populatedWorkspace(): AppWorkspace {
     apiKey: 'NEW-PROVIDER-API-KEY',
   });
   const message = generatedMessage();
+  message.pinnedForContext = true;
   const activeConversation = workspace.conversations[0];
+  const artifact = {
+    id: 'artifact-portable',
+    projectId: workspace.activeProjectId,
+    title: 'Portable markdown',
+    format: 'markdown' as const,
+    revisions: [{
+      id: 'artifact-revision-1',
+      content: '# Portable artifact text',
+      createdAt: 200,
+      author: 'assistant' as const,
+      sourceMessageId: message.id,
+    }],
+    activeRevisionId: 'artifact-revision-1',
+    sourceConversationId: activeConversation.id,
+    sourceMessageId: message.id,
+    createdAt: 200,
+    updatedAt: 200,
+  };
+  const knowledgeSource = {
+    id: 'knowledge-portable',
+    projectId: workspace.activeProjectId,
+    title: 'Portable project knowledge',
+    kind: 'artifact' as const,
+    content: '# Portable knowledge text',
+    sourceArtifactId: artifact.id,
+    sourceConversationId: activeConversation.id,
+    sourceMessageId: message.id,
+    createdAt: 200,
+    updatedAt: 200,
+  };
   return {
     ...workspace,
     providers: [primary, added, ...workspace.providers.slice(2)],
     messages: [message],
-    conversations: [{ ...activeConversation, updatedAt: 200, messages: [message] }],
+    conversations: [{
+      ...activeConversation,
+      updatedAt: 200,
+      messages: [message],
+      knowledgeSourceIds: [knowledgeSource.id],
+    }],
+    artifacts: [artifact],
+    knowledgeSources: [knowledgeSource],
     plugins: [
       plugin({
         endpoint: 'https://mcp.example.com/rpc?token=PLUGIN-QUERY-SECRET',
@@ -215,6 +262,87 @@ async function encryptPlainEnvelope(envelope: WorkspaceBackupEnvelope): Promise<
   }
 }
 
+const boundaryBackupNow = 1_700_000_000_000;
+
+function boundedAsciiChunks(totalBytes: number, maximumChunkBytes: number): string[] {
+  const chunks: string[] = [];
+  let remaining = totalBytes;
+  while (remaining > 0) {
+    const length = Math.min(remaining, maximumChunkBytes);
+    chunks.push('x'.repeat(length));
+    remaining -= length;
+  }
+  return chunks;
+}
+
+function maximumMixedWorkspaceAtPlaintextBytes(targetBytes: number): AppWorkspace {
+  const workspace = createDefaultWorkspace();
+  const conversation = workspace.conversations[0];
+  const boundaryMessage: ChatMessage = {
+    id: 'boundary-message',
+    role: 'user',
+    content: '',
+    createdAt: 100,
+    status: 'ready',
+  };
+  const artifactChunks = boundedAsciiChunks(
+    MAX_WORKSPACE_ARTIFACT_TOTAL_BYTES,
+    MAX_WORKSPACE_ARTIFACT_CONTENT_LENGTH
+  );
+  const knowledgeChunks = boundedAsciiChunks(
+    MAX_PROJECT_KNOWLEDGE_TOTAL_BYTES,
+    MAX_PROJECT_KNOWLEDGE_SOURCE_CHARACTERS
+  );
+  const knowledgeSources = knowledgeChunks.map((content, index) => ({
+    id: `boundary-knowledge-${index}`,
+    projectId: workspace.activeProjectId,
+    title: `Boundary knowledge ${index}`,
+    kind: 'text' as const,
+    content,
+    createdAt: 100 + index,
+    updatedAt: 100 + index,
+  }));
+  workspace.messages = [boundaryMessage];
+  workspace.conversations = [{
+    ...conversation,
+    updatedAt: 200,
+    messages: [boundaryMessage],
+    knowledgeSourceIds: knowledgeSources.map(({ id }) => id),
+  }];
+  workspace.artifacts = [{
+    id: 'boundary-artifact',
+    projectId: workspace.activeProjectId,
+    title: 'Maximum mixed artifact',
+    format: 'plain-text',
+    revisions: artifactChunks.map((content, index) => ({
+      id: `boundary-artifact-revision-${index}`,
+      content,
+      createdAt: 100 + index,
+      author: 'user' as const,
+    })),
+    activeRevisionId: `boundary-artifact-revision-${artifactChunks.length - 1}`,
+    createdAt: 100,
+    updatedAt: 100 + artifactChunks.length - 1,
+  }];
+  workspace.knowledgeSources = knowledgeSources;
+
+  const initialBytes = new TextEncoder().encode(
+    JSON.stringify(createWorkspaceBackupEnvelope(workspace, boundaryBackupNow))
+  ).length;
+  const paddingBytes = targetBytes - initialBytes;
+  if (paddingBytes < 0) {
+    throw new Error(`Mixed workspace baseline ${initialBytes} exceeds target ${targetBytes}.`);
+  }
+  boundaryMessage.content = 'm'.repeat(paddingBytes);
+  const exactBytes = new TextEncoder().encode(
+    JSON.stringify(createWorkspaceBackupEnvelope(workspace, boundaryBackupNow))
+  ).length;
+  if (exactBytes !== targetBytes) {
+    throw new Error(`Expected ${targetBytes} plaintext bytes, received ${exactBytes}.`);
+  }
+  return workspace;
+}
+
 function envelopeWithValidBranch(): WorkspaceBackupEnvelope {
   const workspace = createDefaultWorkspace();
   const rootPoint: ChatMessage = {
@@ -268,9 +396,37 @@ describe('workspace backup sanitization', () => {
 
     const message = safe.conversations[0].messages[0];
     expect(message.content).toBe('视频生成任务已提交');
+    expect(message.pinnedForContext).toBe(true);
     expect(message.generationTask).toMatchObject({ taskId: 'cgt-task-123', status: 'running' });
+    expect(safe.artifacts?.[0].revisions[0].content).toBe('# Portable artifact text');
+    expect(safe.knowledgeSources?.[0].content).toBe('# Portable knowledge text');
+    expect(safe.conversations[0].knowledgeSourceIds).toEqual(['knowledge-portable']);
     expect(safe.plugins[0].endpoint).toBeUndefined();
     expect(safe.plugins[1].endpoint).toBe('https://new-mcp.example.com/rpc');
+  });
+
+  it('rejects a provider endpoint with structured secrets before randomness or encryption', async () => {
+    const workspace = createDefaultWorkspace();
+    workspace.providers[0] = providerFrom(workspace.providers[0], {
+      baseUrl: 'https://backup-user:USERINFO-SECRET@api.example.com/v1?api_key=QUERY-SECRET#FRAGMENT-SECRET',
+    });
+    const randomBytes = vi.fn(deterministicRandom(31));
+
+    await expect(
+      exportEncryptedWorkspaceBackup(workspace, password, { randomBytes })
+    ).rejects.toMatchObject({ code: 'invalid-format' });
+    expect(randomBytes).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'https://api.example.com/v1',
+    'http://localhost:11434/v1',
+    'http://127.0.0.1:8080/v1',
+    'http://[::1]:8080/v1',
+  ])('retains a safe HTTPS or loopback HTTP provider endpoint: %s', (baseUrl) => {
+    const workspace = createDefaultWorkspace();
+    workspace.providers[0] = providerFrom(workspace.providers[0], { baseUrl });
+    expect(sanitizeWorkspaceForBackup(workspace).providers[0].baseUrl).toBe(baseUrl);
   });
 
   it('creates a versioned plaintext envelope that explicitly excludes keys and media', () => {
@@ -333,6 +489,10 @@ describe('encrypted workspace backup round trip', () => {
       expect(imported.plugins.find((item) => item.id === 'plugin-new')?.authorization).toBe('CURRENT-DEVICE-MATCHING-PLUGIN-AUTH');
       expect(imported.messages[0]).not.toHaveProperty('attachments');
       expect(imported.messages[0].generationTask).toMatchObject({ taskId: 'cgt-task-123' });
+      expect(imported.messages[0].pinnedForContext).toBe(true);
+      expect(imported.artifacts[0].revisions[0].content).toBe('# Portable artifact text');
+      expect(imported.knowledgeSources[0].content).toBe('# Portable knowledge text');
+      expect(imported.conversations[0].knowledgeSourceIds).toEqual(['knowledge-portable']);
       expect(imported.promptTemplates[0].content).toBe('请翻译 {{text}}');
       expect(imported.providerUsageEvents).toEqual(current.providerUsageEvents);
       expect(imported.providerUsageEvents).not.toBe(current.providerUsageEvents);
@@ -371,12 +531,15 @@ describe('encrypted workspace backup round trip', () => {
     const envelope = createWorkspaceBackupEnvelope(populatedWorkspace(), 1_700_000_000_000);
     delete envelope.workspace.projects;
     delete envelope.workspace.activeProjectId;
+    delete envelope.workspace.artifacts;
+    delete envelope.workspace.knowledgeSources;
     delete envelope.workspace.costGuard;
     envelope.workspace.conversations = envelope.workspace.conversations.map((conversation) => {
       const legacy = { ...conversation };
       delete legacy.projectId;
       delete legacy.parentConversationId;
       delete legacy.branchPointMessageId;
+      delete legacy.knowledgeSourceIds;
       return legacy;
     });
     const current = currentWorkspaceWithLocalSecrets();
@@ -388,8 +551,87 @@ describe('encrypted workspace backup round trip', () => {
     expect(imported.activeProjectId).toBe(imported.projects[0].id);
     expect(imported.conversations.every((conversation) => conversation.projectId === imported.activeProjectId)).toBe(true);
     expect(imported.costGuard).toMatchObject({ enabled: false, maxOutputTokens: 4096 });
+    expect(imported.artifacts).toEqual([]);
+    expect(imported.knowledgeSources).toEqual([]);
     expect(imported.providerUsageEvents).toEqual(current.providerUsageEvents);
   }, 20_000);
+});
+
+describe('encrypted workspace backup size boundaries', () => {
+  it('derives an exact plaintext cap from authentication and Base64 envelope growth', () => {
+    const fixedEnvelopeBytes = Buffer.byteLength(JSON.stringify({
+      magic: 'embezzle-studio-encrypted-backup',
+      version: 1,
+      kdf: {
+        ...WORKSPACE_BACKUP_SCRYPT_PARAMS,
+        salt: Buffer.alloc(32).toString('base64'),
+      },
+      cipher: {
+        name: 'xchacha20-poly1305',
+        nonce: Buffer.alloc(24).toString('base64'),
+      },
+      ciphertext: '',
+    }));
+    const outerBytesFor = (plaintextBytes: number) =>
+      fixedEnvelopeBytes + 4 * Math.ceil((plaintextBytes + 16) / 3);
+
+    expect(outerBytesFor(MAX_PLAINTEXT_BACKUP_BYTES)).toBeLessThanOrEqual(
+      MAX_ENCRYPTED_BACKUP_BYTES
+    );
+    expect(outerBytesFor(MAX_PLAINTEXT_BACKUP_BYTES + 1)).toBeGreaterThan(
+      MAX_ENCRYPTED_BACKUP_BYTES
+    );
+    expect(
+      MAX_ENCRYPTED_BACKUP_BYTES - outerBytesFor(MAX_PLAINTEXT_BACKUP_BYTES)
+    ).toBeLessThan(4);
+  });
+
+  it('round-trips an exact-boundary mixed workspace and rejects one more byte before KDF', async () => {
+    const workspace = maximumMixedWorkspaceAtPlaintextBytes(MAX_PLAINTEXT_BACKUP_BYTES);
+    const encrypted = await exportEncryptedWorkspaceBackup(workspace, password, {
+      now: boundaryBackupNow,
+      randomBytes: deterministicRandom(41),
+    });
+
+    expect(Buffer.byteLength(encrypted)).toBeLessThanOrEqual(MAX_ENCRYPTED_BACKUP_BYTES);
+    expect(MAX_ENCRYPTED_BACKUP_BYTES - Buffer.byteLength(encrypted)).toBeLessThan(4);
+
+    const overflowMessage: ChatMessage = {
+      ...workspace.messages[0],
+      content: `${workspace.messages[0].content}x`,
+    };
+    workspace.messages = [overflowMessage];
+    workspace.conversations = workspace.conversations.map((conversation) =>
+      conversation.id === workspace.activeConversationId
+        ? { ...conversation, messages: [overflowMessage] }
+        : conversation
+    );
+    const overflowRandom = vi.fn(deterministicRandom(43));
+    await expect(
+      exportEncryptedWorkspaceBackup(workspace, password, {
+        now: boundaryBackupNow,
+        randomBytes: overflowRandom,
+      })
+    ).rejects.toMatchObject({ code: 'too-large' });
+    expect(overflowRandom).not.toHaveBeenCalled();
+
+    const imported = await importEncryptedWorkspaceBackup(
+      encrypted,
+      password,
+      createDefaultWorkspace()
+    );
+    const artifactBytes = imported.artifacts[0].revisions.reduce(
+      (total, item) => total + Buffer.byteLength(item.content),
+      0
+    );
+    const knowledgeBytes = imported.knowledgeSources.reduce(
+      (total, item) => total + Buffer.byteLength(item.content),
+      0
+    );
+    expect(artifactBytes).toBe(MAX_WORKSPACE_ARTIFACT_TOTAL_BYTES);
+    expect(knowledgeBytes).toBe(MAX_PROJECT_KNOWLEDGE_TOTAL_BYTES);
+    expect(imported.messages[0].id).toBe('boundary-message');
+  }, 60_000);
 });
 
 describe('encrypted workspace backup rejection paths', () => {
@@ -423,6 +665,28 @@ describe('encrypted workspace backup rejection paths', () => {
     await expect(
       importEncryptedWorkspaceBackup('x'.repeat(MAX_ENCRYPTED_BACKUP_BYTES + 1), password, createDefaultWorkspace())
     ).rejects.toMatchObject({ code: 'too-large' });
+  });
+
+  it('rejects an authenticated import whose provider endpoint contains structured secrets', async () => {
+    const envelope = createWorkspaceBackupEnvelope(createDefaultWorkspace(), boundaryBackupNow);
+    envelope.workspace.providers[0].baseUrl =
+      'https://import-user:IMPORT-PASSWORD@api.example.com/v1?token=IMPORT-QUERY#IMPORT-FRAGMENT';
+    const encrypted = await encryptPlainEnvelope(envelope);
+
+    await expect(
+      importEncryptedWorkspaceBackup(encrypted, password, createDefaultWorkspace())
+    ).rejects.toMatchObject({ code: 'invalid-format' });
+  }, 20_000);
+
+  it.each([
+    'https://user:password@api.example.com/v1',
+    'https://api.example.com/v1?token=secret',
+    'https://api.example.com/v1#secret',
+    'http://api.example.com/v1',
+  ])('rejects an unsafe plaintext provider endpoint during strict validation: %s', (baseUrl) => {
+    const envelope = createWorkspaceBackupEnvelope(createDefaultWorkspace(), boundaryBackupNow);
+    envelope.workspace.providers[0].baseUrl = baseUrl;
+    expect(() => validateWorkspaceBackupEnvelope(envelope)).toThrow(/baseUrl/);
   });
 
   it('rejects invalid random-source output before encryption', async () => {
@@ -468,6 +732,44 @@ describe('strict backup validation', () => {
       const duplicate = plugin({ id: 'duplicate-plugin' });
       workspace.plugins = [duplicate, { ...duplicate }];
     }],
+    ['artifact', (workspace: AppWorkspace) => {
+      const duplicate = {
+        id: 'duplicate-artifact',
+        projectId: workspace.activeProjectId,
+        title: 'Duplicate',
+        format: 'plain-text' as const,
+        revisions: [{ id: 'revision-one', content: 'text', createdAt: 1, author: 'user' as const }],
+        activeRevisionId: 'revision-one',
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      workspace.artifacts = [duplicate, { ...duplicate, revisions: duplicate.revisions.map((item) => ({ ...item })) }];
+    }],
+    ['artifact revision', (workspace: AppWorkspace) => {
+      const revision = { id: 'duplicate-revision', content: 'text', createdAt: 1, author: 'user' as const };
+      workspace.artifacts = [{
+        id: 'artifact-one',
+        projectId: workspace.activeProjectId,
+        title: 'Duplicate revision',
+        format: 'plain-text',
+        revisions: [revision, { ...revision }],
+        activeRevisionId: revision.id,
+        createdAt: 1,
+        updatedAt: 1,
+      }];
+    }],
+    ['knowledge source', (workspace: AppWorkspace) => {
+      const duplicate = {
+        id: 'duplicate-knowledge',
+        projectId: workspace.activeProjectId,
+        title: 'Duplicate',
+        kind: 'text' as const,
+        content: 'text',
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      workspace.knowledgeSources = [duplicate, { ...duplicate }];
+    }],
   ])('rejects duplicate %s IDs before encryption', (_kind, mutate) => {
     const workspace = createDefaultWorkspace();
     mutate(workspace);
@@ -490,6 +792,23 @@ describe('strict backup validation', () => {
     ).rejects.toMatchObject({ code: 'duplicate-id' });
   }, 20_000);
 
+  it.each([
+    ['provider', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.providers[0].id = 'provider:colon-is-invalid';
+    }],
+    ['project', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.projects![0].id = 'project:colon-is-invalid';
+    }],
+  ] as const)('rejects an authenticated payload with a colon in a legacy %s ID', async (_kind, mutate) => {
+    const envelope = createWorkspaceBackupEnvelope(createDefaultWorkspace(), 1_700_000_000_000);
+    mutate(envelope);
+    const encrypted = await encryptPlainEnvelope(envelope);
+
+    await expect(
+      importEncryptedWorkspaceBackup(encrypted, password, createDefaultWorkspace())
+    ).rejects.toMatchObject({ code: 'invalid-format' });
+  }, 20_000);
+
   it('rejects unknown fields, attachment fields, and unsafe plugin endpoints in plaintext envelopes', () => {
     const base = createWorkspaceBackupEnvelope(populatedWorkspace(), 1_700_000_000_000);
     const unknown = structuredClone(base) as WorkspaceBackupEnvelope & { unexpected?: boolean };
@@ -507,6 +826,68 @@ describe('strict backup validation', () => {
     const unsafeEndpoint = structuredClone(base) as WorkspaceBackupEnvelope;
     unsafeEndpoint.workspace.plugins[1].endpoint = 'https://example.com/rpc?token=secret';
     expect(() => validateWorkspaceBackupEnvelope(unsafeEndpoint)).toThrow(/endpoint/);
+  });
+
+  it.each([
+    ['missing active revision', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.artifacts![0].activeRevisionId = 'missing-revision';
+    }, /activeRevisionId/],
+    ['stale artifact conversation', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.artifacts![0].sourceConversationId = 'missing-conversation';
+    }, /sourceConversationId/],
+    ['stale artifact message', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.artifacts![0].sourceMessageId = 'missing-message';
+    }, /sourceMessageId/],
+    ['stale knowledge artifact', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.knowledgeSources![0].sourceArtifactId = 'missing-artifact';
+    }, /sourceArtifactId/],
+    ['stale conversation knowledge reference', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.conversations[0].knowledgeSourceIds = ['missing-knowledge'];
+    }, /knowledgeSourceIds/],
+    ['conflicting context flags', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.conversations[0].messages[0].excludedFromContext = true;
+      envelope.workspace.conversations[0].messages[0].pinnedForContext = true;
+    }, /不能同时排除并置顶/],
+  ] as const)('rejects %s', (_name, mutate, expected) => {
+    const envelope = createWorkspaceBackupEnvelope(populatedWorkspace(), 1_700_000_000_000);
+    mutate(envelope);
+
+    expect(() => validateWorkspaceBackupEnvelope(envelope)).toThrow(expected);
+  });
+
+  it('rejects oversized artifact and knowledge text plus collection counts above their limits', () => {
+    const artifactText = createWorkspaceBackupEnvelope(populatedWorkspace(), 1_700_000_000_000);
+    artifactText.workspace.artifacts![0].revisions[0].content = 'x'.repeat(500_001);
+    expect(() => validateWorkspaceBackupEnvelope(artifactText)).toThrow(/content/);
+
+    const knowledgeText = createWorkspaceBackupEnvelope(populatedWorkspace(), 1_700_000_000_000);
+    knowledgeText.workspace.knowledgeSources![0].content = 'x'.repeat(500_001);
+    expect(() => validateWorkspaceBackupEnvelope(knowledgeText)).toThrow(/content/);
+
+    const artifactCount = createWorkspaceBackupEnvelope(createDefaultWorkspace(), 1_700_000_000_000);
+    artifactCount.workspace.artifacts = Array.from({ length: 201 }, (_, index) => ({
+      id: `artifact-${index}`,
+      projectId: artifactCount.workspace.activeProjectId!,
+      title: `Artifact ${index}`,
+      format: 'plain-text' as const,
+      revisions: [{ id: `revision-${index}`, content: 'x', createdAt: index, author: 'user' as const }],
+      activeRevisionId: `revision-${index}`,
+      createdAt: index,
+      updatedAt: index,
+    }));
+    expect(() => validateWorkspaceBackupEnvelope(artifactCount)).toThrow(/数量超过上限 200/);
+
+    const knowledgeCount = createWorkspaceBackupEnvelope(createDefaultWorkspace(), 1_700_000_000_000);
+    knowledgeCount.workspace.knowledgeSources = Array.from({ length: 501 }, (_, index) => ({
+      id: `knowledge-${index}`,
+      projectId: knowledgeCount.workspace.activeProjectId!,
+      title: `Knowledge ${index}`,
+      kind: 'text' as const,
+      content: 'x',
+      createdAt: index,
+      updatedAt: index,
+    }));
+    expect(() => validateWorkspaceBackupEnvelope(knowledgeCount)).toThrow(/数量超过上限 500/);
   });
 
   it.each([

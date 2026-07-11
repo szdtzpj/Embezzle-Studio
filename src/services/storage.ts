@@ -30,6 +30,8 @@ import type {
   ProviderProfile,
   ProviderUsageEvent,
   ProviderUsageKind,
+  ProjectKnowledgeKind,
+  ProjectKnowledgeSource,
   RequestMetrics,
   ReasoningEffort,
   UnknownCostComponent,
@@ -37,27 +39,75 @@ import type {
   WebCitation,
   WebSearchSettings,
   WorkspaceProject,
+  WorkspaceArtifact,
+  WorkspaceArtifactFormat,
+  WorkspaceArtifactRevision,
 } from '../domain/types';
 import { createModelInfoFromId, inferModelTask } from './modelCapabilities';
 import { attachmentForPersistence, flushPendingAttachmentDeletions } from './mediaStorage';
+import {
+  MAX_PROMPT_TEMPLATE_CONTENT_LENGTH,
+  MAX_PROMPT_TEMPLATE_NAME_LENGTH,
+  MAX_PROMPT_TEMPLATES,
+} from './promptTemplates';
+import {
+  MAX_PROJECT_KNOWLEDGE_MIME_TYPE_CHARACTERS,
+  MAX_PROJECT_KNOWLEDGE_CONTEXT_SOURCES,
+  MAX_PROJECT_KNOWLEDGE_FILE_NAME_CHARACTERS,
+  MAX_PROJECT_KNOWLEDGE_SOURCE_CHARACTERS,
+  MAX_PROJECT_KNOWLEDGE_SOURCES,
+  MAX_PROJECT_KNOWLEDGE_TITLE_CHARACTERS,
+  MAX_PROJECT_KNOWLEDGE_TOTAL_BYTES,
+  projectKnowledgeContentBytes,
+} from './projectKnowledge';
 import { providerEndpointFingerprint } from './providerSetup';
+import { sliceUnicodeCharacters, unicodeCharacterLengthExceeds } from './textBounds';
+import {
+  MAX_WORKSPACE_ARTIFACT_CONTENT_LENGTH,
+  MAX_WORKSPACE_ARTIFACT_LANGUAGE_LENGTH,
+  MAX_WORKSPACE_ARTIFACT_REVISIONS,
+  MAX_WORKSPACE_ARTIFACT_TITLE_LENGTH,
+  MAX_WORKSPACE_ARTIFACTS,
+  MAX_WORKSPACE_ARTIFACT_TOTAL_BYTES,
+  workspaceArtifactContentBytes,
+} from './workspaceArtifacts';
+import {
+  MAX_WORKSPACE_PROJECT_NAME_LENGTH,
+  MAX_WORKSPACE_PROJECT_SYSTEM_PROMPT_LENGTH,
+  MAX_WORKSPACE_PROJECTS,
+} from './workspaceProjects';
+import {
+  isColonCapableWorkspaceEntityId,
+  isLegacyWorkspaceId,
+  providerModelCurrencyIdentityKey,
+  providerModelIdentityKey,
+} from './workspaceEntityIds';
+import { toWorkspaceSaveError } from './workspaceSaveError';
+
+export {
+  WorkspaceSaveError,
+  isWorkspaceSaveError,
+  type WorkspaceSaveCommitStage,
+} from './workspaceSaveError';
 
 const LEGACY_WORKSPACE_KEYS = [
+  '@embezzle-studio/workspace-v4',
   '@embezzle-studio/workspace-v3',
   '@embezzle-studio/workspace-v2',
   '@embezzle-studio/workspace-v1',
 ] as const;
 const LEGACY_WORKSPACE_BACKUPS: Partial<Record<(typeof LEGACY_WORKSPACE_KEYS)[number], string>> = {
+  '@embezzle-studio/workspace-v4': '@embezzle-studio/workspace-v4.backup',
   '@embezzle-studio/workspace-v3': '@embezzle-studio/workspace-v3.backup',
   '@embezzle-studio/workspace-v2': '@embezzle-studio/workspace-v2.backup',
 };
-const WORKSPACE_KEY = '@embezzle-studio/workspace-v4';
-const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v4.backup';
-const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v4';
+const WORKSPACE_KEY = '@embezzle-studio/workspace-v5';
+const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v5.backup';
+const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v5';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
 const PLUGIN_SECRET_PREFIX = 'embezzle-studio.plugin-authorization';
 const BOUND_SECRET_SCHEMA_VERSION = 1;
-const STORAGE_SCHEMA_VERSION = 4;
+const STORAGE_SCHEMA_VERSION = 5;
 const INTERRUPTED_MESSAGE = '上次请求在应用退出前未完成，已标记为中断。';
 
 const providerKinds = new Set<ProviderKind>([
@@ -117,6 +167,14 @@ const providerUsageKinds = new Set<ProviderUsageKind>([
   'audio-transcription',
   'speech-generation',
 ]);
+const artifactFormats = new Set<WorkspaceArtifactFormat>([
+  'markdown',
+  'plain-text',
+  'code',
+  'json',
+  'html',
+]);
+const knowledgeKinds = new Set<ProjectKnowledgeKind>(['text', 'artifact', 'message', 'file']);
 
 type PersistedProvider = Omit<ProviderProfile, 'apiKey'>;
 type PersistedPlugin = Omit<PluginManifest, 'authorization'>;
@@ -159,6 +217,13 @@ function shapeError(message: string): Error {
   return new Error(`工作区数据格式无效：${message}`);
 }
 
+class PersistedWorkspaceBudgetError extends Error {
+  constructor(message: string) {
+    super(`工作区持久化预算超限：${message}`);
+    this.name = 'PersistedWorkspaceBudgetError';
+  }
+}
+
 function finiteNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
@@ -169,6 +234,10 @@ function optionalFiniteNumber(value: unknown): number | undefined {
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function boundedCharacters(value: string, maximum: number): string {
+  return sliceUnicodeCharacters(value, maximum);
 }
 
 function arrayField(value: unknown, label: string): unknown[] {
@@ -274,7 +343,7 @@ function normalizeProvider(value: unknown, index: number): PersistedProvider {
     throw shapeError(`providers[${index}] 必须是对象。`);
   }
   const id = nonEmptyString(value.id);
-  if (!id || !/^[A-Za-z0-9._-]+$/.test(id)) {
+  if (!isLegacyWorkspaceId(id)) {
     throw shapeError(`providers[${index}].id 不能为空，且只能包含字母、数字、点、横线和下划线。`);
   }
   const kind = typeof value.kind === 'string' && providerKinds.has(value.kind as ProviderKind)
@@ -578,6 +647,10 @@ function normalizeMessage(value: unknown, label: string, fallbackCreatedAt: numb
     ...(generationTask ? { generationTask } : {}),
     ...(nonEmptyString(value.comparisonGroupId) ? { comparisonGroupId: nonEmptyString(value.comparisonGroupId) } : {}),
     ...(value.selectedForContext === true ? { selectedForContext: true } : {}),
+    ...(value.excludedFromContext === true ? { excludedFromContext: true } : {}),
+    ...(value.pinnedForContext === true && value.excludedFromContext !== true
+      ? { pinnedForContext: true }
+      : {}),
     ...(requestMetrics ? { requestMetrics } : {}),
     ...(costEstimate ? { costEstimate } : {}),
     ...(typeof value.modelId === 'string' ? { modelId: value.modelId } : {}),
@@ -610,6 +683,12 @@ function normalizeConversation(value: unknown, index: number, now: number): Chat
     normalizeMessage(message, `conversation-${index + 1}-message-${messageIndex + 1}`, createdAt + messageIndex)
   );
   const pinnedAt = optionalFiniteNumber(value.pinnedAt);
+  const knowledgeSourceIds = Array.from(
+    new Set(
+      arrayField(value.knowledgeSourceIds, `conversations[${index}].knowledgeSourceIds`)
+        .flatMap((candidate) => nonEmptyString(candidate) ?? [])
+    )
+  ).slice(0, MAX_PROJECT_KNOWLEDGE_CONTEXT_SOURCES);
   return {
     id,
     title: nonEmptyString(value.title) ?? conversationTitle(messages),
@@ -622,6 +701,7 @@ function normalizeConversation(value: unknown, index: number, now: number): Chat
     ...(nonEmptyString(value.branchPointMessageId)
       ? { branchPointMessageId: nonEmptyString(value.branchPointMessageId) }
       : {}),
+    ...(knowledgeSourceIds.length ? { knowledgeSourceIds } : {}),
     createdAt,
     updatedAt: finiteNumber(value.updatedAt, createdAt),
     messages,
@@ -823,14 +903,21 @@ function normalizeActiveModels(value: unknown, providers: ProviderProfile[]): Re
 
 function normalizePromptTemplates(value: unknown): PromptTemplate[] {
   const seen = new Set<string>();
-  return arrayField(value, 'promptTemplates').slice(0, 100).flatMap((template, index) => {
+  return arrayField(value, 'promptTemplates').slice(0, MAX_PROMPT_TEMPLATES).flatMap((template, index) => {
     if (!isRecord(template)) {
       throw shapeError(`promptTemplates[${index}] 必须是对象。`);
     }
     const id = nonEmptyString(template.id);
     const name = nonEmptyString(template.name);
     const content = typeof template.content === 'string' ? template.content : '';
-    if (!id || seen.has(id) || !name || name.length > 60 || !content.trim() || content.length > 20_000) {
+    if (
+      !id ||
+      seen.has(id) ||
+      !name ||
+      unicodeCharacterLengthExceeds(name, MAX_PROMPT_TEMPLATE_NAME_LENGTH) ||
+      !content.trim() ||
+      unicodeCharacterLengthExceeds(content, MAX_PROMPT_TEMPLATE_CONTENT_LENGTH)
+    ) {
       return [];
     }
     seen.add(id);
@@ -875,12 +962,12 @@ function normalizeProjects(
     return [{ ...fallback, createdAt: now, updatedAt: now }];
   }
   const seen = new Set<string>();
-  const projects = arrayField(value, 'projects').slice(0, 50).flatMap((candidate, index) => {
+  const projects = arrayField(value, 'projects').slice(0, MAX_WORKSPACE_PROJECTS).flatMap((candidate, index) => {
     if (!isRecord(candidate)) {
       throw shapeError(`projects[${index}] 必须是对象。`);
     }
     const id = nonEmptyString(candidate.id);
-    if (!id || !/^[A-Za-z0-9._-]+$/.test(id)) {
+    if (!isLegacyWorkspaceId(id)) {
       throw shapeError(`projects[${index}].id 无效。`);
     }
     if (seen.has(id)) {
@@ -889,18 +976,248 @@ function normalizeProjects(
     seen.add(id);
     const createdAt = finiteNumber(candidate.createdAt, now);
     const defaultTarget = normalizeModelTarget(candidate.defaultTarget, providers);
+    const systemPrompt = typeof candidate.systemPrompt === 'string' && candidate.systemPrompt.trim()
+      ? boundedCharacters(candidate.systemPrompt, MAX_WORKSPACE_PROJECT_SYSTEM_PROMPT_LENGTH)
+      : undefined;
     return [{
       id,
-      name: nonEmptyString(candidate.name)?.slice(0, 80) ?? `项目 ${index + 1}`,
-      ...(nonEmptyString(candidate.systemPrompt)
-        ? { systemPrompt: nonEmptyString(candidate.systemPrompt)!.slice(0, 20_000) }
-        : {}),
+      name: nonEmptyString(candidate.name)
+        ? boundedCharacters(nonEmptyString(candidate.name)!, MAX_WORKSPACE_PROJECT_NAME_LENGTH)
+        : `项目 ${index + 1}`,
+      ...(systemPrompt ? { systemPrompt } : {}),
       ...(defaultTarget ? { defaultTarget } : {}),
       createdAt,
       updatedAt: finiteNumber(candidate.updatedAt, createdAt),
     }];
   });
   return projects.length ? projects : [{ ...fallback, createdAt: now, updatedAt: now }];
+}
+
+function validWorkspaceEntityId(value: unknown): string | undefined {
+  const id = nonEmptyString(value);
+  return isColonCapableWorkspaceEntityId(id) ? id : undefined;
+}
+
+function messageLookup(conversations: ChatConversation[]): {
+  conversationById: Map<string, ChatConversation>;
+  messagesByProjectId: Map<string, Set<string>>;
+} {
+  const conversationById = new Map(conversations.map((conversation) => [conversation.id, conversation]));
+  const messagesByProjectId = new Map<string, Set<string>>();
+  conversations.forEach((conversation) => {
+    if (!conversation.projectId) return;
+    const ids = messagesByProjectId.get(conversation.projectId) ?? new Set<string>();
+    conversation.messages.forEach((message) => ids.add(message.id));
+    messagesByProjectId.set(conversation.projectId, ids);
+  });
+  return { conversationById, messagesByProjectId };
+}
+
+function normalizeArtifactRevision(
+  value: unknown,
+  label: string,
+  fallbackCreatedAt: number,
+  messageIds: Set<string>
+): WorkspaceArtifactRevision | undefined {
+  if (!isRecord(value)) {
+    throw shapeError(`${label} 必须是对象。`);
+  }
+  const id = validWorkspaceEntityId(value.id);
+  if (!id || typeof value.content !== 'string') {
+    return undefined;
+  }
+  const sourceMessageId = validWorkspaceEntityId(value.sourceMessageId);
+  return {
+    id,
+    content: boundedCharacters(value.content, MAX_WORKSPACE_ARTIFACT_CONTENT_LENGTH),
+    createdAt: finiteNumber(value.createdAt, fallbackCreatedAt),
+    author: value.author === 'assistant' ? 'assistant' : 'user',
+    ...(sourceMessageId && messageIds.has(sourceMessageId) ? { sourceMessageId } : {}),
+  };
+}
+
+function normalizeArtifacts(
+  value: unknown,
+  projects: WorkspaceProject[],
+  conversations: ChatConversation[],
+  now: number
+): WorkspaceArtifact[] {
+  if (value === undefined) {
+    return [];
+  }
+  const projectIds = new Set(projects.map((project) => project.id));
+  const { conversationById, messagesByProjectId } = messageLookup(conversations);
+  const seenArtifactIds = new Set<string>();
+  const normalized = arrayField(value, 'artifacts').slice(0, MAX_WORKSPACE_ARTIFACTS).flatMap((candidate, index) => {
+    if (!isRecord(candidate)) {
+      throw shapeError(`artifacts[${index}] 必须是对象。`);
+    }
+    const id = validWorkspaceEntityId(candidate.id);
+    const projectId = validWorkspaceEntityId(candidate.projectId);
+    if (!id || seenArtifactIds.has(id) || !projectId || !projectIds.has(projectId)) {
+      return [];
+    }
+    const createdAt = finiteNumber(candidate.createdAt, now);
+    const projectMessageIds = messagesByProjectId.get(projectId) ?? new Set<string>();
+    const seenRevisionIds = new Set<string>();
+    const revisions = arrayField(candidate.revisions, `artifacts[${index}].revisions`)
+      .slice(-MAX_WORKSPACE_ARTIFACT_REVISIONS)
+      .flatMap((revision, revisionIndex) => {
+        const normalized = normalizeArtifactRevision(
+          revision,
+          `artifacts[${index}].revisions[${revisionIndex}]`,
+          createdAt + revisionIndex,
+          projectMessageIds
+        );
+        if (!normalized || seenRevisionIds.has(normalized.id)) {
+          return [];
+        }
+        seenRevisionIds.add(normalized.id);
+        return [normalized];
+      });
+    if (!revisions.length) {
+      return [];
+    }
+    const format = typeof candidate.format === 'string' && artifactFormats.has(candidate.format as WorkspaceArtifactFormat)
+      ? (candidate.format as WorkspaceArtifactFormat)
+      : 'plain-text';
+    const requestedActiveRevisionId = validWorkspaceEntityId(candidate.activeRevisionId);
+    const activeRevisionId = requestedActiveRevisionId && seenRevisionIds.has(requestedActiveRevisionId)
+      ? requestedActiveRevisionId
+      : revisions[revisions.length - 1].id;
+    const requestedConversationId = validWorkspaceEntityId(candidate.sourceConversationId);
+    const sourceConversation = requestedConversationId
+      ? conversationById.get(requestedConversationId)
+      : undefined;
+    const sourceConversationId = sourceConversation?.projectId === projectId
+      ? sourceConversation.id
+      : undefined;
+    const requestedMessageId = validWorkspaceEntityId(candidate.sourceMessageId);
+    const sourceMessageId = requestedMessageId && (
+      sourceConversationId
+        ? sourceConversation!.messages.some((message) => message.id === requestedMessageId)
+        : projectMessageIds.has(requestedMessageId)
+    )
+      ? requestedMessageId
+      : undefined;
+    seenArtifactIds.add(id);
+    return [{
+      id,
+      projectId,
+      title: nonEmptyString(candidate.title)
+        ? boundedCharacters(nonEmptyString(candidate.title)!, MAX_WORKSPACE_ARTIFACT_TITLE_LENGTH)
+        : `成果 ${index + 1}`,
+      format,
+      ...(nonEmptyString(candidate.language)
+        ? { language: boundedCharacters(nonEmptyString(candidate.language)!, MAX_WORKSPACE_ARTIFACT_LANGUAGE_LENGTH) }
+        : {}),
+      revisions,
+      activeRevisionId,
+      ...(sourceConversationId ? { sourceConversationId } : {}),
+      ...(sourceMessageId ? { sourceMessageId } : {}),
+      createdAt,
+      updatedAt: finiteNumber(candidate.updatedAt, createdAt),
+    }];
+  });
+  if (workspaceArtifactContentBytes(normalized) > MAX_WORKSPACE_ARTIFACT_TOTAL_BYTES) {
+    throw new PersistedWorkspaceBudgetError(
+      `成果全部版本正文超过 ${MAX_WORKSPACE_ARTIFACT_TOTAL_BYTES} UTF-8 字节；拒绝静默删除任何成果。`
+    );
+  }
+  return normalized;
+}
+
+function normalizeKnowledgeSources(
+  value: unknown,
+  projects: WorkspaceProject[],
+  artifacts: WorkspaceArtifact[],
+  conversations: ChatConversation[],
+  now: number
+): ProjectKnowledgeSource[] {
+  if (value === undefined) {
+    return [];
+  }
+  const projectIds = new Set(projects.map((project) => project.id));
+  const artifactById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
+  const { conversationById, messagesByProjectId } = messageLookup(conversations);
+  const seen = new Set<string>();
+  const normalized = arrayField(value, 'knowledgeSources').slice(0, MAX_PROJECT_KNOWLEDGE_SOURCES).flatMap((candidate, index) => {
+    if (!isRecord(candidate)) {
+      throw shapeError(`knowledgeSources[${index}] 必须是对象。`);
+    }
+    const id = validWorkspaceEntityId(candidate.id);
+    const projectId = validWorkspaceEntityId(candidate.projectId);
+    if (!id || seen.has(id) || !projectId || !projectIds.has(projectId) || typeof candidate.content !== 'string') {
+      return [];
+    }
+    const kind = typeof candidate.kind === 'string' && knowledgeKinds.has(candidate.kind as ProjectKnowledgeKind)
+      ? (candidate.kind as ProjectKnowledgeKind)
+      : 'text';
+    const projectMessageIds = messagesByProjectId.get(projectId) ?? new Set<string>();
+    const requestedArtifactId = validWorkspaceEntityId(candidate.sourceArtifactId);
+    const sourceArtifactId = requestedArtifactId && artifactById.get(requestedArtifactId)?.projectId === projectId
+      ? requestedArtifactId
+      : undefined;
+    const requestedConversationId = validWorkspaceEntityId(candidate.sourceConversationId);
+    const sourceConversation = requestedConversationId
+      ? conversationById.get(requestedConversationId)
+      : undefined;
+    const sourceConversationId = sourceConversation?.projectId === projectId
+      ? sourceConversation.id
+      : undefined;
+    const requestedMessageId = validWorkspaceEntityId(candidate.sourceMessageId);
+    const sourceMessageId = requestedMessageId && (
+      sourceConversationId
+        ? sourceConversation!.messages.some((message) => message.id === requestedMessageId)
+        : projectMessageIds.has(requestedMessageId)
+    )
+      ? requestedMessageId
+      : undefined;
+    const createdAt = finiteNumber(candidate.createdAt, now);
+    seen.add(id);
+    return [{
+      id,
+      projectId,
+      title: nonEmptyString(candidate.title)
+        ? boundedCharacters(nonEmptyString(candidate.title)!, MAX_PROJECT_KNOWLEDGE_TITLE_CHARACTERS)
+        : `资料 ${index + 1}`,
+      kind,
+      content: boundedCharacters(candidate.content, MAX_PROJECT_KNOWLEDGE_SOURCE_CHARACTERS),
+      ...(nonEmptyString(candidate.mimeType)
+        ? { mimeType: boundedCharacters(nonEmptyString(candidate.mimeType)!, MAX_PROJECT_KNOWLEDGE_MIME_TYPE_CHARACTERS) }
+        : {}),
+      ...(nonEmptyString(candidate.fileName)
+        ? { fileName: boundedCharacters(nonEmptyString(candidate.fileName)!, MAX_PROJECT_KNOWLEDGE_FILE_NAME_CHARACTERS) }
+        : {}),
+      ...(sourceArtifactId ? { sourceArtifactId } : {}),
+      ...(sourceConversationId ? { sourceConversationId } : {}),
+      ...(sourceMessageId ? { sourceMessageId } : {}),
+      createdAt,
+      updatedAt: finiteNumber(candidate.updatedAt, createdAt),
+    }];
+  });
+  if (projectKnowledgeContentBytes(normalized) > MAX_PROJECT_KNOWLEDGE_TOTAL_BYTES) {
+    throw new PersistedWorkspaceBudgetError(
+      `项目资料正文超过 ${MAX_PROJECT_KNOWLEDGE_TOTAL_BYTES} UTF-8 字节；拒绝静默删除任何资料。`
+    );
+  }
+  return normalized;
+}
+
+function normalizeConversationKnowledgeRefs(
+  conversations: ChatConversation[],
+  knowledgeSources: ProjectKnowledgeSource[]
+): ChatConversation[] {
+  const knowledgeById = new Map(knowledgeSources.map((source) => [source.id, source]));
+  return conversations.map((conversation) => {
+    const knowledgeSourceIds = Array.from(new Set(conversation.knowledgeSourceIds ?? []))
+      .filter((id) => knowledgeById.get(id)?.projectId === conversation.projectId)
+      .slice(0, MAX_PROJECT_KNOWLEDGE_CONTEXT_SOURCES);
+    return {
+      ...conversation,
+      ...(knowledgeSourceIds.length ? { knowledgeSourceIds } : { knowledgeSourceIds: undefined }),
+    };
+  });
 }
 
 function normalizeConversationStructure(
@@ -967,7 +1284,7 @@ function normalizeComparisonTargets(value: unknown, providers: ProviderProfile[]
     }
     const provider = providers.find((candidate) => candidate.id === normalized.providerId)!;
     const model = provider.models.find((candidate) => candidate.id === normalized.modelId)!;
-    const key = `${normalized.providerId}:${normalized.modelId}`;
+    const key = providerModelIdentityKey(normalized.providerId, normalized.modelId);
     if (seen.has(key) || inferModelTask(model) !== 'chat') {
       return [];
     }
@@ -989,7 +1306,7 @@ function normalizeModelPricing(value: unknown, providers: ProviderProfile[]): Mo
     if (!target || !currency) {
       return [];
     }
-    const key = `${target.providerId}:${target.modelId}:${currency}`;
+    const key = providerModelCurrencyIdentityKey(target.providerId, target.modelId, currency);
     if (seen.has(key)) {
       return [];
     }
@@ -1238,7 +1555,16 @@ function normalizeWorkspace(snapshot: Record<string, unknown>, providers: Provid
     return { ...provider, models: addedModels };
   });
   const projects = normalizeProjects(snapshot.projects, normalizedProviders, now);
-  const conversations = normalizeConversationStructure(normalizeConversations(snapshot, now), projects);
+  const structuredConversations = normalizeConversationStructure(normalizeConversations(snapshot, now), projects);
+  const artifacts = normalizeArtifacts(snapshot.artifacts, projects, structuredConversations, now);
+  const knowledgeSources = normalizeKnowledgeSources(
+    snapshot.knowledgeSources,
+    projects,
+    artifacts,
+    structuredConversations,
+    now
+  );
+  const conversations = normalizeConversationKnowledgeRefs(structuredConversations, knowledgeSources);
   const requestedConversationId = nonEmptyString(snapshot.activeConversationId);
   const activeConversationId = conversations.some((conversation) => conversation.id === requestedConversationId)
     ? requestedConversationId!
@@ -1260,6 +1586,8 @@ function normalizeWorkspace(snapshot: Record<string, unknown>, providers: Provid
     modelCandidatesByProvider,
     activeProjectId,
     projects,
+    artifacts,
+    knowledgeSources,
     activeConversationId,
     conversations,
     messages: activeConversation.messages,
@@ -1531,7 +1859,7 @@ function decodeWorkspace(raw: string): DecodedWorkspace {
   }
 
   if (parsed.schemaVersion !== undefined) {
-    if (![2, 3, STORAGE_SCHEMA_VERSION].includes(parsed.schemaVersion as number)) {
+    if (![2, 3, 4, STORAGE_SCHEMA_VERSION].includes(parsed.schemaVersion as number)) {
       throw shapeError(`不支持 schemaVersion=${String(parsed.schemaVersion)}。`);
     }
     if (!isRecord(parsed.workspace)) {
@@ -1632,6 +1960,13 @@ export async function loadWorkspace(): Promise<AppWorkspace | null> {
     const normalizedError = error instanceof Error ? error : new Error(String(error));
     await preserveFailedSnapshot(sourceKey, raw, normalizedError);
 
+    if (normalizedError instanceof PersistedWorkspaceBudgetError) {
+      loadFailure = normalizedError;
+      throw new Error(
+        `工作区加载失败，已进入只读恢复状态以保护超预算原始数据；自动保存已禁用。可以从 ${WORKSPACE_RECOVERY_KEY} 恢复。${normalizedError.message}`
+      );
+    }
+
     const backupKey = sourceKey === WORKSPACE_KEY
       ? WORKSPACE_BACKUP_KEY
       : LEGACY_WORKSPACE_BACKUPS[sourceKey as (typeof LEGACY_WORKSPACE_KEYS)[number]];
@@ -1670,11 +2005,14 @@ function stripPluginSecret(plugin: PluginManifest): PersistedPlugin {
 }
 
 function messagesForPersistence(messages: ChatMessage[]): ChatMessage[] {
-  return messages.map((message) =>
-    message.attachments?.length
-      ? { ...message, attachments: message.attachments.map(attachmentForPersistence) }
-      : message
-  );
+  return messages.map((message) => {
+    const normalized = message.excludedFromContext === true && message.pinnedForContext === true
+      ? { ...message, pinnedForContext: undefined }
+      : message;
+    return normalized.attachments?.length
+      ? { ...normalized, attachments: normalized.attachments.map(attachmentForPersistence) }
+      : normalized;
+  });
 }
 
 function persistedConversations(workspace: AppWorkspace): ChatConversation[] {
@@ -1691,6 +2029,9 @@ function persistedConversations(workspace: AppWorkspace): ChatConversation[] {
       : {}),
     ...(existing?.branchPointMessageId
       ? { branchPointMessageId: existing.branchPointMessageId }
+      : {}),
+    ...(existing?.knowledgeSourceIds?.length
+      ? { knowledgeSourceIds: [...existing.knowledgeSourceIds] }
       : {}),
     createdAt: existing?.createdAt ?? workspace.messages[0]?.createdAt ?? Date.now(),
     updatedAt: existing?.updatedAt ?? workspace.messages[workspace.messages.length - 1]?.createdAt ?? Date.now(),
@@ -1709,7 +2050,20 @@ function persistedConversations(workspace: AppWorkspace): ChatConversation[] {
 
 function createEnvelope(workspace: AppWorkspace, revision: number): PersistedWorkspaceEnvelope {
   const providers = workspace.providers.length ? workspace.providers : createDefaultWorkspace().providers;
-  const conversations = persistedConversations(workspace);
+  const projects = workspace.projects.map((project) => ({
+    ...project,
+    ...(project.defaultTarget ? { defaultTarget: { ...project.defaultTarget } } : {}),
+  }));
+  const persistedConversationList = persistedConversations(workspace);
+  const artifacts = normalizeArtifacts(workspace.artifacts, projects, persistedConversationList, Date.now());
+  const knowledgeSources = normalizeKnowledgeSources(
+    workspace.knowledgeSources,
+    projects,
+    artifacts,
+    persistedConversationList,
+    Date.now()
+  );
+  const conversations = normalizeConversationKnowledgeRefs(persistedConversationList, knowledgeSources);
   const activeProviderId = providers.some((provider) => provider.id === workspace.activeProviderId)
     ? workspace.activeProviderId
     : providers[0].id;
@@ -1727,10 +2081,9 @@ function createEnvelope(workspace: AppWorkspace, revision: number): PersistedWor
       activeProjectId: workspace.projects.some((project) => project.id === workspace.activeProjectId)
         ? workspace.activeProjectId
         : workspace.projects[0]?.id ?? 'project-default',
-      projects: workspace.projects.map((project) => ({
-        ...project,
-        ...(project.defaultTarget ? { defaultTarget: { ...project.defaultTarget } } : {}),
-      })),
+      projects,
+      artifacts,
+      knowledgeSources,
       activeConversationId: conversations.some((conversation) => conversation.id === workspace.activeConversationId)
         ? workspace.activeConversationId
         : conversations[0].id,
@@ -1806,34 +2159,60 @@ async function persistSecrets(providers: ProviderProfile[], plugins: PluginManif
 
 export function saveWorkspace(workspace: AppWorkspace): Promise<void> {
   if (loadFailure) {
-    return Promise.reject(blockedSaveError());
+    return Promise.reject(toWorkspaceSaveError(blockedSaveError(), 'before-public-commit'));
+  }
+  if (workspaceArtifactContentBytes(workspace.artifacts) > MAX_WORKSPACE_ARTIFACT_TOTAL_BYTES) {
+    return Promise.reject(toWorkspaceSaveError(
+      new Error('成果全部版本超过本机持久化预算，未写入任何工作区数据。'),
+      'before-public-commit'
+    ));
+  }
+  if (projectKnowledgeContentBytes(workspace.knowledgeSources) > MAX_PROJECT_KNOWLEDGE_TOTAL_BYTES) {
+    return Promise.reject(toWorkspaceSaveError(
+      new Error('项目资料正文超过本机持久化预算，未写入任何工作区数据。'),
+      'before-public-commit'
+    ));
   }
 
   const revision = requestedRevision + 1;
   requestedRevision = revision;
   const providers = workspace.providers.length ? workspace.providers : createDefaultWorkspace().providers;
-  const serialized = JSON.stringify(createEnvelope(workspace, revision));
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(createEnvelope(workspace, revision));
+  } catch (error) {
+    return Promise.reject(toWorkspaceSaveError(error, 'before-public-commit'));
+  }
   const queuedSave = saveQueue
     .catch(() => undefined)
     .then(async () => {
-      if (loadFailure) {
-        throw blockedSaveError();
+      let publicWorkspaceCommitted = false;
+      try {
+        if (loadFailure) {
+          throw blockedSaveError();
+        }
+        const previous = await AsyncStorage.getItem(WORKSPACE_KEY);
+        if (previous && previous !== serialized) {
+          await AsyncStorage.setItem(WORKSPACE_BACKUP_KEY, previous);
+        }
+        await AsyncStorage.setItem(WORKSPACE_KEY, serialized);
+        publicWorkspaceCommitted = true;
+        // Commit the versioned public configuration before mutating secrets. A
+        // workspace write failure therefore leaves the previous workspace and
+        // its credentials intact. If SecureStore fails afterward, this save
+        // still rejects, while binding fingerprints prevent the newly committed
+        // configuration from hydrating a stale credential on restart.
+        await persistSecrets(providers, workspace.plugins);
+        const referencedAttachments = persistedConversations(workspace).flatMap((conversation) =>
+          conversation.messages.flatMap((message) => message.attachments ?? [])
+        );
+        await flushPendingAttachmentDeletions(referencedAttachments);
+      } catch (error) {
+        throw toWorkspaceSaveError(
+          error,
+          publicWorkspaceCommitted ? 'after-public-commit' : 'before-public-commit'
+        );
       }
-      const previous = await AsyncStorage.getItem(WORKSPACE_KEY);
-      if (previous && previous !== serialized) {
-        await AsyncStorage.setItem(WORKSPACE_BACKUP_KEY, previous);
-      }
-      await AsyncStorage.setItem(WORKSPACE_KEY, serialized);
-      // Commit the versioned public configuration before mutating secrets. A
-      // workspace write failure therefore leaves the previous workspace and
-      // its credentials intact. If SecureStore fails afterward, this save
-      // still rejects, while binding fingerprints prevent the newly committed
-      // configuration from hydrating a stale credential on restart.
-      await persistSecrets(providers, workspace.plugins);
-      const referencedAttachments = persistedConversations(workspace).flatMap((conversation) =>
-        conversation.messages.flatMap((message) => message.attachments ?? [])
-      );
-      await flushPendingAttachmentDeletions(referencedAttachments);
     });
   saveQueue = queuedSave;
   return queuedSave;

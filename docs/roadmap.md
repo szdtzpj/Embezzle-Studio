@@ -56,9 +56,23 @@
 - evidence-backed capability matrix：服务商/模型声明与客户端真正实现并测试的协议能力分栏，不因目录标签自动启用网络路由。
 - local cost guard：发送前执行 output token cap、未知费用策略、多模型目标数和潜在多次收费确认；本地 attempt ledger 记录状态及已知/未知费用。每日 CNY/USD 阈值只在当天“已完成请求的已知累计”达到阈值后提醒/阻断下一次请求，不预测当前请求是否跨线，也不是服务商真实账单。
 
-当前开发目标为 `1.2.0` / code 8，公开 stable Latest 仍是 `v1.0.6`。Embezzle Studio 不购买、补贴或转售任何 API/搜索/语音/媒体额度，不运行生产 API、代理、汇率、同步、遥测或任务 worker；所有服务商调用与费用由用户账号承担。CNY/USD 不做汇率换算，未知费用不按 0 处理，`providerUsageEvents` 不进入外部导出备份。
+M2.6 对应的历史开发目标为 `1.2.0` / code 8；其本机候选未公开。Embezzle Studio 不购买、补贴或转售任何 API/搜索/语音/媒体额度，不运行生产 API、代理、汇率、同步、遥测或任务 worker；所有服务商调用与费用由用户账号承担。CNY/USD 不做汇率换算，未知费用不按 0 处理，`providerUsageEvents` 不进入外部导出备份。
 
 2026-07-11/12 当前证据：`npm.cmd run check` 通过 27 个测试文件 / 528 个测试，TypeScript 与 ESLint 零错误/警告；项目/分支/搜索、Endpoint/Key 重绑与百炼套餐阻断、声明能力和客户端能力分离、费用护栏/未知费用、端点绑定密钥的原子持久化、备份导入临界区及精确 output token 字段均有定向覆盖。Web export 通过（3,254 modules / 7.3 MB），390×844 浏览器覆盖项目创建/搜索/导航、Endpoint 改动清 Key、费用草稿与 v1.2.0，console 0 error / 0 warning；`expo install --check`、Expo Doctor 20/20、3 份 workflow YAML、35 个 Bash 块、16 个 Action 完整 SHA 与 `git diff --check` 均通过。干净 prebuild/`clean assembleRelease` 和正式证书本机签名通过；候选 `D:\EmbezzleStudio-Releases\v1.2.0-candidate\Embezzle-Studio-v1.2.0-candidate-release.apk` 为 97,313,239 字节，SHA-256 `872f32a48320f2a20dadee6fc0f699668666d067a60e546a19467ed922082da0`，版本 1.2.0/code 8、min/target 24/36、`allowBackup=false`、有意 `RECORD_AUDIO`、无 CAMERA/overlay，单一正式签名者、v2/v3 与 zipalign 通过。它未 push、tag、上传或发布。
+
+## M2.7 - Local Knowledge and Artifact Workbench
+
+- 项目成果：从消息捕获或创建 Markdown/纯文本/代码/JSON/HTML 成果，使用有上限的追加式版本、非破坏恢复、行级差异和当前版本导出。
+- 项目资料：手写文本、消息/成果快照及受支持的纯文本/代码文件导入；不解析 PDF、Office、OpenDocument、媒体、压缩包或可执行文件。
+- 本地检索：在本机对项目资料做有文档/分块/查询/结果上限的文字检索，不使用 embedding、远端索引或 Embezzle Studio 服务器，也不声称是向量 RAG。
+- 显式上下文：仅当前会话明确选择的资料可以进入请求；消息可按完整因果轮次排除/置顶，上下文检查器展示实际纳入/裁剪、保守 Token 估计及附件未知量。
+- 安全边界：不执行 HTML/代码，HTML 以 `.html.txt`/`text/plain` 惰性导出；资料标记为不可信引用但不承诺模型绝对抵抗提示注入，不做自动记忆、静默摘要或自动资料选择。压缩入口只生成可编辑提示草稿；用户之后用聊天模型手动发送时才使用其服务商账号、额度和费用护栏。
+- 性能/容量：资料搜索延迟构建有界本机索引，工作台/检查器/主聊天初始分页渲染；成果全部版本与资料正文分别有 2,000,000 UTF-8 字节累计上限。比较目标统一使用最小上下文窗口的一份请求内容，图片/视频生成只发送最新提示词。
+- 本地优先：成果、资料、检索、版本、差异、导出和预览无需 app-owned API、服务器、云同步或遥测；真正发送给模型时才消耗用户自己的 API。
+
+`1.3.0` / code 9 的最终本机质量门已完成：`npm.cmd run check` 通过 38 个测试文件 / 634 个测试，TypeScript/ESLint 干净；Web export 为 3,259 modules / 7.4 MB。全新 390×844 导出 Web 会话验证 HTML `.html.txt` 惰性导出与内容、成果版本历史、成果转资料、有界本地搜索、显式资料选择实际从 0 变为 1，以及上下文压缩只生成草稿而不发送；console 0 error / 0 warning，且没有非静态请求。`expo install --check`、Expo Doctor 20/20、3 份 YAML、35 个 Bash `bash -n`、16 个官方 Action 完整 SHA、diff/密钥边界检查均通过。最终审计还覆盖保守 Unicode/emoji Token 门槛、ID/Unicode 往返、聚合预算 fail-closed、备份大小/Endpoint 密钥拒绝和原子导入。
+
+干净 prebuild、`clean assembleRelease` 与正式证书本机签名通过。候选 `D:\EmbezzleStudio-Releases\v1.3.0-candidate\Embezzle-Studio-v1.3.0-candidate-release.apk` 为 97,448,407 字节，SHA-256 `c95dafe6e6eb77f3a1a4c7504c6ad05c27218b45972de2e247db264ec4c777d4`；包名/版本/code 为 `com.szdtzpj.embezzlestudio` / 1.3.0 / 9，min/target 24/36，`allowBackup=false`，有意 `RECORD_AUDIO`，无 CAMERA/`SYSTEM_ALERT_WINDOW`。只有一个预期正式签名者，证书 SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`，v2/v3 与 zipalign 通过。`adb devices -l` 为空，未做本轮 Android 真机或真实服务商账号验收；也未 push、tag、上传、创建 GitHub Release、更新 Pages 或公开 APK。公开 stable Latest 仍是 `v1.0.6`，详细契约见 [Local Knowledge and Artifact Workbench](./local-knowledge-workbench.md)。
 
 ## M3 - Plugins and MCP
 

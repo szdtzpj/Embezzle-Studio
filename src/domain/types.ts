@@ -113,6 +113,47 @@ export interface WorkspaceProject {
   updatedAt: number;
 }
 
+export type WorkspaceArtifactFormat = 'markdown' | 'plain-text' | 'code' | 'json' | 'html';
+
+export interface WorkspaceArtifactRevision {
+  id: string;
+  content: string;
+  createdAt: number;
+  author: 'user' | 'assistant';
+  sourceMessageId?: string;
+}
+
+export interface WorkspaceArtifact {
+  id: string;
+  projectId: string;
+  title: string;
+  format: WorkspaceArtifactFormat;
+  language?: string;
+  revisions: WorkspaceArtifactRevision[];
+  activeRevisionId: string;
+  sourceConversationId?: string;
+  sourceMessageId?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type ProjectKnowledgeKind = 'text' | 'artifact' | 'message' | 'file';
+
+export interface ProjectKnowledgeSource {
+  id: string;
+  projectId: string;
+  title: string;
+  kind: ProjectKnowledgeKind;
+  content: string;
+  mimeType?: string;
+  fileName?: string;
+  sourceArtifactId?: string;
+  sourceConversationId?: string;
+  sourceMessageId?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export type ProviderUsageKind =
   | 'chat'
   | 'web-search'
@@ -240,6 +281,8 @@ export interface ChatMessage {
   projectInstructionId?: string;
   comparisonGroupId?: string;
   selectedForContext?: boolean;
+  excludedFromContext?: boolean;
+  pinnedForContext?: boolean;
   requestMetrics?: RequestMetrics;
   costEstimate?: CostEstimate;
   generationTask?: GenerationTaskInfo;
@@ -257,6 +300,7 @@ export interface ChatConversation {
   projectId?: string;
   parentConversationId?: string;
   branchPointMessageId?: string;
+  knowledgeSourceIds?: string[];
   createdAt: number;
   updatedAt: number;
   messages: ChatMessage[];
@@ -286,6 +330,8 @@ export interface AppWorkspace {
   modelCandidatesByProvider: Record<string, ModelInfo[]>;
   activeProjectId: string;
   projects: WorkspaceProject[];
+  artifacts: WorkspaceArtifact[];
+  knowledgeSources: ProjectKnowledgeSource[];
   activeConversationId: string;
   conversations: ChatConversation[];
   messages: ChatMessage[];
