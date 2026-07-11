@@ -131,6 +131,16 @@ function populatedWorkspace(): AppWorkspace {
         updatedAt: 100,
       },
     ],
+    providerUsageEvents: [{
+      id: 'source-device-ledger-event',
+      kind: 'chat',
+      status: 'succeeded',
+      providerId: primary.id,
+      modelId: 'source-model',
+      createdAt: 100,
+      localDateKey: '2026-07-10',
+      unknownCostComponents: ['provider-surcharge'],
+    }],
   };
 }
 
@@ -153,6 +163,23 @@ function currentWorkspaceWithLocalSecrets(): AppWorkspace {
         authorization: 'CURRENT-DEVICE-MATCHING-PLUGIN-AUTH',
       }),
     ],
+    providerUsageEvents: [{
+      id: 'current-device-ledger-event',
+      kind: 'chat',
+      status: 'succeeded',
+      providerId: current.providers[0].id,
+      modelId: 'current-model',
+      createdAt: 200,
+      completedAt: 201,
+      localDateKey: '2026-07-11',
+      knownCostEstimate: {
+        amount: 0.25,
+        currency: 'CNY',
+        source: 'user-configured',
+        pricingUpdatedAt: 199,
+      },
+      unknownCostComponents: [],
+    }],
   };
 }
 
@@ -188,6 +215,39 @@ async function encryptPlainEnvelope(envelope: WorkspaceBackupEnvelope): Promise<
   }
 }
 
+function envelopeWithValidBranch(): WorkspaceBackupEnvelope {
+  const workspace = createDefaultWorkspace();
+  const rootPoint: ChatMessage = {
+    id: 'root-branch-point',
+    role: 'user',
+    content: 'branch here',
+    createdAt: 2,
+    status: 'ready',
+  };
+  const childMessage: ChatMessage = {
+    id: 'child-message',
+    role: 'assistant',
+    content: 'child',
+    createdAt: 3,
+    status: 'ready',
+  };
+  workspace.messages = [...workspace.messages, rootPoint];
+  workspace.conversations = [
+    { ...workspace.conversations[0], messages: workspace.messages },
+    {
+      id: 'child-conversation',
+      title: 'Child',
+      projectId: workspace.activeProjectId,
+      parentConversationId: workspace.activeConversationId,
+      branchPointMessageId: rootPoint.id,
+      createdAt: 3,
+      updatedAt: 3,
+      messages: [childMessage],
+    },
+  ];
+  return createWorkspaceBackupEnvelope(workspace, 1_700_000_000_000);
+}
+
 describe('workspace backup sanitization', () => {
   it('removes every structured secret and all attachment data while retaining text and task metadata', () => {
     const safe = sanitizeWorkspaceForBackup(populatedWorkspace());
@@ -203,6 +263,8 @@ describe('workspace backup sanitization', () => {
     expect(serialized).not.toContain('"apiKey":');
     expect(serialized).not.toContain('"authorization":');
     expect(serialized).not.toContain('"attachments":');
+    expect(serialized).not.toContain('providerUsageEvents');
+    expect(serialized).not.toContain('source-device-ledger-event');
 
     const message = safe.conversations[0].messages[0];
     expect(message.content).toBe('视频生成任务已提交');
@@ -272,6 +334,14 @@ describe('encrypted workspace backup round trip', () => {
       expect(imported.messages[0]).not.toHaveProperty('attachments');
       expect(imported.messages[0].generationTask).toMatchObject({ taskId: 'cgt-task-123' });
       expect(imported.promptTemplates[0].content).toBe('请翻译 {{text}}');
+      expect(imported.providerUsageEvents).toEqual(current.providerUsageEvents);
+      expect(imported.providerUsageEvents).not.toBe(current.providerUsageEvents);
+      expect(imported.providerUsageEvents[0].knownCostEstimate).not.toBe(
+        current.providerUsageEvents[0].knownCostEstimate
+      );
+      expect(imported.providerUsageEvents[0].unknownCostComponents).not.toBe(
+        current.providerUsageEvents[0].unknownCostComponents
+      );
       expect(current.providers[0].apiKey).toBe('CURRENT-DEVICE-API-KEY');
     } finally {
       vi.unstubAllGlobals();
@@ -295,6 +365,30 @@ describe('encrypted workspace backup round trip', () => {
 
     expect(imported.providers[0]).not.toHaveProperty('apiKey');
     expect(imported.plugins.find((item) => item.id === 'plugin-shared')).not.toHaveProperty('authorization');
+  }, 20_000);
+
+  it('imports an older v1 backup without project or cost-guard fields and retains the device ledger', async () => {
+    const envelope = createWorkspaceBackupEnvelope(populatedWorkspace(), 1_700_000_000_000);
+    delete envelope.workspace.projects;
+    delete envelope.workspace.activeProjectId;
+    delete envelope.workspace.costGuard;
+    envelope.workspace.conversations = envelope.workspace.conversations.map((conversation) => {
+      const legacy = { ...conversation };
+      delete legacy.projectId;
+      delete legacy.parentConversationId;
+      delete legacy.branchPointMessageId;
+      return legacy;
+    });
+    const current = currentWorkspaceWithLocalSecrets();
+    const encrypted = await encryptPlainEnvelope(envelope);
+
+    const imported = await importEncryptedWorkspaceBackup(encrypted, password, current);
+
+    expect(imported.projects).toHaveLength(1);
+    expect(imported.activeProjectId).toBe(imported.projects[0].id);
+    expect(imported.conversations.every((conversation) => conversation.projectId === imported.activeProjectId)).toBe(true);
+    expect(imported.costGuard).toMatchObject({ enabled: false, maxOutputTokens: 4096 });
+    expect(imported.providerUsageEvents).toEqual(current.providerUsageEvents);
   }, 20_000);
 });
 
@@ -406,9 +500,67 @@ describe('strict backup validation', () => {
     Object.assign(attachment.workspace.conversations[0].messages[0], { attachments: [] });
     expect(() => validateWorkspaceBackupEnvelope(attachment)).toThrow(/attachments/);
 
+    const localLedger = structuredClone(base) as WorkspaceBackupEnvelope;
+    Object.assign(localLedger.workspace, { providerUsageEvents: [] });
+    expect(() => validateWorkspaceBackupEnvelope(localLedger)).toThrow(/providerUsageEvents/);
+
     const unsafeEndpoint = structuredClone(base) as WorkspaceBackupEnvelope;
     unsafeEndpoint.workspace.plugins[1].endpoint = 'https://example.com/rpc?token=secret';
     expect(() => validateWorkspaceBackupEnvelope(unsafeEndpoint)).toThrow(/endpoint/);
+  });
+
+  it.each([
+    ['missing branch point', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.conversations[1].branchPointMessageId = 'missing-message';
+    }],
+    ['welcome branch point', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.conversations[1].branchPointMessageId = 'welcome';
+    }],
+    ['parent cycle', (envelope: WorkspaceBackupEnvelope) => {
+      const root = envelope.workspace.conversations[0];
+      root.parentConversationId = envelope.workspace.conversations[1].id;
+      root.branchPointMessageId = 'child-message';
+    }],
+    ['cross-project parent', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.projects!.push({
+        id: 'second-project',
+        name: 'Second',
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      envelope.workspace.conversations[1].projectId = 'second-project';
+    }],
+  ])('rejects a branch with %s', (_kind, mutate) => {
+    const envelope = envelopeWithValidBranch();
+    mutate(envelope);
+
+    expect(() => validateWorkspaceBackupEnvelope(envelope)).toThrow(WorkspaceBackupError);
+  });
+
+  it('rejects a project default model target that is not present in the provider catalog', () => {
+    const envelope = createWorkspaceBackupEnvelope(createDefaultWorkspace(), 1_700_000_000_000);
+    envelope.workspace.projects![0].defaultTarget = {
+      providerId: envelope.workspace.providers[0].id,
+      modelId: 'missing-model',
+    };
+
+    expect(() => validateWorkspaceBackupEnvelope(envelope)).toThrow(/defaultTarget/);
+  });
+
+  it.each([
+    ['maxOutputTokens', 63],
+    ['maxOutputTokens', 131_073],
+    ['maxOutputTokens', 64.5],
+    ['dailyRequestLimit', -1],
+    ['dailyRequestLimit', 10_001],
+    ['dailyRequestLimit', 1.5],
+    ['dailyCnyBudget', -1],
+    ['dailyUsdBudget', 1_000_000_001],
+  ] as const)('rejects an out-of-range cost guard %s value', (field, value) => {
+    const envelope = createWorkspaceBackupEnvelope(createDefaultWorkspace(), 1_700_000_000_000);
+    Object.assign(envelope.workspace.costGuard!, { [field]: value });
+
+    expect(() => validateWorkspaceBackupEnvelope(envelope)).toThrow(new RegExp(field));
   });
 
   it.each([

@@ -324,6 +324,72 @@ describe('aggregateUsage', () => {
     ]);
   });
 
+  it('deduplicates inherited branch usage without swallowing an unrelated reused message ID', () => {
+    const source = assistant('shared-answer', {
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    });
+    const branchCopy = assistant('branch-answer', {
+      originMessageId: 'shared-answer',
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    });
+    const nestedCopy = assistant('nested-answer', {
+      originMessageId: 'shared-answer',
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    });
+    const unrelated = assistant('shared-answer', {
+      providerId: 'provider-b',
+      providerName: 'Provider B',
+      modelId: 'model-b',
+      usage: { inputTokens: 3, outputTokens: 2, totalTokens: 5 },
+    });
+    const root = conversation('root', [source]);
+    const branch = {
+      ...conversation('branch', [branchCopy]),
+      parentConversationId: root.id,
+      branchPointMessageId: source.id,
+    };
+    const nested = {
+      ...conversation('nested', [nestedCopy]),
+      parentConversationId: branch.id,
+      branchPointMessageId: branchCopy.id,
+    };
+
+    const result = aggregateUsage([branch, nested, root, conversation('unrelated', [unrelated])]);
+
+    expect(result.totals).toMatchObject({
+      requestCount: 2,
+      inputTokens: 13,
+      outputTokens: 7,
+      totalTokens: 20,
+    });
+    expect(result.byProviderModel.map((group) => [group.providerId, group.requestCount])).toEqual([
+      ['provider-a', 1],
+      ['provider-b', 1],
+    ]);
+  });
+
+  it('counts ordinary same-ID messages in separate conversations independently', () => {
+    const result = aggregateUsage([
+      conversation('one', [
+        assistant('legacy-collision', {
+          usage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 },
+        }),
+      ]),
+      conversation('two', [
+        assistant('legacy-collision', {
+          usage: { inputTokens: 4, outputTokens: 3, totalTokens: 7 },
+        }),
+      ]),
+    ]);
+
+    expect(result.totals).toMatchObject({
+      requestCount: 2,
+      inputTokens: 6,
+      outputTokens: 4,
+      totalTokens: 10,
+    });
+  });
+
   it('marks incomplete user pricing as unknown rather than trusting message snapshots', () => {
     const message = assistant('a1', {
       usage: { inputTokens: 10, outputTokens: 5 },

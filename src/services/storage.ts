@@ -3,7 +3,11 @@ import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from '../data/arkModels';
-import { createDefaultWorkspace, defaultParameterSettings } from '../data/providerCatalog';
+import {
+  createDefaultWorkspace,
+  defaultCostGuardSettings,
+  defaultParameterSettings,
+} from '../data/providerCatalog';
 import type {
   AppWorkspace,
   AttachmentKind,
@@ -12,6 +16,7 @@ import type {
   ChatMessage,
   ChatTokenUsage,
   CostEstimate,
+  CostGuardSettings,
   MediaAttachment,
   ModelPricing,
   ModelInfo,
@@ -23,25 +28,36 @@ import type {
   PromptTemplate,
   ProviderKind,
   ProviderProfile,
+  ProviderUsageEvent,
+  ProviderUsageKind,
   RequestMetrics,
   ReasoningEffort,
+  UnknownCostComponent,
   VoiceSettings,
   WebCitation,
   WebSearchSettings,
+  WorkspaceProject,
 } from '../domain/types';
 import { createModelInfoFromId, inferModelTask } from './modelCapabilities';
 import { attachmentForPersistence, flushPendingAttachmentDeletions } from './mediaStorage';
+import { providerEndpointFingerprint } from './providerSetup';
 
-const LEGACY_WORKSPACE_KEYS = ['@embezzle-studio/workspace-v2', '@embezzle-studio/workspace-v1'] as const;
+const LEGACY_WORKSPACE_KEYS = [
+  '@embezzle-studio/workspace-v3',
+  '@embezzle-studio/workspace-v2',
+  '@embezzle-studio/workspace-v1',
+] as const;
 const LEGACY_WORKSPACE_BACKUPS: Partial<Record<(typeof LEGACY_WORKSPACE_KEYS)[number], string>> = {
+  '@embezzle-studio/workspace-v3': '@embezzle-studio/workspace-v3.backup',
   '@embezzle-studio/workspace-v2': '@embezzle-studio/workspace-v2.backup',
 };
-const WORKSPACE_KEY = '@embezzle-studio/workspace-v3';
-const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v3.backup';
-const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v3';
+const WORKSPACE_KEY = '@embezzle-studio/workspace-v4';
+const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v4.backup';
+const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v4';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
 const PLUGIN_SECRET_PREFIX = 'embezzle-studio.plugin-authorization';
-const STORAGE_SCHEMA_VERSION = 3;
+const BOUND_SECRET_SCHEMA_VERSION = 1;
+const STORAGE_SCHEMA_VERSION = 4;
 const INTERRUPTED_MESSAGE = '上次请求在应用退出前未完成，已标记为中断。';
 
 const providerKinds = new Set<ProviderKind>([
@@ -93,6 +109,14 @@ const pluginPermissions = new Set<PluginManifest['permissions'][number]>(['netwo
 const pricingCurrencies = new Set<PricingCurrency>(['CNY', 'USD']);
 const speechFormats = new Set<VoiceSettings['speechFormat']>(['mp3', 'opus', 'aac', 'wav']);
 const searchContextSizes = new Set<WebSearchSettings['searchContextSize']>(['low', 'medium', 'high']);
+const providerUsageKinds = new Set<ProviderUsageKind>([
+  'chat',
+  'web-search',
+  'image-generation',
+  'video-generation',
+  'audio-transcription',
+  'speech-generation',
+]);
 
 type PersistedProvider = Omit<ProviderProfile, 'apiKey'>;
 type PersistedPlugin = Omit<PluginManifest, 'authorization'>;
@@ -113,13 +137,19 @@ interface DecodedWorkspace {
   snapshot: Record<string, unknown>;
 }
 
+interface BoundSecretEnvelope {
+  schemaVersion: typeof BOUND_SECRET_SCHEMA_VERSION;
+  bindingFingerprint: string;
+  secret: string;
+}
+
 let secureStoreAvailable = false;
 let loadFailure: Error | null = null;
 let recoveryNotice: string | null = null;
 let saveQueue: Promise<void> = Promise.resolve();
 let requestedRevision = 0;
-const secretValues = new Map<string, string | undefined>();
-const pluginSecretValues = new Map<string, string | undefined>();
+const secretValues = new Map<string, BoundSecretEnvelope | undefined>();
+const pluginSecretValues = new Map<string, BoundSecretEnvelope | undefined>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -527,6 +557,9 @@ function normalizeMessage(value: unknown, label: string, fallbackCreatedAt: numb
 
   return {
     id: nonEmptyString(value.id) ?? label.replace(/[^A-Za-z0-9]+/g, '-'),
+    ...(nonEmptyString(value.originMessageId)
+      ? { originMessageId: nonEmptyString(value.originMessageId) }
+      : {}),
     role,
     content: interrupted && !content.trim() ? INTERRUPTED_MESSAGE : content,
     createdAt: finiteNumber(value.createdAt, fallbackCreatedAt),
@@ -539,6 +572,9 @@ function normalizeMessage(value: unknown, label: string, fallbackCreatedAt: numb
       ? { webSearchTriggered: value.webSearchTriggered }
       : {}),
     ...(nonEmptyString(value.promptTemplateId) ? { promptTemplateId: nonEmptyString(value.promptTemplateId) } : {}),
+    ...(nonEmptyString(value.projectInstructionId)
+      ? { projectInstructionId: nonEmptyString(value.projectInstructionId) }
+      : {}),
     ...(generationTask ? { generationTask } : {}),
     ...(nonEmptyString(value.comparisonGroupId) ? { comparisonGroupId: nonEmptyString(value.comparisonGroupId) } : {}),
     ...(value.selectedForContext === true ? { selectedForContext: true } : {}),
@@ -579,6 +615,13 @@ function normalizeConversation(value: unknown, index: number, now: number): Chat
     title: nonEmptyString(value.title) ?? conversationTitle(messages),
     ...(value.customTitle === true ? { customTitle: true } : {}),
     ...(pinnedAt !== undefined ? { pinnedAt } : {}),
+    ...(nonEmptyString(value.projectId) ? { projectId: nonEmptyString(value.projectId) } : {}),
+    ...(nonEmptyString(value.parentConversationId)
+      ? { parentConversationId: nonEmptyString(value.parentConversationId) }
+      : {}),
+    ...(nonEmptyString(value.branchPointMessageId)
+      ? { branchPointMessageId: nonEmptyString(value.branchPointMessageId) }
+      : {}),
     createdAt,
     updatedAt: finiteNumber(value.updatedAt, createdAt),
     messages,
@@ -822,6 +865,99 @@ function normalizeModelTarget(
   return { providerId: provider.id, modelId };
 }
 
+function normalizeProjects(
+  value: unknown,
+  providers: ProviderProfile[],
+  now: number
+): WorkspaceProject[] {
+  const fallback = createDefaultWorkspace().projects[0];
+  if (value === undefined) {
+    return [{ ...fallback, createdAt: now, updatedAt: now }];
+  }
+  const seen = new Set<string>();
+  const projects = arrayField(value, 'projects').slice(0, 50).flatMap((candidate, index) => {
+    if (!isRecord(candidate)) {
+      throw shapeError(`projects[${index}] 必须是对象。`);
+    }
+    const id = nonEmptyString(candidate.id);
+    if (!id || !/^[A-Za-z0-9._-]+$/.test(id)) {
+      throw shapeError(`projects[${index}].id 无效。`);
+    }
+    if (seen.has(id)) {
+      throw shapeError(`projects 中存在重复 ID「${id}」。`);
+    }
+    seen.add(id);
+    const createdAt = finiteNumber(candidate.createdAt, now);
+    const defaultTarget = normalizeModelTarget(candidate.defaultTarget, providers);
+    return [{
+      id,
+      name: nonEmptyString(candidate.name)?.slice(0, 80) ?? `项目 ${index + 1}`,
+      ...(nonEmptyString(candidate.systemPrompt)
+        ? { systemPrompt: nonEmptyString(candidate.systemPrompt)!.slice(0, 20_000) }
+        : {}),
+      ...(defaultTarget ? { defaultTarget } : {}),
+      createdAt,
+      updatedAt: finiteNumber(candidate.updatedAt, createdAt),
+    }];
+  });
+  return projects.length ? projects : [{ ...fallback, createdAt: now, updatedAt: now }];
+}
+
+function normalizeConversationStructure(
+  conversations: ChatConversation[],
+  projects: WorkspaceProject[]
+): ChatConversation[] {
+  const projectIds = new Set(projects.map((project) => project.id));
+  const defaultProjectId = projects[0].id;
+  const projectNormalized = conversations.map((conversation) => ({
+    ...conversation,
+    projectId: conversation.projectId && projectIds.has(conversation.projectId)
+      ? conversation.projectId
+      : defaultProjectId,
+  }));
+  const conversationMap = new Map(
+    projectNormalized.map((conversation) => [conversation.id, conversation])
+  );
+  const normalized = projectNormalized.map((conversation) => {
+    const parent = conversation.parentConversationId
+      ? conversationMap.get(conversation.parentConversationId)
+      : undefined;
+    const branchPointValid = Boolean(
+      parent &&
+      parent.id !== conversation.id &&
+      parent.projectId === conversation.projectId &&
+      conversation.branchPointMessageId &&
+      conversation.branchPointMessageId !== 'welcome' &&
+      parent.messages.some((message) => message.id === conversation.branchPointMessageId)
+    );
+    return {
+      ...conversation,
+      ...(branchPointValid
+        ? {
+            parentConversationId: parent!.id,
+            branchPointMessageId: conversation.branchPointMessageId,
+          }
+        : {
+            parentConversationId: undefined,
+            branchPointMessageId: undefined,
+          }),
+    };
+  });
+  const byId = new Map(normalized.map((conversation) => [conversation.id, conversation]));
+  return normalized.map((conversation) => {
+    const visited = new Set([conversation.id]);
+    let parentId = conversation.parentConversationId;
+    while (parentId) {
+      if (visited.has(parentId)) {
+        return { ...conversation, parentConversationId: undefined, branchPointMessageId: undefined };
+      }
+      visited.add(parentId);
+      parentId = byId.get(parentId)?.parentConversationId;
+    }
+    return conversation;
+  });
+}
+
 function normalizeComparisonTargets(value: unknown, providers: ProviderProfile[]): ModelTargetRef[] {
   const seen = new Set<string>();
   return arrayField(value, 'comparisonTargets').slice(0, 4).flatMap((target, index) => {
@@ -910,6 +1046,179 @@ function normalizeVoiceSettings(value: unknown, providers: ProviderProfile[]): V
   };
 }
 
+function normalizeCostGuardSettings(value: unknown): CostGuardSettings {
+  const settings = value === undefined ? {} : recordField(value, 'costGuard');
+  const integer = (candidate: unknown, fallback: number, min: number, max: number) =>
+    Math.max(min, Math.min(max, Math.trunc(finiteNumber(candidate, fallback))));
+  const nonNegative = (candidate: unknown, fallback: number) =>
+    Math.max(0, Math.min(1_000_000_000, finiteNumber(candidate, fallback)));
+  const maxComparisonTargets = integer(
+    settings.maxComparisonTargets,
+    defaultCostGuardSettings.maxComparisonTargets,
+    2,
+    4
+  ) as CostGuardSettings['maxComparisonTargets'];
+  return {
+    enabled: settings.enabled === true,
+    maxOutputTokens: integer(
+      settings.maxOutputTokens,
+      defaultCostGuardSettings.maxOutputTokens,
+      64,
+      131_072
+    ),
+    maxComparisonTargets,
+    dailyRequestLimit: integer(
+      settings.dailyRequestLimit,
+      defaultCostGuardSettings.dailyRequestLimit,
+      0,
+      10_000
+    ),
+    dailyCnyBudget: nonNegative(settings.dailyCnyBudget, defaultCostGuardSettings.dailyCnyBudget),
+    dailyUsdBudget: nonNegative(settings.dailyUsdBudget, defaultCostGuardSettings.dailyUsdBudget),
+    limitAction: settings.limitAction === 'warn' ? 'warn' : 'block',
+    unknownCostAction: settings.unknownCostAction === 'block' ? 'block' : 'warn',
+    confirmPotentialMultipleCharges: settings.confirmPotentialMultipleCharges !== false,
+  };
+}
+
+function localDateKey(timestamp: number): string {
+  const date = new Date(timestamp);
+  const part = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${part(date.getMonth() + 1)}-${part(date.getDate())}`;
+}
+
+function validLocalDateKey(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function inferredUsageKind(message: ChatMessage): ProviderUsageKind {
+  if (message.generationTask?.kind === 'video' || message.attachments?.some((item) => item.kind === 'video')) {
+    return 'video-generation';
+  }
+  if (message.attachments?.some((item) => item.kind === 'image')) {
+    return 'image-generation';
+  }
+  return message.webSearchTriggered ? 'web-search' : 'chat';
+}
+
+function derivedProviderUsageEvents(conversations: ChatConversation[]): ProviderUsageEvent[] {
+  const seen = new Set<string>();
+  return conversations.flatMap((conversation) => conversation.messages.flatMap((message) => {
+    if (message.role !== 'assistant' || !message.providerId || !message.modelId || message.id === 'welcome') {
+      return [];
+    }
+    const canonicalId = message.originMessageId ?? message.id;
+    if (seen.has(canonicalId)) {
+      return [];
+    }
+    seen.add(canonicalId);
+    const kind = inferredUsageKind(message);
+    return [{
+      id: `migrated-${canonicalId}`,
+      kind,
+      status: message.status === 'cancelled'
+        ? 'cancelled' as const
+        : message.status === 'error'
+          ? 'failed' as const
+          : 'succeeded' as const,
+      providerId: message.providerId,
+      modelId: message.modelId,
+      createdAt: message.createdAt,
+      localDateKey: localDateKey(message.createdAt),
+      completedAt: message.createdAt,
+      messageId: canonicalId,
+      ...(message.comparisonGroupId ? { comparisonGroupId: message.comparisonGroupId } : {}),
+      ...(message.costEstimate ? { knownCostEstimate: { ...message.costEstimate } } : {}),
+      unknownCostComponents: [
+        ...(!message.costEstimate ? ['input-tokens', 'output-tokens'] as UnknownCostComponent[] : []),
+        ...(kind === 'web-search' ? ['web-search-tool'] as UnknownCostComponent[] : []),
+        ...(kind === 'image-generation' ? ['image-output'] as UnknownCostComponent[] : []),
+        ...(kind === 'video-generation' ? ['video-output'] as UnknownCostComponent[] : []),
+        ...(message.status === 'error' || message.status === 'cancelled'
+          ? ['failed-or-cancelled-request'] as UnknownCostComponent[]
+          : []),
+      ],
+    }];
+  }));
+}
+
+function normalizeProviderUsageEvents(
+  value: unknown,
+  conversations: ChatConversation[]
+): ProviderUsageEvent[] {
+  if (value === undefined) {
+    return derivedProviderUsageEvents(conversations).slice(-10_000);
+  }
+  const seen = new Set<string>();
+  return arrayField(value, 'providerUsageEvents').slice(-10_000).map((candidate, index) => {
+    if (!isRecord(candidate)) {
+      throw shapeError(`providerUsageEvents[${index}] 必须是对象。`);
+    }
+    const id = nonEmptyString(candidate.id);
+    const providerId = nonEmptyString(candidate.providerId);
+    const modelId = nonEmptyString(candidate.modelId);
+    const kind = typeof candidate.kind === 'string' && providerUsageKinds.has(candidate.kind as ProviderUsageKind)
+      ? candidate.kind as ProviderUsageKind
+      : undefined;
+    if (!id || !providerId || !modelId || !kind || seen.has(id)) {
+      throw shapeError(`providerUsageEvents[${index}] 缺少有效且唯一的字段。`);
+    }
+    seen.add(id);
+    const status = candidate.status === 'started' || candidate.status === 'succeeded' ||
+      candidate.status === 'failed' || candidate.status === 'cancelled'
+      ? candidate.status
+      : 'failed';
+    const knownCostEstimate = normalizeCostEstimate(
+      candidate.knownCostEstimate,
+      `providerUsageEvents[${index}].knownCostEstimate`
+    );
+    const unknownCostComponents = candidate.unknownCostComponents === undefined
+      ? []
+      : Array.from(new Set(
+          arrayField(candidate.unknownCostComponents, `providerUsageEvents[${index}].unknownCostComponents`)
+            .filter((component): component is UnknownCostComponent => typeof component === 'string' && [
+              'input-tokens',
+              'output-tokens',
+              'web-search-tool',
+              'speech',
+              'transcription',
+              'image-output',
+              'video-output',
+              'provider-surcharge',
+              'failed-or-cancelled-request',
+            ].includes(component))
+        ));
+    const createdAt = finiteNumber(candidate.createdAt, Date.now());
+    return {
+      id,
+      kind,
+      status,
+      providerId,
+      modelId,
+      createdAt,
+      localDateKey: validLocalDateKey(candidate.localDateKey)
+        ? candidate.localDateKey
+        : localDateKey(createdAt),
+      ...(optionalFiniteNumber(candidate.completedAt) !== undefined
+        ? { completedAt: optionalFiniteNumber(candidate.completedAt) }
+        : {}),
+      ...(nonEmptyString(candidate.messageId) ? { messageId: nonEmptyString(candidate.messageId) } : {}),
+      ...(nonEmptyString(candidate.comparisonGroupId)
+        ? { comparisonGroupId: nonEmptyString(candidate.comparisonGroupId) }
+        : {}),
+      ...(knownCostEstimate ? { knownCostEstimate } : {}),
+      unknownCostComponents,
+    };
+  });
+}
+
 function normalizeWorkspace(snapshot: Record<string, unknown>, providers: ProviderProfile[]): AppWorkspace {
   const now = Date.now();
   const modelCandidatesByProvider = normalizeModelCandidates(snapshot.modelCandidatesByProvider, providers);
@@ -928,12 +1237,14 @@ function normalizeWorkspace(snapshot: Record<string, unknown>, providers: Provid
     modelCandidatesByProvider[provider.id] = retainedCandidates;
     return { ...provider, models: addedModels };
   });
-  const conversations = normalizeConversations(snapshot, now);
+  const projects = normalizeProjects(snapshot.projects, normalizedProviders, now);
+  const conversations = normalizeConversationStructure(normalizeConversations(snapshot, now), projects);
   const requestedConversationId = nonEmptyString(snapshot.activeConversationId);
   const activeConversationId = conversations.some((conversation) => conversation.id === requestedConversationId)
     ? requestedConversationId!
     : conversations[0].id;
   const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId)!;
+  const activeProjectId = activeConversation.projectId ?? projects[0].id;
   const requestedProviderId = nonEmptyString(snapshot.activeProviderId);
   const activeProviderId = normalizedProviders.some((provider) => provider.id === requestedProviderId)
     ? requestedProviderId!
@@ -947,6 +1258,8 @@ function normalizeWorkspace(snapshot: Record<string, unknown>, providers: Provid
     reasoningEffortByModel: normalizeReasoningMap(snapshot.reasoningEffortByModel),
     parameterSettings: normalizeParameterSettings(snapshot.parameterSettings),
     modelCandidatesByProvider,
+    activeProjectId,
+    projects,
     activeConversationId,
     conversations,
     messages: activeConversation.messages,
@@ -955,6 +1268,8 @@ function normalizeWorkspace(snapshot: Record<string, unknown>, providers: Provid
     comparisonEnabled: snapshot.comparisonEnabled === true && comparisonTargets.length >= 2,
     comparisonTargets,
     modelPricing: normalizeModelPricing(snapshot.modelPricing, normalizedProviders),
+    costGuard: normalizeCostGuardSettings(snapshot.costGuard),
+    providerUsageEvents: normalizeProviderUsageEvents(snapshot.providerUsageEvents, conversations),
     webSearch: normalizeWebSearchSettings(snapshot.webSearch),
     voice: normalizeVoiceSettings(snapshot.voice, normalizedProviders),
   };
@@ -966,6 +1281,68 @@ function secretKey(providerId: string): string {
 
 function pluginSecretKey(pluginId: string): string {
   return `${PLUGIN_SECRET_PREFIX}.${pluginId}`;
+}
+
+function pluginBindingFingerprint(
+  plugin: Pick<PluginManifest, 'type' | 'transport' | 'endpoint'>
+): string | undefined {
+  if (plugin.type !== 'remote-mcp' || !plugin.endpoint) {
+    return undefined;
+  }
+  const endpoint = parseSafePublicHttpsUrl(plugin.endpoint.trim(), false);
+  if (!endpoint) {
+    return undefined;
+  }
+  return `${plugin.type}::${plugin.transport ?? 'unspecified'}::${endpoint.toString()}`;
+}
+
+function decodeBoundSecret(value: string | null): BoundSecretEnvelope | undefined {
+  if (!value) {
+    return undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (
+      !isRecord(parsed) ||
+      parsed.schemaVersion !== BOUND_SECRET_SCHEMA_VERSION ||
+      typeof parsed.bindingFingerprint !== 'string' ||
+      !parsed.bindingFingerprint ||
+      typeof parsed.secret !== 'string' ||
+      !parsed.secret
+    ) {
+      return undefined;
+    }
+    return {
+      schemaVersion: BOUND_SECRET_SCHEMA_VERSION,
+      bindingFingerprint: parsed.bindingFingerprint,
+      secret: parsed.secret,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function secretForBinding(
+  envelope: BoundSecretEnvelope | undefined,
+  bindingFingerprint: string | undefined
+): string | undefined {
+  return envelope && bindingFingerprint === envelope.bindingFingerprint
+    ? envelope.secret
+    : undefined;
+}
+
+function boundSecret(
+  bindingFingerprint: string | undefined,
+  secret: string
+): BoundSecretEnvelope {
+  if (!bindingFingerprint) {
+    throw new Error('无法把密钥安全绑定到无效或未完成的服务端配置。');
+  }
+  return {
+    schemaVersion: BOUND_SECRET_SCHEMA_VERSION,
+    bindingFingerprint,
+    secret,
+  };
 }
 
 function browserSessionStorage(): Storage | undefined {
@@ -995,11 +1372,12 @@ async function requireNativeSecureStore(): Promise<void> {
   secureStoreAvailable = true;
 }
 
-async function readSecret(providerId: string): Promise<string | undefined> {
-  if (secretValues.has(providerId)) {
-    return secretValues.get(providerId);
+async function readSecret(provider: Pick<ProviderProfile, 'id' | 'kind' | 'baseUrl'>): Promise<string | undefined> {
+  const bindingFingerprint = providerEndpointFingerprint(provider);
+  if (secretValues.has(provider.id)) {
+    return secretForBinding(secretValues.get(provider.id), bindingFingerprint);
   }
-  const key = secretKey(providerId);
+  const key = secretKey(provider.id);
   let value: string | null;
   if (Platform.OS === 'web') {
     const session = browserSessionStorage();
@@ -1009,29 +1387,51 @@ async function readSecret(providerId: string): Promise<string | undefined> {
       await AsyncStorage.removeItem(key);
       if (value === null) {
         value = legacyValue;
-        try {
-          session?.setItem(key, legacyValue);
-        } catch {
-          // Keep the migrated key in memory when sessionStorage is unavailable.
-        }
       }
     }
   } else {
     await requireNativeSecureStore();
     value = await SecureStore.getItemAsync(key);
   }
-  const normalized = value ?? undefined;
-  secretValues.set(providerId, normalized);
-  return normalized;
+  let envelope = decodeBoundSecret(value);
+  if (value !== null && !envelope && bindingFingerprint) {
+    // One-time v1.1 migration: the decoded workspace is the only persisted
+    // configuration available to bind against. Rewrite before returning so
+    // every subsequent hydrate can enforce an exact protocol/endpoint match.
+    await writeSecret(provider.id, bindingFingerprint, value);
+    envelope = secretValues.get(provider.id);
+  } else if (value !== null && !envelope) {
+    // Without a valid persisted binding, a legacy bare value cannot be safely
+    // attributed and must never be hydrated.
+    try {
+      if (Platform.OS === 'web') {
+        browserSessionStorage()?.removeItem(key);
+      } else {
+        await SecureStore.deleteItemAsync(key);
+      }
+    } catch {
+      // Cleanup is best-effort; an undecodable value is never returned.
+    }
+  }
+  secretValues.set(provider.id, envelope);
+  return secretForBinding(envelope, bindingFingerprint);
 }
 
-async function writeSecret(providerId: string, value?: string): Promise<void> {
+async function writeSecret(
+  providerId: string,
+  bindingFingerprint: string | undefined,
+  value?: string
+): Promise<void> {
   const key = secretKey(providerId);
+  const envelope = value
+    ? boundSecret(bindingFingerprint, value)
+    : undefined;
+  const serialized = envelope ? JSON.stringify(envelope) : undefined;
   if (Platform.OS === 'web') {
     const session = browserSessionStorage();
     try {
-      if (value) {
-        session?.setItem(key, value);
+      if (serialized) {
+        session?.setItem(key, serialized);
       } else {
         session?.removeItem(key);
       }
@@ -1042,20 +1442,23 @@ async function writeSecret(providerId: string, value?: string): Promise<void> {
     await AsyncStorage.removeItem(key);
   } else {
     await requireNativeSecureStore();
-    if (value) {
-      await SecureStore.setItemAsync(key, value);
+    if (serialized) {
+      await SecureStore.setItemAsync(key, serialized);
     } else {
       await SecureStore.deleteItemAsync(key);
     }
   }
-  secretValues.set(providerId, value);
+  secretValues.set(providerId, envelope);
 }
 
-async function readPluginSecret(pluginId: string): Promise<string | undefined> {
-  if (pluginSecretValues.has(pluginId)) {
-    return pluginSecretValues.get(pluginId);
+async function readPluginSecret(
+  plugin: Pick<PluginManifest, 'id' | 'type' | 'transport' | 'endpoint'>
+): Promise<string | undefined> {
+  const bindingFingerprint = pluginBindingFingerprint(plugin);
+  if (pluginSecretValues.has(plugin.id)) {
+    return secretForBinding(pluginSecretValues.get(plugin.id), bindingFingerprint);
   }
-  const key = pluginSecretKey(pluginId);
+  const key = pluginSecretKey(plugin.id);
   let value: string | null;
   if (Platform.OS === 'web') {
     value = browserSessionStorage()?.getItem(key) ?? null;
@@ -1064,18 +1467,40 @@ async function readPluginSecret(pluginId: string): Promise<string | undefined> {
     await requireNativeSecureStore();
     value = await SecureStore.getItemAsync(key);
   }
-  const normalized = value ?? undefined;
-  pluginSecretValues.set(pluginId, normalized);
-  return normalized;
+  let envelope = decodeBoundSecret(value);
+  if (value !== null && !envelope && bindingFingerprint) {
+    await writePluginSecret(plugin.id, bindingFingerprint, value);
+    envelope = pluginSecretValues.get(plugin.id);
+  } else if (value !== null && !envelope) {
+    try {
+      if (Platform.OS === 'web') {
+        browserSessionStorage()?.removeItem(key);
+      } else {
+        await SecureStore.deleteItemAsync(key);
+      }
+    } catch {
+      // Cleanup is best-effort; an undecodable value is never returned.
+    }
+  }
+  pluginSecretValues.set(plugin.id, envelope);
+  return secretForBinding(envelope, bindingFingerprint);
 }
 
-async function writePluginSecret(pluginId: string, value?: string): Promise<void> {
+async function writePluginSecret(
+  pluginId: string,
+  bindingFingerprint: string | undefined,
+  value?: string
+): Promise<void> {
   const key = pluginSecretKey(pluginId);
+  const envelope = value
+    ? boundSecret(bindingFingerprint, value)
+    : undefined;
+  const serialized = envelope ? JSON.stringify(envelope) : undefined;
   if (Platform.OS === 'web') {
     const session = browserSessionStorage();
     try {
-      if (value) {
-        session?.setItem(key, value);
+      if (serialized) {
+        session?.setItem(key, serialized);
       } else {
         session?.removeItem(key);
       }
@@ -1085,13 +1510,13 @@ async function writePluginSecret(pluginId: string, value?: string): Promise<void
     await AsyncStorage.removeItem(key);
   } else {
     await requireNativeSecureStore();
-    if (value) {
-      await SecureStore.setItemAsync(key, value);
+    if (serialized) {
+      await SecureStore.setItemAsync(key, serialized);
     } else {
       await SecureStore.deleteItemAsync(key);
     }
   }
-  pluginSecretValues.set(pluginId, value);
+  pluginSecretValues.set(pluginId, envelope);
 }
 
 function decodeWorkspace(raw: string): DecodedWorkspace {
@@ -1106,11 +1531,11 @@ function decodeWorkspace(raw: string): DecodedWorkspace {
   }
 
   if (parsed.schemaVersion !== undefined) {
-    if (parsed.schemaVersion !== 2 && parsed.schemaVersion !== STORAGE_SCHEMA_VERSION) {
+    if (![2, 3, STORAGE_SCHEMA_VERSION].includes(parsed.schemaVersion as number)) {
       throw shapeError(`不支持 schemaVersion=${String(parsed.schemaVersion)}。`);
     }
     if (!isRecord(parsed.workspace)) {
-      throw shapeError('v2 workspace 必须是对象。');
+      throw shapeError('workspace 必须是对象。');
     }
     return {
       revision: Math.max(0, Math.trunc(finiteNumber(parsed.revision, 0))),
@@ -1154,14 +1579,14 @@ async function hydrateWorkspace(decoded: DecodedWorkspace): Promise<AppWorkspace
   const providers = await Promise.all(
     persistedProviders.map(async (provider) => ({
       ...provider,
-      apiKey: await readSecret(provider.id),
+      apiKey: await readSecret(provider),
     }))
   );
   const workspace = normalizeWorkspace(decoded.snapshot, providers);
   workspace.plugins = await Promise.all(
     workspace.plugins.map(async (plugin) => ({
       ...plugin,
-      authorization: await readPluginSecret(plugin.id),
+      authorization: await readPluginSecret(plugin),
     }))
   );
   requestedRevision = Math.max(requestedRevision, decoded.revision);
@@ -1260,6 +1685,13 @@ function persistedConversations(workspace: AppWorkspace): ChatConversation[] {
     title: existing?.title ?? conversationTitle(workspace.messages),
     ...(existing?.customTitle ? { customTitle: true } : {}),
     ...(existing?.pinnedAt !== undefined ? { pinnedAt: existing.pinnedAt } : {}),
+    projectId: existing?.projectId ?? workspace.activeProjectId ?? workspace.projects[0]?.id,
+    ...(existing?.parentConversationId
+      ? { parentConversationId: existing.parentConversationId }
+      : {}),
+    ...(existing?.branchPointMessageId
+      ? { branchPointMessageId: existing.branchPointMessageId }
+      : {}),
     createdAt: existing?.createdAt ?? workspace.messages[0]?.createdAt ?? Date.now(),
     updatedAt: existing?.updatedAt ?? workspace.messages[workspace.messages.length - 1]?.createdAt ?? Date.now(),
     messages: messagesForPersistence(workspace.messages),
@@ -1292,6 +1724,13 @@ function createEnvelope(workspace: AppWorkspace, revision: number): PersistedWor
       reasoningEffortByModel: { ...workspace.reasoningEffortByModel },
       parameterSettings: { ...defaultParameterSettings, ...workspace.parameterSettings },
       modelCandidatesByProvider: { ...workspace.modelCandidatesByProvider },
+      activeProjectId: workspace.projects.some((project) => project.id === workspace.activeProjectId)
+        ? workspace.activeProjectId
+        : workspace.projects[0]?.id ?? 'project-default',
+      projects: workspace.projects.map((project) => ({
+        ...project,
+        ...(project.defaultTarget ? { defaultTarget: { ...project.defaultTarget } } : {}),
+      })),
       activeConversationId: conversations.some((conversation) => conversation.id === workspace.activeConversationId)
         ? workspace.activeConversationId
         : conversations[0].id,
@@ -1301,6 +1740,11 @@ function createEnvelope(workspace: AppWorkspace, revision: number): PersistedWor
       comparisonEnabled: workspace.comparisonEnabled,
       comparisonTargets: workspace.comparisonTargets.map((target) => ({ ...target })),
       modelPricing: workspace.modelPricing.map((pricing) => ({ ...pricing })),
+      costGuard: { ...workspace.costGuard },
+      providerUsageEvents: workspace.providerUsageEvents.slice(-10_000).map((event) => ({
+        ...event,
+        ...(event.knownCostEstimate ? { knownCostEstimate: { ...event.knownCostEstimate } } : {}),
+      })),
       webSearch: { ...workspace.webSearch },
       voice: {
         ...workspace.voice,
@@ -1314,30 +1758,48 @@ function createEnvelope(workspace: AppWorkspace, revision: number): PersistedWor
 }
 
 async function persistSecrets(providers: ProviderProfile[], plugins: PluginManifest[]): Promise<void> {
-  const currentIds = new Set(providers.map((provider) => provider.id));
+  const providersById = new Map(providers.map((provider) => [provider.id, provider] as const));
   for (const providerId of Array.from(secretValues.keys())) {
-    if (!currentIds.has(providerId)) {
-      await writeSecret(providerId, undefined);
+    if (!providersById.has(providerId)) {
+      const cached = secretValues.get(providerId);
+      if (cached) {
+        await writeSecret(providerId, undefined, undefined);
+      }
       secretValues.delete(providerId);
     }
   }
   for (const provider of providers) {
     const value = provider.apiKey || undefined;
-    if (!secretValues.has(provider.id) || secretValues.get(provider.id) !== value) {
-      await writeSecret(provider.id, value);
+    const bindingFingerprint = providerEndpointFingerprint(provider);
+    const cached = secretValues.get(provider.id);
+    if (
+      !secretValues.has(provider.id) ||
+      cached?.bindingFingerprint !== bindingFingerprint ||
+      cached?.secret !== value
+    ) {
+      await writeSecret(provider.id, bindingFingerprint, value);
     }
   }
-  const currentPluginIds = new Set(plugins.map((plugin) => plugin.id));
+  const pluginsById = new Map(plugins.map((plugin) => [plugin.id, plugin] as const));
   for (const pluginId of Array.from(pluginSecretValues.keys())) {
-    if (!currentPluginIds.has(pluginId)) {
-      await writePluginSecret(pluginId, undefined);
+    if (!pluginsById.has(pluginId)) {
+      const cached = pluginSecretValues.get(pluginId);
+      if (cached) {
+        await writePluginSecret(pluginId, undefined, undefined);
+      }
       pluginSecretValues.delete(pluginId);
     }
   }
   for (const plugin of plugins) {
     const value = plugin.authorization?.trim() || undefined;
-    if (!pluginSecretValues.has(plugin.id) || pluginSecretValues.get(plugin.id) !== value) {
-      await writePluginSecret(plugin.id, value);
+    const bindingFingerprint = pluginBindingFingerprint(plugin);
+    const cached = pluginSecretValues.get(plugin.id);
+    if (
+      !pluginSecretValues.has(plugin.id) ||
+      cached?.bindingFingerprint !== bindingFingerprint ||
+      cached?.secret !== value
+    ) {
+      await writePluginSecret(plugin.id, bindingFingerprint, value);
     }
   }
 }
@@ -1357,12 +1819,17 @@ export function saveWorkspace(workspace: AppWorkspace): Promise<void> {
       if (loadFailure) {
         throw blockedSaveError();
       }
-      await persistSecrets(providers, workspace.plugins);
       const previous = await AsyncStorage.getItem(WORKSPACE_KEY);
       if (previous && previous !== serialized) {
         await AsyncStorage.setItem(WORKSPACE_BACKUP_KEY, previous);
       }
       await AsyncStorage.setItem(WORKSPACE_KEY, serialized);
+      // Commit the versioned public configuration before mutating secrets. A
+      // workspace write failure therefore leaves the previous workspace and
+      // its credentials intact. If SecureStore fails afterward, this save
+      // still rejects, while binding fingerprints prevent the newly committed
+      // configuration from hydrating a stale credential on restart.
+      await persistSecrets(providers, workspace.plugins);
       const referencedAttachments = persistedConversations(workspace).flatMap((conversation) =>
         conversation.messages.flatMap((message) => message.attachments ?? [])
       );

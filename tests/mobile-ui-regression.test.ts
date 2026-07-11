@@ -23,6 +23,7 @@ describe('Android mobile UI regressions', () => {
     ]);
     const appConfig = JSON.parse(appConfigSource);
 
+    expect(appConfig.expo.android.allowBackup).toBe(false);
     expect(appConfig.expo.android.softwareKeyboardLayoutMode).toBe('resize');
     expect(appSource).toContain(
       "behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined}"
@@ -176,6 +177,161 @@ describe('Android mobile UI regressions', () => {
     expect(appSource).toContain('testID="mcp-tool-center-card"');
     expect(appSource).toContain('默认关闭且不会自动调用');
     expect(appSource).toContain('API Key 不从备份导入');
+  });
+
+  it('exposes local projects, branching, and bounded global search without a hosted index', async () => {
+    const [appSource, branchSource, searchSource] = await Promise.all([
+      source('App.tsx'),
+      source('src/services/conversationBranches.ts'),
+      source('src/services/workspaceSearch.ts'),
+    ]);
+
+    expect(appSource).toContain('testID="project-workspace-settings-card"');
+    expect(appSource).toContain('testID="project-switcher"');
+    expect(appSource).toContain('testID="global-search-results"');
+    expect(appSource).toContain('forkConversationAtMessage(');
+    expect(appSource).toContain('创建分支');
+    expect(branchSource).toContain('originMessageId: message.originMessageId ?? message.id');
+    expect(searchSource).toContain('MAX_WORKSPACE_SEARCH_DOCUMENTS = 1_500');
+    expect(searchSource).toContain('MAX_WORKSPACE_SEARCH_FIELD_LENGTH = 4_000');
+    expect(searchSource).not.toContain('ProviderProfile');
+    expect(searchSource).not.toContain('apiKey');
+  });
+
+  it('keeps provider setup and cost limits user-funded, local, and confirmed before requests', async () => {
+    const appSource = await source('App.tsx');
+    const sendSource = appSource.slice(
+      appSource.indexOf('async function sendMessage'),
+      appSource.indexOf('function toggleSettingsScreen')
+    );
+    const requestSource = appSource.slice(
+      appSource.indexOf('async function runAssistantRequest'),
+      appSource.indexOf('function toggleReasoning')
+    );
+
+    expect(appSource).toContain('testID="provider-setup-wizard-card"');
+    expect(appSource).toContain('testID="model-capability-matrix-card"');
+    expect(appSource).toContain('testID="cost-guard-settings-card"');
+    expect(appSource).toContain('Free / Trial 字样 ≠ 免费额度');
+    expect(appSource).toContain('不会使用 Embezzle Studio 的额度或服务器');
+    expect(appSource).toContain('providerKeyBindingFingerprint !== finalFingerprint');
+    expect(sendSource.indexOf('authorizeProviderRequestPlan')).toBeGreaterThan(-1);
+    expect(sendSource.indexOf('authorizeProviderRequestPlan')).toBeLessThan(
+      sendSource.indexOf("beginActiveRequest('回答生成')")
+    );
+    expect(sendSource.indexOf('persistProviderUsageEvents')).toBeLessThan(
+      sendSource.indexOf('runAssistantRequest')
+    );
+    expect(requestSource).toContain('maxOutputTokens: workspaceRef.current.costGuard.enabled');
+  });
+
+  it('keeps v1.2 cross-feature state coherent under streaming, rebinding, and navigation', async () => {
+    const [appSource, branchSource] = await Promise.all([
+      source('App.tsx'),
+      source('src/services/conversationBranches.ts'),
+    ]);
+    const ledgerSource = appSource.slice(
+      appSource.indexOf('async function persistProviderUsageEvents'),
+      appSource.indexOf('function requestUsageKind')
+    );
+
+    expect(appSource).toContain('const setWorkspace = useCallback');
+    expect(appSource.indexOf('workspaceRef.current = next;')).toBeLessThan(
+      appSource.indexOf('setWorkspaceState(next);')
+    );
+    expect(appSource).toContain('providerKeyBindingFingerprint !== finalFingerprint');
+    expect(appSource).toContain("delete pendingMessage.originMessageId");
+    expect(branchSource).toContain("source.messages[branchPointIndex].status === 'pending'");
+    expect(appSource).toContain('userAlreadySelected');
+    expect(appSource).toContain('InteractionManager.runAfterInteractions');
+    expect(appSource).toContain('searchWorkspaceIndex(globalSearchIndex');
+    expect(appSource).toContain('scrollToSearchMessage');
+    expect(appSource).toContain('highlightedSearchMessageId === message.id');
+    expect(appSource).toContain("Platform.OS === 'android' ? 120 : 60");
+    expect(ledgerSource).toContain('insertedEventIds');
+    expect(ledgerSource).toContain('providerUsageEvents: workspaceRef.current.providerUsageEvents.filter');
+  });
+
+  it('revalidates project defaults and audio model tasks at the point of use', async () => {
+    const appSource = await source('App.tsx');
+
+    expect(appSource).toContain('syncProjectInstructionSnapshot');
+    expect(appSource).toContain('resolveProjectDefaultTarget(project, workspace.providers)');
+    expect(appSource).toContain("? 'audio-transcription'");
+    expect(appSource).toContain(": 'speech-generation';");
+    expect(appSource).toContain('inferModelTask(model) !== expectedTask');
+    expect(appSource).toContain('若父子分支因此跨项目，其关联已安全分离');
+  });
+
+  it('removes only the selected system instruction and preserves later conversation history', async () => {
+    const appSource = await source('App.tsx');
+    const handlerSource = appSource.slice(
+      appSource.indexOf('async function removeSystemInstruction'),
+      appSource.indexOf('async function removeMessage')
+    );
+    const systemCardSource = appSource.slice(
+      appSource.indexOf(") : message.role === 'system' ? ("),
+      appSource.indexOf('<AssistantMessageHeader')
+    );
+
+    expect(handlerSource).toContain("message.role !== 'system'");
+    expect(handlerSource).toContain(
+      'messages.filter((candidate) => candidate.id !== message.id)'
+    );
+    expect(handlerSource).toContain('messages: removeFrom(current.messages)');
+    expect(handlerSource).toContain('messages: removeFrom(conversation.messages)');
+    expect(handlerSource).not.toContain('.slice(0,');
+    expect(handlerSource).not.toContain('deletePersistedAttachments');
+    expect(systemCardSource).toContain(
+      'onPress={() => void removeSystemInstruction(message)}'
+    );
+    expect(systemCardSource).not.toContain('removeMessage(message)');
+  });
+
+  it('keeps assistant editing unavailable in both direct and overflow message actions', async () => {
+    const appSource = await source('App.tsx');
+    const editHandlerSource = appSource.slice(
+      appSource.indexOf('function beginEditUserMessage'),
+      appSource.indexOf('function cancelEditUserMessage')
+    );
+    const directActionsSource = appSource.slice(
+      appSource.indexOf('function MessageActions('),
+      appSource.indexOf('function MessageInlineEditor(')
+    );
+    const overflowActionsSource = appSource.slice(
+      appSource.indexOf('function MessageActionMenu('),
+      appSource.indexOf('function WebCitationList(')
+    );
+
+    expect(editHandlerSource).toContain("if (message.role !== 'user')");
+    expect(directActionsSource).toContain("{role === 'assistant' ? (");
+    expect(directActionsSource).toContain('accessibilityLabel="分享消息"');
+    expect(directActionsSource).toContain('accessibilityLabel="编辑消息"');
+    expect(overflowActionsSource).toContain("{role === 'user' ? (");
+    expect(overflowActionsSource).toContain('onPress={onEdit}');
+  });
+
+  it('clears task-incompatible model references without invalidating project media defaults', async () => {
+    const appSource = await source('App.tsx');
+    const updateModelSource = appSource.slice(
+      appSource.indexOf('function updateActiveModel('),
+      appSource.indexOf('function setActiveModelTask(')
+    );
+
+    expect(updateModelSource).toContain("const comparisonTargets = nextTask === 'chat'");
+    expect(updateModelSource).toContain(
+      'current.comparisonTargets.filter((target) => !matchesTarget(target))'
+    );
+    expect(updateModelSource).toContain('delete voice.transcriptionTarget');
+    expect(updateModelSource).toContain('delete voice.speechTarget');
+    expect(updateModelSource).toContain(
+      'delete reasoningEffortByModel[`${provider.id}:${model.id}`]'
+    );
+    expect(updateModelSource).toContain(
+      'comparisonEnabled: current.comparisonEnabled && comparisonTargets.length >= 2'
+    );
+    expect(updateModelSource).not.toContain('defaultTarget');
+    expect(updateModelSource).not.toContain('projects:');
   });
 
   it('keeps request-based voice Android-only and disables background audio services', async () => {

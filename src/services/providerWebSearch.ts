@@ -32,6 +32,7 @@ export interface BuildProviderWebSearchRequestArgs {
   modelId: string;
   messages: ChatMessage[];
   searchContextSize?: OpenAiWebSearchContextSize;
+  maxOutputTokens?: number;
 }
 
 export interface ProviderWebSearchRequest {
@@ -42,6 +43,7 @@ export interface ProviderWebSearchRequest {
     input: OpenAiResponsesInputMessage[];
     tools: Array<Record<string, unknown>>;
     store?: false;
+    max_output_tokens?: number;
   };
 }
 
@@ -65,6 +67,7 @@ const arkHosts = new Set([
 const bailianLegacyHosts = new Set([
   'dashscope.aliyuncs.com',
   'dashscope-intl.aliyuncs.com',
+  'dashscope-us.aliyuncs.com',
 ]);
 const bailianWorkspaceHost = /^[a-z0-9][a-z0-9-]*\.(?:cn-beijing|ap-southeast-1|ap-northeast-1|eu-central-1|us-east-1)\.maas\.aliyuncs\.com$/;
 
@@ -107,7 +110,7 @@ export function resolveProviderWebSearchProtocol(
   provider: ProviderProfile
 ): ProviderWebSearchProtocol {
   const url = parsedProviderUrl(provider);
-  const host = url.hostname.toLowerCase();
+  const host = url.hostname.toLowerCase().replace(/\.+$/, '');
 
   if (provider.kind === 'volcengine-ark') {
     if (!arkHosts.has(host)) {
@@ -187,6 +190,7 @@ export function buildProviderWebSearchRequest({
   modelId,
   messages,
   searchContextSize,
+  maxOutputTokens,
 }: BuildProviderWebSearchRequestArgs): ProviderWebSearchRequest {
   const protocol = resolveProviderWebSearchProtocol(provider);
   const normalizedModelId = modelId.trim();
@@ -199,6 +203,12 @@ export function buildProviderWebSearchRequest({
   }
   if (protocol !== 'openai-official' && searchContextSize != null) {
     return protocolError('search_context_size 只适用于 OpenAI 官方 Web Search 协议。');
+  }
+  if (
+    maxOutputTokens !== undefined &&
+    (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 64 || maxOutputTokens > 131_072)
+  ) {
+    return protocolError('联网搜索最大输出 Token 必须是 64–131072 的整数。');
   }
 
   assertTextOnlyMessages(messages, protocol);
@@ -217,6 +227,7 @@ export function buildProviderWebSearchRequest({
         input,
         tools: [tool],
         store: false,
+        ...(maxOutputTokens !== undefined ? { max_output_tokens: maxOutputTokens } : {}),
       },
     };
   }
@@ -229,6 +240,7 @@ export function buildProviderWebSearchRequest({
         model: normalizedModelId,
         input,
         tools: [{ type: 'web_search', max_keyword: 3, limit: 10 }],
+        ...(maxOutputTokens !== undefined ? { max_output_tokens: maxOutputTokens } : {}),
       },
     };
   }
@@ -240,6 +252,7 @@ export function buildProviderWebSearchRequest({
       model: normalizedModelId,
       input,
       tools: [{ type: 'web_search' }],
+      ...(maxOutputTokens !== undefined ? { max_output_tokens: maxOutputTokens } : {}),
     },
   };
 }

@@ -72,6 +72,7 @@ describe('provider Web Search request construction', () => {
       modelId: ' gpt-5.6 ',
       messages: [message()],
       searchContextSize: 'medium',
+      maxOutputTokens: 2048,
     });
 
     expect(request).toEqual({
@@ -87,8 +88,11 @@ describe('provider Web Search request construction', () => {
         ],
         tools: [{ type: 'web_search', search_context_size: 'medium' }],
         store: false,
+        max_output_tokens: 2048,
       },
     });
+    expect(request.body).not.toHaveProperty('max_completion_tokens');
+    expect(request.body).not.toHaveProperty('max_tokens');
   });
 
   it('keeps OpenAI image input support through the existing Responses serializer', () => {
@@ -117,6 +121,7 @@ describe('provider Web Search request construction', () => {
         provider: ark,
         modelId: 'doubao-seed-2-1-pro-260628',
         messages: [message()],
+        maxOutputTokens: 2048,
       })
     ).toEqual({
       protocol: 'volcengine-ark',
@@ -130,6 +135,7 @@ describe('provider Web Search request construction', () => {
           },
         ],
         tools: [{ type: 'web_search', max_keyword: 3, limit: 10 }],
+        max_output_tokens: 2048,
       },
     });
   });
@@ -143,6 +149,7 @@ describe('provider Web Search request construction', () => {
       provider: workspaceProvider,
       modelId: 'qwen3.7-plus',
       messages: [message()],
+      maxOutputTokens: 2048,
     });
 
     expect(request.protocol).toBe('bailian-compatible');
@@ -150,6 +157,34 @@ describe('provider Web Search request construction', () => {
       'https://llm-example.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/responses'
     );
     expect(request.body.tools).toEqual([{ type: 'web_search' }]);
+    expect(request.body.max_output_tokens).toBe(2048);
+    expect(request.body).not.toHaveProperty('max_completion_tokens');
+    expect(request.body).not.toHaveProperty('max_tokens');
+  });
+
+  it('accepts the official Bailian US legacy host without broadening the allowlist', () => {
+    const usProvider = provider(
+      'bailian-compatible',
+      'https://dashscope-us.aliyuncs.com/compatible-mode/v1/models'
+    );
+    const request = buildProviderWebSearchRequest({
+      provider: usProvider,
+      modelId: 'qwen-plus',
+      messages: [message()],
+      maxOutputTokens: 2048,
+    });
+
+    expect(resolveProviderWebSearchProtocol(usProvider)).toBe('bailian-compatible');
+    expect(request.url).toBe('https://dashscope-us.aliyuncs.com/compatible-mode/v1/responses');
+    expect(request.body.max_output_tokens).toBe(2048);
+    expect(() =>
+      resolveProviderWebSearchProtocol(
+        provider(
+          'bailian-compatible',
+          'https://dashscope-us.aliyuncs.com.evil.example/compatible-mode/v1'
+        )
+      )
+    ).toThrow();
   });
 
   it('rejects attachments for Ark and Bailian instead of guessing a multimodal wire shape', () => {

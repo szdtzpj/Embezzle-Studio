@@ -147,6 +147,7 @@ const maxTimeoutMs = 300_000;
 const bailianLegacyHosts = new Set([
   'dashscope.aliyuncs.com',
   'dashscope-intl.aliyuncs.com',
+  'dashscope-us.aliyuncs.com',
 ]);
 const bailianWorkspaceHost = /^[a-z0-9][a-z0-9-]*\.(?:cn-beijing|ap-southeast-1|ap-northeast-1|eu-central-1|us-east-1)\.maas\.aliyuncs\.com$/;
 
@@ -263,7 +264,7 @@ function assertSupportedPath(url: URL, paths: ReadonlySet<string>, label: string
 
 export function resolveProviderAudioProtocol(provider: ProviderProfile): ProviderAudioProtocol {
   const url = parseStrictProviderUrl(provider);
-  const host = url.hostname.toLowerCase();
+  const host = url.hostname.toLowerCase().replace(/\.+$/, '');
 
   if (provider.kind === 'bailian-compatible') {
     if (!bailianLegacyHosts.has(host) && !bailianWorkspaceHost.test(host)) {

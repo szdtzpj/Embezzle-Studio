@@ -3,6 +3,7 @@ import { bytesToUtf8, utf8ToBytes } from '@noble/ciphers/utils.js';
 import { scryptAsync } from '@noble/hashes/scrypt.js';
 import { getRandomBytesAsync } from 'expo-crypto';
 
+import { defaultCostGuardSettings } from '../data/providerCatalog';
 import type {
   AppWorkspace,
   Capability,
@@ -16,6 +17,7 @@ import type {
   ProviderKind,
   ProviderProfile,
   ReasoningEffort,
+  WorkspaceProject,
 } from '../domain/types';
 
 export const MAX_ENCRYPTED_BACKUP_BYTES = 10 * 1024 * 1024;
@@ -89,6 +91,8 @@ export interface SanitizedWorkspaceBackup {
   reasoningEffortByModel: Record<string, ReasoningEffort>;
   parameterSettings: AppWorkspace['parameterSettings'];
   modelCandidatesByProvider: Record<string, ModelInfo[]>;
+  activeProjectId?: string;
+  projects?: WorkspaceProject[];
   activeConversationId: string;
   conversations: BackupConversation[];
   plugins: BackupPlugin[];
@@ -96,6 +100,7 @@ export interface SanitizedWorkspaceBackup {
   comparisonEnabled: boolean;
   comparisonTargets: ModelTargetRef[];
   modelPricing: ModelPricing[];
+  costGuard?: AppWorkspace['costGuard'];
   webSearch: AppWorkspace['webSearch'];
   voice: AppWorkspace['voice'];
 }
@@ -378,7 +383,9 @@ function validateMessage(value: unknown, path: string): string {
       'reasoningContent',
       'usage',
       'citations',
+      'originMessageId',
       'comparisonGroupId',
+      'projectInstructionId',
       'selectedForContext',
       'requestMetrics',
       'costEstimate',
@@ -391,6 +398,7 @@ function validateMessage(value: unknown, path: string): string {
     path
   );
   const id = requireId(message.id, `${path}.id`);
+  requireOptionalString(message.originMessageId, `${path}.originMessageId`);
   if (!['system', 'user', 'assistant'].includes(String(message.role))) invalidFormat(`${path}.role 无效。`);
   requireString(message.content, `${path}.content`);
   requireFiniteNumber(message.createdAt, `${path}.createdAt`);
@@ -414,6 +422,7 @@ function validateMessage(value: unknown, path: string): string {
     });
   }
   requireOptionalString(message.comparisonGroupId, `${path}.comparisonGroupId`);
+  requireOptionalString(message.projectInstructionId, `${path}.projectInstructionId`);
   if (message.selectedForContext !== undefined) requireBoolean(message.selectedForContext, `${path}.selectedForContext`);
   if (message.requestMetrics !== undefined) {
     const metrics = requireRecord(message.requestMetrics, `${path}.requestMetrics`);
@@ -442,13 +451,16 @@ function validateConversation(value: unknown, path: string, globalMessageIds: Se
   requireExactKeysWithOptional(
     conversation,
     ['id', 'title', 'createdAt', 'updatedAt', 'messages'],
-    ['customTitle', 'pinnedAt'],
+    ['customTitle', 'pinnedAt', 'projectId', 'parentConversationId', 'branchPointMessageId'],
     path
   );
   const id = requireId(conversation.id, `${path}.id`);
   requireString(conversation.title, `${path}.title`, { nonEmpty: true });
   if (conversation.customTitle !== undefined) requireBoolean(conversation.customTitle, `${path}.customTitle`);
   requireOptionalNumber(conversation.pinnedAt, `${path}.pinnedAt`);
+  requireOptionalString(conversation.projectId, `${path}.projectId`);
+  requireOptionalString(conversation.parentConversationId, `${path}.parentConversationId`);
+  requireOptionalString(conversation.branchPointMessageId, `${path}.branchPointMessageId`);
   requireFiniteNumber(conversation.createdAt, `${path}.createdAt`);
   requireFiniteNumber(conversation.updatedAt, `${path}.updatedAt`);
   requireArray(conversation.messages, `${path}.messages`, 10_000).forEach((message, index) => {
@@ -616,33 +628,114 @@ function validatePricing(value: unknown, path: string): void {
   requireOptionalNumber(pricing.outputPerMillion, `${path}.outputPerMillion`);
 }
 
+function validateProject(value: unknown, path: string): string {
+  const project = requireRecord(value, path);
+  requireExactKeysWithOptional(
+    project,
+    ['id', 'name', 'createdAt', 'updatedAt'],
+    ['systemPrompt', 'defaultTarget'],
+    path
+  );
+  const id = requireId(project.id, `${path}.id`);
+  requireString(project.name, `${path}.name`, { nonEmpty: true, max: 80 });
+  requireOptionalString(project.systemPrompt, `${path}.systemPrompt`);
+  if (typeof project.systemPrompt === 'string' && project.systemPrompt.length > 20_000) {
+    invalidFormat(`${path}.systemPrompt 过长。`);
+  }
+  if (project.defaultTarget !== undefined) validateTarget(project.defaultTarget, `${path}.defaultTarget`);
+  requireFiniteNumber(project.createdAt, `${path}.createdAt`);
+  requireFiniteNumber(project.updatedAt, `${path}.updatedAt`);
+  return id;
+}
+
+function validateCostGuard(value: unknown, path: string): void {
+  const guard = requireRecord(value, path);
+  requireExactKeys(guard, [
+    'enabled',
+    'maxOutputTokens',
+    'maxComparisonTargets',
+    'dailyRequestLimit',
+    'dailyCnyBudget',
+    'dailyUsdBudget',
+    'limitAction',
+    'unknownCostAction',
+    'confirmPotentialMultipleCharges',
+  ], path);
+  requireBoolean(guard.enabled, `${path}.enabled`);
+  if (!['warn', 'block'].includes(String(guard.limitAction))) invalidFormat(`${path}.limitAction 无效。`);
+  if (!['warn', 'block'].includes(String(guard.unknownCostAction))) invalidFormat(`${path}.unknownCostAction 无效。`);
+  requireBoolean(guard.confirmPotentialMultipleCharges, `${path}.confirmPotentialMultipleCharges`);
+  for (const key of ['maxOutputTokens', 'maxComparisonTargets', 'dailyRequestLimit', 'dailyCnyBudget', 'dailyUsdBudget']) {
+    requireFiniteNumber(guard[key], `${path}.${key}`);
+  }
+  if (![2, 3, 4].includes(Number(guard.maxComparisonTargets))) {
+    invalidFormat(`${path}.maxComparisonTargets 无效。`);
+  }
+  const maxOutputTokens = Number(guard.maxOutputTokens);
+  const dailyRequestLimit = Number(guard.dailyRequestLimit);
+  const dailyCnyBudget = Number(guard.dailyCnyBudget);
+  const dailyUsdBudget = Number(guard.dailyUsdBudget);
+  if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 64 || maxOutputTokens > 131_072) {
+    invalidFormat(`${path}.maxOutputTokens 超出允许范围。`);
+  }
+  if (!Number.isInteger(dailyRequestLimit) || dailyRequestLimit < 0 || dailyRequestLimit > 10_000) {
+    invalidFormat(`${path}.dailyRequestLimit 超出允许范围。`);
+  }
+  if (dailyCnyBudget < 0 || dailyCnyBudget > 1_000_000_000) {
+    invalidFormat(`${path}.dailyCnyBudget 超出允许范围。`);
+  }
+  if (dailyUsdBudget < 0 || dailyUsdBudget > 1_000_000_000) {
+    invalidFormat(`${path}.dailyUsdBudget 超出允许范围。`);
+  }
+}
+
 function validateBackupWorkspace(value: unknown): asserts value is SanitizedWorkspaceBackup {
   const workspace = requireRecord(value, 'workspace');
-  requireExactKeys(workspace, [
-    'providers',
-    'activeProviderId',
-    'activeModelIdByProvider',
-    'reasoningEffortByModel',
-    'parameterSettings',
-    'modelCandidatesByProvider',
-    'activeConversationId',
-    'conversations',
-    'plugins',
-    'promptTemplates',
-    'comparisonEnabled',
-    'comparisonTargets',
-    'modelPricing',
-    'webSearch',
-    'voice',
-  ], 'workspace');
+  requireExactKeysWithOptional(
+    workspace,
+    [
+      'providers',
+      'activeProviderId',
+      'activeModelIdByProvider',
+      'reasoningEffortByModel',
+      'parameterSettings',
+      'modelCandidatesByProvider',
+      'activeConversationId',
+      'conversations',
+      'plugins',
+      'promptTemplates',
+      'comparisonEnabled',
+      'comparisonTargets',
+      'modelPricing',
+      'webSearch',
+      'voice',
+    ],
+    ['activeProjectId', 'projects', 'costGuard'],
+    'workspace'
+  );
 
   const providerIds = new Set<string>();
+  const modelIdsByProvider = new Map<string, Set<string>>();
   const providerList = requireArray(workspace.providers, 'workspace.providers', 500);
   if (!providerList.length) invalidFormat('workspace.providers 不能为空。');
   providerList.forEach((provider, index) => {
     const id = validateProvider(provider, `workspace.providers[${index}]`);
     if (providerIds.has(id)) duplicateId('provider', id);
     providerIds.add(id);
+    const providerRecord = requireRecord(provider, `workspace.providers[${index}]`);
+    modelIdsByProvider.set(
+      id,
+      new Set(
+        requireArray(providerRecord.models, `workspace.providers[${index}].models`, 10_000)
+          .map((model, modelIndex) =>
+            requireString(
+              requireRecord(model, `workspace.providers[${index}].models[${modelIndex}]`).id,
+              `workspace.providers[${index}].models[${modelIndex}].id`,
+              { nonEmpty: true }
+            )
+          )
+      )
+    );
   });
   const activeProviderId = requireId(workspace.activeProviderId, 'workspace.activeProviderId');
   if (!providerIds.has(activeProviderId)) invalidFormat('workspace.activeProviderId 不存在。');
@@ -666,15 +759,114 @@ function validateBackupWorkspace(value: unknown): asserts value is SanitizedWork
 
   const conversationIds = new Set<string>();
   const messageIds = new Set<string>();
+  const conversationsById = new Map<string, Record<string, unknown>>();
   const conversationList = requireArray(workspace.conversations, 'workspace.conversations', 500);
   if (!conversationList.length) invalidFormat('workspace.conversations 不能为空。');
   conversationList.forEach((conversation, index) => {
     const id = validateConversation(conversation, `workspace.conversations[${index}]`, messageIds);
     if (conversationIds.has(id)) duplicateId('conversation', id);
     conversationIds.add(id);
+    conversationsById.set(id, requireRecord(conversation, `workspace.conversations[${index}]`));
   });
   const activeConversationId = requireId(workspace.activeConversationId, 'workspace.activeConversationId');
   if (!conversationIds.has(activeConversationId)) invalidFormat('workspace.activeConversationId 不存在。');
+
+  if (workspace.projects !== undefined || workspace.activeProjectId !== undefined) {
+    if (workspace.projects === undefined || workspace.activeProjectId === undefined) {
+      invalidFormat('workspace.projects 与 activeProjectId 必须同时存在。');
+    }
+    const projectIds = new Set<string>();
+    requireArray(workspace.projects, 'workspace.projects', 50).forEach((project, index) => {
+      const id = validateProject(project, `workspace.projects[${index}]`);
+      if (projectIds.has(id)) duplicateId('project', id);
+      projectIds.add(id);
+      const projectRecord = requireRecord(project, `workspace.projects[${index}]`);
+      if (projectRecord.defaultTarget !== undefined) {
+        const target = requireRecord(
+          projectRecord.defaultTarget,
+          `workspace.projects[${index}].defaultTarget`
+        );
+        const providerId = requireId(
+          target.providerId,
+          `workspace.projects[${index}].defaultTarget.providerId`
+        );
+        const modelId = requireString(
+          target.modelId,
+          `workspace.projects[${index}].defaultTarget.modelId`,
+          { nonEmpty: true }
+        );
+        if (!providerIds.has(providerId) || !modelIdsByProvider.get(providerId)?.has(modelId)) {
+          invalidFormat(`workspace.projects[${index}].defaultTarget 不存在。`);
+        }
+      }
+    });
+    if (!projectIds.size) invalidFormat('workspace.projects 不能为空。');
+    const activeProjectId = requireId(workspace.activeProjectId, 'workspace.activeProjectId');
+    if (!projectIds.has(activeProjectId)) invalidFormat('workspace.activeProjectId 不存在。');
+    conversationList.forEach((candidate, index) => {
+      const conversation = requireRecord(candidate, `workspace.conversations[${index}]`);
+      const projectId = requireString(conversation.projectId, `workspace.conversations[${index}].projectId`, { nonEmpty: true });
+      if (!projectIds.has(projectId)) invalidFormat(`workspace.conversations[${index}].projectId 不存在。`);
+      if (conversation.parentConversationId !== undefined) {
+        const parentId = requireId(conversation.parentConversationId, `workspace.conversations[${index}].parentConversationId`);
+        if (parentId === conversation.id || !conversationIds.has(parentId)) {
+          invalidFormat(`workspace.conversations[${index}].parentConversationId 无效。`);
+        }
+        requireString(conversation.branchPointMessageId, `workspace.conversations[${index}].branchPointMessageId`, { nonEmpty: true });
+      } else if (conversation.branchPointMessageId !== undefined) {
+        invalidFormat(`workspace.conversations[${index}].branchPointMessageId 缺少父分支。`);
+      }
+    });
+  }
+
+  conversationList.forEach((candidate, index) => {
+    const path = `workspace.conversations[${index}]`;
+    const conversation = requireRecord(candidate, path);
+    if (conversation.parentConversationId !== undefined) {
+      const parentId = requireId(conversation.parentConversationId, `${path}.parentConversationId`);
+      const parent = conversationsById.get(parentId);
+      if (parentId === conversation.id || !parent) {
+        invalidFormat(`${path}.parentConversationId 无效。`);
+      }
+      const branchPointMessageId = requireString(
+        conversation.branchPointMessageId,
+        `${path}.branchPointMessageId`,
+        { nonEmpty: true }
+      );
+      if (branchPointMessageId === 'welcome') {
+        invalidFormat(`${path}.branchPointMessageId 不能指向欢迎消息。`);
+      }
+      const branchPointExists = requireArray(
+        parent.messages,
+        `${path}.parentConversation.messages`,
+        10_000
+      ).some((message, messageIndex) =>
+        requireRecord(message, `${path}.parentConversation.messages[${messageIndex}]`).id === branchPointMessageId
+      );
+      if (!branchPointExists) {
+        invalidFormat(`${path}.branchPointMessageId 不属于父分支。`);
+      }
+      if (
+        conversation.projectId !== undefined &&
+        parent.projectId !== undefined &&
+        conversation.projectId !== parent.projectId
+      ) {
+        invalidFormat(`${path} 与父分支不属于同一项目。`);
+      }
+    } else if (conversation.branchPointMessageId !== undefined) {
+      invalidFormat(`${path}.branchPointMessageId 缺少父分支。`);
+    }
+
+    const visited = new Set([requireId(conversation.id, `${path}.id`)]);
+    let parentId = conversation.parentConversationId as string | undefined;
+    while (parentId) {
+      if (visited.has(parentId)) {
+        invalidFormat(`${path}.parentConversationId 包含循环。`);
+      }
+      visited.add(parentId);
+      parentId = conversationsById.get(parentId)?.parentConversationId as string | undefined;
+    }
+  });
 
   const pluginIds = new Set<string>();
   requireArray(workspace.plugins, 'workspace.plugins', 500).forEach((plugin, index) => {
@@ -697,6 +889,7 @@ function validateBackupWorkspace(value: unknown): asserts value is SanitizedWork
   requireArray(workspace.modelPricing, 'workspace.modelPricing', 10_000).forEach((pricing, index) =>
     validatePricing(pricing, `workspace.modelPricing[${index}]`)
   );
+  if (workspace.costGuard !== undefined) validateCostGuard(workspace.costGuard, 'workspace.costGuard');
 
   const webSearch = requireRecord(workspace.webSearch, 'workspace.webSearch');
   requireExactKeys(webSearch, ['enabled', 'searchContextSize'], 'workspace.webSearch');
@@ -739,6 +932,7 @@ function sanitizeProvider(provider: ProviderProfile): BackupProvider {
 function sanitizeMessage(message: ChatMessage): BackupMessage {
   return {
     id: message.id,
+    ...(message.originMessageId !== undefined ? { originMessageId: message.originMessageId } : {}),
     role: message.role,
     content: message.content,
     createdAt: message.createdAt,
@@ -747,6 +941,7 @@ function sanitizeMessage(message: ChatMessage): BackupMessage {
     ...(message.usage ? { usage: { ...message.usage } } : {}),
     ...(message.citations ? { citations: message.citations.map((citation) => ({ ...citation })) } : {}),
     ...(message.comparisonGroupId !== undefined ? { comparisonGroupId: message.comparisonGroupId } : {}),
+    ...(message.projectInstructionId !== undefined ? { projectInstructionId: message.projectInstructionId } : {}),
     ...(message.selectedForContext !== undefined ? { selectedForContext: message.selectedForContext } : {}),
     ...(message.requestMetrics ? { requestMetrics: { ...message.requestMetrics } } : {}),
     ...(message.costEstimate ? { costEstimate: { ...message.costEstimate } } : {}),
@@ -764,6 +959,13 @@ function sanitizeConversation(conversation: ChatConversation, messages = convers
     title: conversation.title,
     ...(conversation.customTitle !== undefined ? { customTitle: conversation.customTitle } : {}),
     ...(conversation.pinnedAt !== undefined ? { pinnedAt: conversation.pinnedAt } : {}),
+    ...(conversation.projectId !== undefined ? { projectId: conversation.projectId } : {}),
+    ...(conversation.parentConversationId !== undefined
+      ? { parentConversationId: conversation.parentConversationId }
+      : {}),
+    ...(conversation.branchPointMessageId !== undefined
+      ? { branchPointMessageId: conversation.branchPointMessageId }
+      : {}),
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
     messages: messages.map(sanitizeMessage),
@@ -803,6 +1005,13 @@ export function sanitizeWorkspaceForBackup(workspace: AppWorkspace): SanitizedWo
     ...(existingActiveConversation?.pinnedAt !== undefined
       ? { pinnedAt: existingActiveConversation.pinnedAt }
       : {}),
+    projectId: existingActiveConversation?.projectId ?? workspace.activeProjectId,
+    ...(existingActiveConversation?.parentConversationId
+      ? { parentConversationId: existingActiveConversation.parentConversationId }
+      : {}),
+    ...(existingActiveConversation?.branchPointMessageId
+      ? { branchPointMessageId: existingActiveConversation.branchPointMessageId }
+      : {}),
     createdAt: activeCreatedAt,
     updatedAt:
       existingActiveConversation?.updatedAt ??
@@ -828,6 +1037,11 @@ export function sanitizeWorkspaceForBackup(workspace: AppWorkspace): SanitizedWo
         models.map(sanitizeModel),
       ])
     ),
+    activeProjectId: workspace.activeProjectId,
+    projects: workspace.projects.map((project) => ({
+      ...project,
+      ...(project.defaultTarget ? { defaultTarget: { ...project.defaultTarget } } : {}),
+    })),
     activeConversationId: workspace.activeConversationId,
     conversations,
     plugins: workspace.plugins.map(sanitizePlugin),
@@ -835,6 +1049,7 @@ export function sanitizeWorkspaceForBackup(workspace: AppWorkspace): SanitizedWo
     comparisonEnabled: workspace.comparisonEnabled,
     comparisonTargets: workspace.comparisonTargets.map((target) => ({ ...target })),
     modelPricing: workspace.modelPricing.map((pricing) => ({ ...pricing })),
+    costGuard: { ...workspace.costGuard },
     webSearch: { ...workspace.webSearch },
     voice: {
       ...(workspace.voice.transcriptionTarget ? { transcriptionTarget: { ...workspace.voice.transcriptionTarget } } : {}),
@@ -1095,8 +1310,24 @@ function mergeImportedWorkspace(
       ...(authorization !== undefined ? { authorization } : {}),
     };
   });
+  const importedAt = Date.now();
+  const projects: WorkspaceProject[] = imported.projects?.length
+    ? imported.projects.map((project) => ({
+        ...project,
+        ...(project.defaultTarget ? { defaultTarget: { ...project.defaultTarget } } : {}),
+      }))
+    : [{
+        id: 'project-default',
+        name: '默认项目',
+        createdAt: importedAt,
+        updatedAt: importedAt,
+      }];
+  const projectIds = new Set(projects.map((project) => project.id));
   const conversations = imported.conversations.map((conversation): ChatConversation => ({
     ...conversation,
+    projectId: conversation.projectId && projectIds.has(conversation.projectId)
+      ? conversation.projectId
+      : projects[0].id,
     messages: conversation.messages.map((message): ChatMessage => ({ ...message })),
   }));
   const activeConversation = conversations.find(
@@ -1114,6 +1345,8 @@ function mergeImportedWorkspace(
         models.map(sanitizeModel),
       ])
     ),
+    activeProjectId: activeConversation.projectId ?? projects[0].id,
+    projects,
     activeConversationId: imported.activeConversationId,
     conversations,
     messages: activeConversation.messages,
@@ -1122,6 +1355,12 @@ function mergeImportedWorkspace(
     comparisonEnabled: imported.comparisonEnabled,
     comparisonTargets: imported.comparisonTargets.map((target) => ({ ...target })),
     modelPricing: imported.modelPricing.map((pricing) => ({ ...pricing })),
+    costGuard: { ...(imported.costGuard ?? defaultCostGuardSettings) },
+    providerUsageEvents: currentWorkspace.providerUsageEvents.map((event) => ({
+      ...event,
+      unknownCostComponents: [...event.unknownCostComponents],
+      ...(event.knownCostEstimate ? { knownCostEstimate: { ...event.knownCostEstimate } } : {}),
+    })),
     webSearch: { ...imported.webSearch },
     voice: {
       ...(imported.voice.transcriptionTarget ? { transcriptionTarget: { ...imported.voice.transcriptionTarget } } : {}),

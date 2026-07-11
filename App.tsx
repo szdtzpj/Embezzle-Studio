@@ -13,14 +13,15 @@ import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
 import * as Sharing from 'expo-sharing';
 import { VideoView, useVideoPlayer } from 'expo-video';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode, SetStateAction } from 'react';
 import {
   ActivityIndicator,
   Alert,
   AppState,
   BackHandler,
   Image,
+  InteractionManager,
   Keyboard,
   KeyboardAvoidingView,
   Linking,
@@ -36,7 +37,14 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import type { NativeScrollEvent, NativeSyntheticEvent, PressableProps, StyleProp, ViewStyle } from 'react-native';
+import type {
+  LayoutChangeEvent,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
+  PressableProps,
+  StyleProp,
+  ViewStyle,
+} from 'react-native';
 import Reanimated, {
   cancelAnimation,
   Easing as ReanimatedEasing,
@@ -52,7 +60,7 @@ import Reanimated, {
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AnimatePresence, MotiView } from 'moti';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { BookOpen, Brain, Check, ChevronDown, Columns3, Copy, Download, ExternalLink, FileText, Globe2, Image as ImageIcon, Lightbulb, Menu, MessageSquare, Mic, MoreHorizontal, PenSquare, Pencil, Pin, Play, Plus, RefreshCw, Search, Share2, Settings, SlidersHorizontal, Square, Trash2, Video, Volume2, Wrench, X } from 'lucide-react-native';
+import { BookOpen, Brain, Check, ChevronDown, Columns3, Copy, Download, ExternalLink, FileText, Folder, GitBranch, Globe2, Image as ImageIcon, Lightbulb, Menu, MessageSquare, Mic, MoreHorizontal, PenSquare, Pencil, Pin, Play, Plus, RefreshCw, Search, Share2, Settings, ShieldCheck, SlidersHorizontal, Square, Trash2, Video, Volume2, Wrench, X } from 'lucide-react-native';
 import { Bailian, ChatGLM, Claude, DeepSeek, Doubao, Gemini, Kimi, Minimax, NewAPI, OpenAI, Qwen, Volcengine, Zhipu } from '@lobehub/icons-rn';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/arkModels';
@@ -69,13 +77,17 @@ import type {
   MessageRole,
   MediaAttachment,
   ModelInfo,
+  ModelTargetRef,
   ModelTask,
   ProviderProfile,
   ReasoningEffort,
   ModelParameterSettings,
   ModelPricing,
   PricingCurrency,
+  ProviderUsageEvent,
+  ProviderUsageKind,
   WebCitation,
+  WorkspaceProject,
 } from './src/domain/types';
 import { pickFiles, pickImages, pickVideos, validateAttachments } from './src/services/mediaPicker';
 import { saveAttachmentToDevice } from './src/services/mediaExport';
@@ -141,6 +153,39 @@ import {
   synthesizeSpeech,
   transcribeAudio,
 } from './src/services/providerAudio';
+import {
+  createWorkspaceProject,
+  deleteWorkspaceProject,
+  moveConversationToProject,
+  resolveProjectDefaultTarget,
+  updateWorkspaceProject,
+} from './src/services/workspaceProjects';
+import {
+  canonicalMessageId,
+  forkConversationAtMessage,
+  removeConversationPreservingBranches,
+} from './src/services/conversationBranches';
+import {
+  buildWorkspaceSearchIndex,
+  searchWorkspaceIndex,
+  type WorkspaceSearchIndex,
+  type WorkspaceSearchResult,
+} from './src/services/workspaceSearch';
+import {
+  buildModelCapabilityMatrixRows,
+  compareProviderEndpointBinding,
+  inspectProviderEndpoint,
+  providerEndpointFingerprint,
+} from './src/services/providerSetup';
+import {
+  completeProviderUsageEvent,
+  createStartedProviderUsageEvent,
+  evaluateProviderRequestPlan,
+  pruneProviderUsageEvents,
+  summarizeDailyProviderUsage,
+  upsertProviderUsageEvent,
+  type ProviderRequestPlan,
+} from './src/services/costGuard';
 
 /**
  * Anthropic / Claude 风格视觉令牌。
@@ -465,9 +510,11 @@ function AnimatedPressable(props: AnimatedPressableProps) {
 function AnimatedMessageSurface({
   style,
   children,
+  onLayout,
 }: {
   style?: StyleProp<ViewStyle>;
   children?: ReactNode;
+  onLayout?: (event: LayoutChangeEvent) => void;
 }) {
   const progress = useSharedValue(0);
 
@@ -485,22 +532,24 @@ function AnimatedMessageSurface({
     ],
   }));
 
-  return <Reanimated.View style={[style, animatedStyle]}>{children}</Reanimated.View>;
+  return <Reanimated.View onLayout={onLayout} style={[style, animatedStyle]}>{children}</Reanimated.View>;
 }
 
 function AnimatedMessage({
   animate,
   style,
   children,
+  onLayout,
 }: {
   animate: boolean;
   style?: StyleProp<ViewStyle>;
   children?: ReactNode;
+  onLayout?: (event: LayoutChangeEvent) => void;
 }) {
   if (!animate) {
-    return <View style={style}>{children}</View>;
+    return <View onLayout={onLayout} style={style}>{children}</View>;
   }
-  return <AnimatedMessageSurface style={style}>{children}</AnimatedMessageSurface>;
+  return <AnimatedMessageSurface onLayout={onLayout} style={style}>{children}</AnimatedMessageSurface>;
 }
 
 /**
@@ -640,7 +689,7 @@ const candidateModelFilters: Array<{ key: ModelCapabilityFilter; label: string }
   { key: 'reasoning', label: '推理' },
   { key: 'vision', label: '视觉' },
   { key: 'web', label: '联网' },
-  { key: 'free', label: '免费' },
+  { key: 'free', label: 'Free / Trial 字样 ≠ 免费额度' },
   { key: 'embedding', label: '嵌入' },
   { key: 'rerank', label: '重排' },
   { key: 'tool', label: '工具' },
@@ -766,11 +815,12 @@ function matchesCandidateModelFilter(model: ModelInfo, filter: ModelCapabilityFi
 }
 
 const maxSavedConversations = 100;
-const conversationActionMenuHeight = 154;
+const conversationActionMenuHeight = 198;
 
 function isConversationMessage(message: ChatMessage): boolean {
   return (
     message.id !== 'welcome' &&
+    message.role !== 'system' &&
     (message.content.trim().length > 0 ||
       Boolean(message.attachments?.length) ||
       Boolean(message.reasoningContent?.trim()) ||
@@ -785,21 +835,6 @@ function hasConversationHistory(conversation: ChatConversation): boolean {
 
 function messageAttachments(messages: ChatMessage[]): MediaAttachment[] {
   return messages.flatMap((message) => message.attachments ?? []);
-}
-
-function conversationSearchText(conversation: ChatConversation): string {
-  return [
-    conversation.title,
-    ...conversation.messages.flatMap((message) => [
-      message.content,
-      message.reasoningContent ?? '',
-      message.modelId ?? '',
-      message.providerName ?? '',
-      message.attachments?.map((attachment) => attachment.name).join(' ') ?? '',
-    ]),
-  ]
-    .join(' ')
-    .toLowerCase();
 }
 
 function conversationTitleFromMessages(messages: ChatMessage[]): string {
@@ -852,22 +887,88 @@ function upsertConversation(
   conversations: ChatConversation[],
   conversationId: string,
   messages: ChatMessage[],
-  updatedAt = Date.now()
+  updatedAt = Date.now(),
+  projectId?: string
 ): ChatConversation[] {
   const existing = conversations.find((conversation) => conversation.id === conversationId);
   const firstTimestamp = messages[0]?.createdAt;
   const conversation: ChatConversation = {
+    ...existing,
     id: conversationId,
+    ...(existing?.projectId || projectId ? { projectId: existing?.projectId ?? projectId } : {}),
     title: existing?.customTitle ? existing.title : conversationTitleFromMessages(messages),
-    customTitle: existing?.customTitle,
-    pinnedAt: existing?.pinnedAt,
     createdAt: existing?.createdAt ?? firstTimestamp ?? updatedAt,
     updatedAt,
     messages,
   };
 
-  return sortConversations([conversation, ...conversations.filter((item) => item.id !== conversationId)])
-    .slice(0, maxSavedConversations);
+  return sortConversations([conversation, ...conversations.filter((item) => item.id !== conversationId)]);
+}
+
+function projectInstructionMessage(project: WorkspaceProject, now = Date.now()): ChatMessage | undefined {
+  const content = project.systemPrompt?.trim();
+  if (!content) {
+    return undefined;
+  }
+  return {
+    id: createId('project-system'),
+    role: 'system',
+    content,
+    createdAt: now,
+    status: 'ready',
+    projectInstructionId: project.id,
+  };
+}
+
+function syncProjectInstructionSnapshot(
+  messages: ChatMessage[],
+  project: WorkspaceProject,
+  now = Date.now()
+): ChatMessage[] {
+  const retained = messages.filter((message) => !message.projectInstructionId);
+  const instruction = projectInstructionMessage(project, now);
+  return orderConversationSystemMessages(instruction ? [instruction, ...retained] : retained);
+}
+
+function orderConversationSystemMessages(messages: ChatMessage[]): ChatMessage[] {
+  const welcome = messages.filter((message) => message.id === 'welcome');
+  const projectInstructions = messages.filter(
+    (message) => message.id !== 'welcome' && Boolean(message.projectInstructionId)
+  );
+  const otherSystemMessages = messages.filter(
+    (message) =>
+      message.id !== 'welcome' &&
+      !message.projectInstructionId &&
+      message.role === 'system'
+  );
+  const conversational = messages.filter(
+    (message) => message.id !== 'welcome' && message.role !== 'system'
+  );
+  return [...welcome, ...projectInstructions, ...otherSystemMessages, ...conversational];
+}
+
+function resolveValidVoiceTarget(
+  workspace: AppWorkspace,
+  kind: 'transcription' | 'speech'
+): { provider: ProviderProfile; modelId: string } | null {
+  const target = kind === 'transcription'
+    ? workspace.voice.transcriptionTarget
+    : workspace.voice.speechTarget;
+  if (!target) return null;
+  const provider = workspace.providers.find((item) => item.id === target.providerId);
+  const model = provider?.models.find((item) => item.id === target.modelId);
+  const capability = kind === 'transcription' ? 'speech-to-text' : 'text-to-speech';
+  const expectedTask: ModelTask = kind === 'transcription'
+    ? 'audio-transcription'
+    : 'speech-generation';
+  if (!provider || !model || inferModelTask(model) !== expectedTask || !model.capabilities.includes(capability)) {
+    return null;
+  }
+  const readiness = getProviderAudioReadiness(provider);
+  if (kind === 'transcription' ? !readiness.canTranscribe : !readiness.canSynthesize) {
+    return null;
+  }
+  return { provider, modelId: model.id };
 }
 
 function formatConversationTime(timestamp: number) {
@@ -923,7 +1024,16 @@ function formatUpdateStatusTitle(updateInfo: AppUpdateInfo | null, updateNotice:
 export default function App() {
   const voiceRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const voiceRecorderState = useAudioRecorderState(voiceRecorder, 250);
-  const [workspace, setWorkspace] = useState<AppWorkspace>(() => createDefaultWorkspace());
+  const [workspace, setWorkspaceState] = useState<AppWorkspace>(() => createDefaultWorkspace());
+  const workspaceRef = useRef(workspace);
+  const setWorkspace = useCallback((update: SetStateAction<AppWorkspace>) => {
+    const current = workspaceRef.current;
+    const next = typeof update === 'function'
+      ? (update as (value: AppWorkspace) => AppWorkspace)(current)
+      : update;
+    workspaceRef.current = next;
+    setWorkspaceState(next);
+  }, []);
   const [booting, setBooting] = useState(true);
   const [persistenceReady, setPersistenceReady] = useState(false);
   const [persistenceLoadError, setPersistenceLoadError] = useState<string | null>(null);
@@ -935,12 +1045,26 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [input, setInput] = useState('');
   const [manualModelId, setManualModelId] = useState('');
+  const [projectNewName, setProjectNewName] = useState('');
+  const [projectNameDraft, setProjectNameDraft] = useState('');
+  const [projectSystemPromptDraft, setProjectSystemPromptDraft] = useState('');
+  const [moveConversationId, setMoveConversationId] = useState<string | null>(null);
+  const [providerNameDraft, setProviderNameDraft] = useState('');
+  const [providerKindDraft, setProviderKindDraft] = useState<ProviderProfile['kind']>('custom');
+  const [providerBaseUrlDraft, setProviderBaseUrlDraft] = useState('');
+  const [providerApiKeyDraft, setProviderApiKeyDraft] = useState('');
+  const [providerKeyBindingFingerprint, setProviderKeyBindingFingerprint] = useState<string | null>(null);
   const [promptTemplateName, setPromptTemplateName] = useState('');
   const [promptTemplateContent, setPromptTemplateContent] = useState('');
   const [promptTemplateMode, setPromptTemplateMode] = useState<'composer' | 'system'>('composer');
   const [pricingInputDraft, setPricingInputDraft] = useState('');
   const [pricingCachedDraft, setPricingCachedDraft] = useState('');
   const [pricingOutputDraft, setPricingOutputDraft] = useState('');
+  const [costMaxOutputDraft, setCostMaxOutputDraft] = useState('4096');
+  const [costDailyRequestDraft, setCostDailyRequestDraft] = useState('0');
+  const [costDailyCnyDraft, setCostDailyCnyDraft] = useState('0');
+  const [costDailyUsdDraft, setCostDailyUsdDraft] = useState('0');
+  const [costConfirmationReason, setCostConfirmationReason] = useState<string | null>(null);
   const [generationTaskFilter, setGenerationTaskFilter] = useState<GenerationTaskFilter>('all');
   const [backupPassword, setBackupPassword] = useState('');
   const [backupBusy, setBackupBusy] = useState(false);
@@ -954,6 +1078,12 @@ export default function App() {
   const [modelCapabilityFilter, setModelCapabilityFilter] = useState<ModelCapabilityFilter>('all');
   const [candidateModelRenderLimit, setCandidateModelRenderLimit] = useState(candidateModelPageSize);
   const [historySearchQuery, setHistorySearchQuery] = useState('');
+  const [globalSearchIndex, setGlobalSearchIndex] = useState<WorkspaceSearchIndex | null>(null);
+  const [highlightedSearchMessageId, setHighlightedSearchMessageId] = useState<string | null>(null);
+  const [analyticsSnapshot, setAnalyticsSnapshot] = useState(() => ({
+    conversations: workspace.conversations,
+    modelPricing: workspace.modelPricing,
+  }));
   const [attachments, setAttachments] = useState<MediaAttachment[]>([]);
   const [activeVideoAttachmentId, setActiveVideoAttachmentId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -978,13 +1108,17 @@ export default function App() {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchHighlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingSearchMessageIdRef = useRef<string | null>(null);
+  const messageLayoutYByIdRef = useRef(new Map<string, number>());
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const workspaceRef = useRef(workspace);
+  const costConfirmationResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
   const pendingAttachmentsRef = useRef(attachments);
   const persistenceReadyRef = useRef(false);
   const persistenceDirtyRef = useRef(false);
   const suppressNextSaveRef = useRef(false);
   const mountedRef = useRef(true);
+  const workspaceReplacementInProgressRef = useRef(false);
   const activeRequestRef = useRef<{ controller: AbortController; label: string } | null>(null);
   const audioOperationSequenceRef = useRef(0);
   const activeAudioOperationRef = useRef<ActiveAudioOperation | null>(null);
@@ -1008,10 +1142,15 @@ export default function App() {
       if (copiedTimer.current) {
         clearTimeout(copiedTimer.current);
       }
+      if (searchHighlightTimer.current) {
+        clearTimeout(searchHighlightTimer.current);
+      }
       if (saveTimer.current) {
         clearTimeout(saveTimer.current);
       }
       activeRequestRef.current?.controller.abort();
+      costConfirmationResolverRef.current?.(false);
+      costConfirmationResolverRef.current = null;
       activeAudioOperationRef.current?.controller.abort();
       speechPlayerRef.current?.release();
       speechPlayerRef.current = null;
@@ -1052,6 +1191,11 @@ export default function App() {
   }
 
   function ensureWorkspaceWritable(): boolean {
+    if (workspaceReplacementInProgressRef.current) {
+      setNotice('正在验证并导入备份，暂时不能修改工作区。');
+      return false;
+    }
+
     if (persistenceReadyRef.current) {
       return true;
     }
@@ -1061,6 +1205,11 @@ export default function App() {
   }
 
   function beginActiveRequest(label: string): AbortController | null {
+    if (workspaceReplacementInProgressRef.current) {
+      setNotice('正在验证并导入备份，暂时不能发起新请求。');
+      return null;
+    }
+
     if (activeRequestRef.current) {
       setNotice(`${activeRequestRef.current.label}仍在进行中，请先停止或等待完成。`);
       return null;
@@ -1073,6 +1222,11 @@ export default function App() {
   }
 
   function beginAudioOperation(kind: ActiveAudioOperation['kind']): ActiveAudioOperation | null {
+    if (workspaceReplacementInProgressRef.current) {
+      setNotice('正在验证并导入备份，暂时不能开始语音操作。');
+      return null;
+    }
+
     if (activeAudioOperationRef.current) {
       return null;
     }
@@ -1194,7 +1348,7 @@ export default function App() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [setWorkspace]);
 
   useEffect(() => {
     if (booting || !persistenceReady) {
@@ -1276,6 +1430,37 @@ export default function App() {
   }, [sidebarOpen]);
 
   useEffect(() => {
+    if (!settingsOpen || busy) return;
+    setAnalyticsSnapshot({
+      conversations: workspace.conversations,
+      modelPricing: workspace.modelPricing,
+    });
+  }, [busy, settingsOpen, workspace.conversations, workspace.modelPricing]);
+
+  useEffect(() => {
+    if (!sidebarOpen) {
+      setGlobalSearchIndex(null);
+      return;
+    }
+    let cancelled = false;
+    const task = InteractionManager.runAfterInteractions(() => {
+      if (cancelled) return;
+      const current = workspaceRef.current;
+      setGlobalSearchIndex(buildWorkspaceSearchIndex({
+        projects: current.projects,
+        conversations: current.conversations,
+        promptTemplates: current.promptTemplates,
+      }));
+    });
+    // Search uses a snapshot taken when the drawer opens. Streaming message
+    // updates therefore cannot rebuild a multi-megabyte index on every stream tick.
+    return () => {
+      cancelled = true;
+      task.cancel();
+    };
+  }, [sidebarOpen]);
+
+  useEffect(() => {
     if (deleteConfirmConversationId && renamingConversationId) {
       setRenamingConversationId(null);
       setRenameDraft('');
@@ -1288,6 +1473,14 @@ export default function App() {
     }
 
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (costConfirmationReason) {
+        resolveCostConfirmation(false);
+        return true;
+      }
+      if (moveConversationId) {
+        setMoveConversationId(null);
+        return true;
+      }
       if (renamingConversationId) {
         setRenamingConversationId(null);
         setRenameDraft('');
@@ -1326,10 +1519,12 @@ export default function App() {
     return () => subscription.remove();
   }, [
     attachMenuOpen,
+    costConfirmationReason,
     deleteConfirmConversationId,
     deleteConfirmProviderId,
     messageActionMenuId,
     modelPickerOpen,
+    moveConversationId,
     parameterMenuOpen,
     reasoningMenuOpen,
     renamingConversationId,
@@ -1341,6 +1536,30 @@ export default function App() {
     () => workspace.providers.find((provider) => provider.id === workspace.activeProviderId) ?? workspace.providers[0],
     [workspace.activeProviderId, workspace.providers]
   );
+  const activeProject = useMemo(
+    () => workspace.projects.find((project) => project.id === workspace.activeProjectId) ?? workspace.projects[0],
+    [workspace.activeProjectId, workspace.projects]
+  );
+  useEffect(() => {
+    if (!activeProvider) return;
+    setProviderNameDraft(activeProvider.name);
+    setProviderKindDraft(activeProvider.kind);
+    setProviderBaseUrlDraft(activeProvider.baseUrl);
+    setProviderApiKeyDraft(activeProvider.apiKey ?? '');
+    setProviderKeyBindingFingerprint(
+      activeProvider.apiKey ? providerEndpointFingerprint(activeProvider) ?? null : null
+    );
+    // Reset when switching providers and once after async hydration. Ordinary
+    // model/cache updates keep any unsaved edits intact.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProvider?.id, persistenceReady]);
+  useEffect(() => {
+    if (!activeProject) return;
+    setProjectNameDraft(activeProject.name);
+    setProjectSystemPromptDraft(activeProject.systemPrompt ?? '');
+    // Reset when switching projects and once after async hydration.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProject?.id, persistenceReady]);
   const workspaceReadOnly = isWorkspaceReadOnly(booting, persistenceReady);
 
   const addedModels = useMemo(() => {
@@ -1358,6 +1577,19 @@ export default function App() {
     : '';
 
   const activeModel = addedModels.find((model) => model.id === activeModelId);
+  const providerEndpointInspection = useMemo(
+    () => inspectProviderEndpoint(providerBaseUrlDraft, {
+      kind: providerKindDraft,
+      apiKey: providerApiKeyDraft,
+    }),
+    [providerApiKeyDraft, providerBaseUrlDraft, providerKindDraft]
+  );
+  const capabilityMatrixRows = useMemo(
+    () => activeProvider
+      ? buildModelCapabilityMatrixRows(activeProvider, addedModels, { platform: Platform.OS })
+      : [],
+    [activeProvider, addedModels]
+  );
   const activeModelTask = activeModel ? inferModelTask(activeModel) : 'chat';
   const activeModelSupportsComposer = ['chat', 'image-generation', 'video-generation'].includes(activeModelTask);
   const canConfigureParameters = Boolean(
@@ -1569,24 +1801,45 @@ export default function App() {
       })
     );
   }, [activeModel, activeModelTask, activeProvider, comparisonActive, comparisonRuntimes]);
+  const configuredTranscriptionTarget = resolveValidVoiceTarget(workspace, 'transcription');
+  const configuredSpeechTarget = resolveValidVoiceTarget(workspace, 'speech');
+  const activeAudioReadiness = useMemo(
+    () => activeProvider ? getProviderAudioReadiness(activeProvider) : null,
+    [activeProvider]
+  );
+  const canSetActiveTranscriptionTarget = Boolean(
+    Platform.OS === 'android' &&
+    activeModel &&
+    inferModelTask(activeModel) === 'audio-transcription' &&
+    activeModel.capabilities.includes('speech-to-text') &&
+    activeAudioReadiness?.canTranscribe
+  );
+  const canSetActiveSpeechTarget = Boolean(
+    Platform.OS === 'android' &&
+    activeModel &&
+    inferModelTask(activeModel) === 'speech-generation' &&
+    activeModel.capabilities.includes('text-to-speech') &&
+    activeAudioReadiness?.canSynthesize
+  );
   const configuredSpeechProtocol = useMemo(() => {
-    const target = workspace.voice.speechTarget;
-    const provider = target
-      ? workspace.providers.find((item) => item.id === target.providerId)
-      : undefined;
-    if (!provider) {
+    if (!configuredSpeechTarget) {
       return undefined;
     }
     try {
-      return resolveProviderAudioProtocol(provider);
+      return resolveProviderAudioProtocol(configuredSpeechTarget.provider);
     } catch {
       return undefined;
     }
-  }, [workspace.providers, workspace.voice.speechTarget]);
+  }, [configuredSpeechTarget]);
   const recentConversations = useMemo(
     () =>
-      sortConversations(workspace.conversations.filter(hasConversationHistory)),
-    [workspace.conversations]
+      sortConversations(
+        workspace.conversations.filter(
+          (conversation) =>
+            hasConversationHistory(conversation) && conversation.projectId === workspace.activeProjectId
+        )
+      ),
+    [workspace.activeProjectId, workspace.conversations]
   );
   const renamingConversation = renamingConversationId
     ? workspace.conversations.find((conversation) => conversation.id === renamingConversationId) ?? null
@@ -1603,26 +1856,31 @@ export default function App() {
   const editingMessage = editingMessageId
     ? workspace.messages.find((message) => message.id === editingMessageId) ?? null
     : null;
-  const filteredConversations = useMemo(() => {
-    const query = historySearchQuery.trim().toLowerCase();
-
-    if (!query) {
-      return recentConversations;
+  const filteredConversations = recentConversations;
+  const globalSearchResults = useMemo<WorkspaceSearchResult[]>(() => {
+    if (!historySearchQuery.trim() || !globalSearchIndex) {
+      return [];
     }
-
-    return recentConversations.filter((conversation) => conversationSearchText(conversation).includes(query));
-  }, [historySearchQuery, recentConversations]);
+    return searchWorkspaceIndex(globalSearchIndex, historySearchQuery, { limit: 80 });
+  }, [globalSearchIndex, historySearchQuery]);
   const usageAggregation = useMemo(
-    () => aggregateUsage(workspace.conversations, workspace.modelPricing),
-    [workspace.conversations, workspace.modelPricing]
+    () => aggregateUsage(analyticsSnapshot.conversations, analyticsSnapshot.modelPricing),
+    [analyticsSnapshot]
   );
+  const costGuardToday = useMemo(
+    () => summarizeDailyProviderUsage(workspace.providerUsageEvents, Date.now()),
+    [workspace.providerUsageEvents]
+  );
+  const comparisonTargetLimit = workspace.costGuard.enabled
+    ? workspace.costGuard.maxComparisonTargets
+    : 4;
   const knownCostRequestCount = Math.max(
     0,
     usageAggregation.totals.requestCount - usageAggregation.totals.unknown.cost
   );
   const generationTasks = useMemo(
-    () => deriveGenerationTasks(workspace.conversations),
-    [workspace.conversations]
+    () => deriveGenerationTasks(analyticsSnapshot.conversations),
+    [analyticsSnapshot.conversations]
   );
   const visibleGenerationTasks = useMemo(
     () => filterGenerationTasks(generationTasks, generationTaskFilter),
@@ -1658,22 +1916,414 @@ export default function App() {
   }, [activeModelPricing]);
 
   useEffect(() => {
+    setCostMaxOutputDraft(String(workspace.costGuard.maxOutputTokens));
+    setCostDailyRequestDraft(String(workspace.costGuard.dailyRequestLimit));
+    setCostDailyCnyDraft(String(workspace.costGuard.dailyCnyBudget));
+    setCostDailyUsdDraft(String(workspace.costGuard.dailyUsdBudget));
+  }, [
+    workspace.costGuard.dailyCnyBudget,
+    workspace.costGuard.dailyRequestLimit,
+    workspace.costGuard.dailyUsdBudget,
+    workspace.costGuard.maxOutputTokens,
+  ]);
+
+  useEffect(() => {
     if (!canConfigureReasoning && reasoningMenuOpen) {
       setReasoningMenuOpen(false);
     }
   }, [canConfigureReasoning, reasoningMenuOpen]);
 
-  function updateActiveProvider(patch: Partial<ProviderProfile>) {
-    if (!ensureWorkspaceWritable() || !activeProvider) {
+  function providerFromDraft(): ProviderProfile | null {
+    if (!activeProvider) return null;
+    const inspection = inspectProviderEndpoint(providerBaseUrlDraft, {
+      kind: providerKindDraft,
+      apiKey: providerApiKeyDraft,
+    });
+    if (!inspection.valid || inspection.policy === 'blocked' || !inspection.normalizedBaseUrl) {
+      setNotice(inspection.errors[0] ?? '服务商配置未通过本地安全检查。');
+      return null;
+    }
+    const binding = compareProviderEndpointBinding(activeProvider, {
+      kind: providerKindDraft,
+      baseUrl: inspection.normalizedBaseUrl,
+    });
+    const finalFingerprint = providerEndpointFingerprint({
+      kind: providerKindDraft,
+      baseUrl: inspection.normalizedBaseUrl,
+    });
+    if (providerApiKeyDraft.trim() && providerKeyBindingFingerprint !== finalFingerprint) {
+      setProviderApiKeyDraft('');
+      setProviderKeyBindingFingerprint(null);
+      setNotice('API Key 不是在当前最终端点下输入的；为防止跨端点发送，请确认地址后重新输入对应 Key。');
+      return null;
+    }
+    return {
+      ...activeProvider,
+      name: providerNameDraft.trim() || activeProvider.name,
+      kind: providerKindDraft,
+      baseUrl: inspection.normalizedBaseUrl,
+      apiKey: providerApiKeyDraft.trim() || undefined,
+      models: binding.mustClearModels ? [] : activeProvider.models,
+      capabilities: binding.mustClearModels ? ['text', 'streaming'] : activeProvider.capabilities,
+    };
+  }
+
+  function saveProviderDraft(): ProviderProfile | null {
+    if (!ensureWorkspaceWritable() || !activeProvider) return null;
+    const nextProvider = providerFromDraft();
+    if (!nextProvider) return null;
+    const binding = compareProviderEndpointBinding(activeProvider, nextProvider);
+    setWorkspace((current) => {
+      const comparisonTargets = binding.mustClearModelCandidates
+        ? current.comparisonTargets.filter((target) => target.providerId !== activeProvider.id)
+        : current.comparisonTargets;
+      const voice = { ...current.voice };
+      if (binding.mustClearModelCandidates) {
+        if (voice.transcriptionTarget?.providerId === activeProvider.id) {
+          delete voice.transcriptionTarget;
+        }
+        if (voice.speechTarget?.providerId === activeProvider.id) {
+          delete voice.speechTarget;
+        }
+      }
+      return {
+        ...current,
+        providers: current.providers.map((provider) =>
+          provider.id === activeProvider.id ? nextProvider : provider
+        ),
+        ...(binding.mustClearModelCandidates
+          ? {
+              modelCandidatesByProvider: {
+                ...current.modelCandidatesByProvider,
+                [activeProvider.id]: [],
+              },
+              activeModelIdByProvider: {
+                ...current.activeModelIdByProvider,
+                [activeProvider.id]: '',
+              },
+              comparisonTargets,
+              comparisonEnabled: current.comparisonEnabled && comparisonTargets.length >= 2,
+              voice,
+              projects: current.projects.map((project) =>
+                project.defaultTarget?.providerId === activeProvider.id
+                  ? { ...project, defaultTarget: undefined, updatedAt: Date.now() }
+                  : project
+              ),
+              modelPricing: current.modelPricing.filter(
+                (pricing) => pricing.providerId !== activeProvider.id
+              ),
+              reasoningEffortByModel: Object.fromEntries(
+                Object.entries(current.reasoningEffortByModel).filter(
+                  ([key]) => !key.startsWith(`${activeProvider.id}:`)
+                )
+              ),
+            }
+          : {}),
+      };
+    });
+    setProviderBaseUrlDraft(nextProvider.baseUrl);
+    setProviderKeyBindingFingerprint(
+      nextProvider.apiKey ? providerEndpointFingerprint(nextProvider) ?? null : null
+    );
+    setNotice(
+      binding.changed
+        ? '已保存新端点，并清除旧模型缓存；只有重新输入的 Key 会绑定到新地址。'
+        : '服务商配置已安全保存在本机。'
+    );
+    return nextProvider;
+  }
+
+  function changeProviderBindingDraft(patch: { kind?: ProviderProfile['kind']; baseUrl?: string }) {
+    if (!activeProvider) return;
+    const nextKind = patch.kind ?? providerKindDraft;
+    const nextBaseUrl = patch.baseUrl ?? providerBaseUrlDraft;
+    if (patch.kind) setProviderKindDraft(patch.kind);
+    if (patch.baseUrl !== undefined) setProviderBaseUrlDraft(patch.baseUrl);
+    const nextFingerprint = providerEndpointFingerprint({
+      kind: nextKind,
+      baseUrl: nextBaseUrl,
+    });
+    // Bind the credential to the exact normalized draft that existed when it
+    // was entered. This also covers A → B → A edits that comparison with the
+    // last saved endpoint alone cannot detect.
+    if (providerApiKeyDraft && providerKeyBindingFingerprint !== nextFingerprint) {
+      setProviderApiKeyDraft('');
+      setProviderKeyBindingFingerprint(null);
+    }
+  }
+
+  function createProject() {
+    if (!ensureWorkspaceWritable()) return;
+    if (workspace.conversations.length >= maxSavedConversations) {
+      setNotice(`本机最多保存 ${maxSavedConversations} 个对话；请先导出备份并删除不需要的对话，再创建项目。`);
       return;
     }
+    try {
+      const id = createId('project');
+      const now = Date.now();
+      const projects = createWorkspaceProject(
+        workspace.projects,
+        { name: projectNewName },
+        { id, now }
+      );
+      const conversation: ChatConversation = {
+        id: createId('conversation'),
+        title: '新对话',
+        projectId: id,
+        createdAt: now,
+        updatedAt: now,
+        messages: [],
+      };
+      setWorkspace((current) => ({
+        ...current,
+        projects,
+        activeProjectId: id,
+        activeConversationId: conversation.id,
+        conversations: sortConversations([conversation, ...current.conversations]),
+        messages: [],
+      }));
+      resetComposerForConversationChange();
+      setProjectNewName('');
+      setNotice('项目已在本机创建；创建本身不会调用模型或产生费用。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '项目创建失败。');
+    }
+  }
 
+  function saveActiveProject() {
+    if (!ensureWorkspaceWritable() || !activeProject) return;
+    try {
+      const now = Date.now();
+      const projects = updateWorkspaceProject(
+        workspace.projects,
+        activeProject.id,
+        { name: projectNameDraft, systemPrompt: projectSystemPromptDraft },
+        now
+      );
+      const savedProject = projects.find((project) => project.id === activeProject.id)!;
+      setWorkspace((current) => {
+        const conversation = current.conversations.find(
+          (candidate) =>
+            candidate.id === current.activeConversationId &&
+            candidate.projectId === activeProject.id &&
+            !hasConversationHistory(candidate)
+        );
+        if (!conversation) return { ...current, projects };
+        const messages = syncProjectInstructionSnapshot(
+          conversation.messages,
+          savedProject,
+          now
+        );
+        return {
+          ...current,
+          projects,
+          messages,
+          conversations: current.conversations.map((candidate) =>
+            candidate.id === conversation.id
+              ? { ...candidate, messages, updatedAt: now }
+              : candidate
+          ),
+        };
+      });
+      setNotice('项目设置已保存在本机；系统提示只会随你之后主动发送的请求交给服务商。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '项目保存失败。');
+    }
+  }
+
+  function setProjectDefaultToCurrentModel() {
+    if (!ensureWorkspaceWritable() || !activeProject || !activeProvider || !activeModelId) {
+      setNotice('请先选择一个已添加模型。');
+      return;
+    }
     setWorkspace((current) => ({
       ...current,
-      providers: current.providers.map((provider) =>
-        provider.id === activeProvider.id ? { ...provider, ...patch } : provider
+      projects: updateWorkspaceProject(
+        current.projects,
+        activeProject.id,
+        { defaultTarget: { providerId: activeProvider.id, modelId: activeModelId } },
+        Date.now()
       ),
     }));
+    setNotice('已将当前模型设为这个项目的新对话默认模型。');
+  }
+
+  async function removeActiveProject() {
+    if (!ensureWorkspaceWritable() || !activeProject) return;
+    const projectId = activeProject.id;
+    const fallbackId = workspace.projects.find((project) => project.id !== projectId)?.id;
+    const fallbackPreview = workspace.projects.find((project) => project.id === fallbackId);
+    if (!fallbackId || !fallbackPreview) {
+      setNotice('至少需要保留一个项目。');
+      return;
+    }
+    const conversationCount = workspace.conversations.filter(
+      (conversation) => conversation.projectId === projectId
+    ).length;
+    if (!(await confirmDestructiveAction(
+      `删除项目“${activeProject.name}”？`,
+      `项目名称、系统提示和默认模型将被删除；${conversationCount} 个对话会完整迁移到“${fallbackPreview.name}”。`
+    ))) {
+      return;
+    }
+    try {
+      const currentWorkspace = workspaceRef.current;
+      const targetProject = currentWorkspace.projects.find((project) => project.id === projectId);
+      const fallback = currentWorkspace.projects.find((project) => project.id === fallbackId)
+        ?? currentWorkspace.projects.find((project) => project.id !== projectId);
+      if (!targetProject || !fallback) {
+        throw new Error('确认期间项目列表已变化，请重新操作。');
+      }
+      const migratedConversationIds = new Set(
+        currentWorkspace.conversations
+          .filter((conversation) => conversation.projectId === targetProject.id)
+          .map((conversation) => conversation.id)
+      );
+      const result = deleteWorkspaceProject(
+        currentWorkspace.projects,
+        currentWorkspace.conversations,
+        targetProject.id,
+        fallback.id
+      );
+      const now = Date.now();
+      const conversations = result.conversations.map((conversation) =>
+        migratedConversationIds.has(conversation.id) && !hasConversationHistory(conversation)
+          ? {
+              ...conversation,
+              messages: syncProjectInstructionSnapshot(conversation.messages, fallback, now),
+              updatedAt: now,
+            }
+          : conversation
+      );
+      const activeConversation = conversations.find(
+        (conversation) => conversation.id === currentWorkspace.activeConversationId
+      );
+      const fallbackDefaultTarget = activeConversation && !hasConversationHistory(activeConversation)
+        ? resolveProjectDefaultTarget(fallback, currentWorkspace.providers)
+        : undefined;
+      setWorkspace((current) => ({
+        ...current,
+        projects: result.projects,
+        conversations,
+        activeProjectId: activeConversation?.projectId ?? fallback.id,
+        ...(activeConversation ? { messages: activeConversation.messages } : {}),
+        ...(fallbackDefaultTarget
+          ? {
+              activeProviderId: fallbackDefaultTarget.providerId,
+              activeModelIdByProvider: {
+                ...current.activeModelIdByProvider,
+                [fallbackDefaultTarget.providerId]: fallbackDefaultTarget.modelId,
+              },
+            }
+          : {}),
+      }));
+      setNotice('项目已删除；其中的对话已完整移入回退项目。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '项目删除失败。');
+    }
+  }
+
+  function moveConversation(conversationId: string, projectId: string) {
+    if (!ensureWorkspaceWritable()) return;
+    try {
+      setWorkspace((current) => {
+        const project = current.projects.find((candidate) => candidate.id === projectId);
+        let conversations = moveConversationToProject(
+          current.conversations,
+          conversationId,
+          projectId,
+          current.projects
+        );
+        const moved = conversations.find((conversation) => conversation.id === conversationId);
+        let defaultTarget: ModelTargetRef | undefined;
+        if (project && moved && !hasConversationHistory(moved)) {
+          const now = Date.now();
+          const messages = syncProjectInstructionSnapshot(moved.messages, project, now);
+          defaultTarget = resolveProjectDefaultTarget(project, current.providers);
+          conversations = conversations.map((conversation) =>
+            conversation.id === conversationId
+              ? { ...conversation, messages, updatedAt: now }
+              : conversation
+          );
+        }
+        const activeConversation = conversations.find(
+          (conversation) => conversation.id === current.activeConversationId
+        );
+        return {
+          ...current,
+          conversations,
+          ...(current.activeConversationId === conversationId
+            ? {
+                activeProjectId: projectId,
+                messages: activeConversation?.messages ?? [],
+                ...(defaultTarget
+                  ? {
+                      activeProviderId: defaultTarget.providerId,
+                      activeModelIdByProvider: {
+                        ...current.activeModelIdByProvider,
+                        [defaultTarget.providerId]: defaultTarget.modelId,
+                      },
+                    }
+                  : {}),
+              }
+            : {}),
+        };
+      });
+      setMoveConversationId(null);
+      setNotice('对话已移动到所选项目；若父子分支因此跨项目，其关联已安全分离。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '移动对话失败。');
+    }
+  }
+
+  function highlightSearchMessage(messageId: string) {
+    setHighlightedSearchMessageId(messageId);
+    if (searchHighlightTimer.current) clearTimeout(searchHighlightTimer.current);
+    searchHighlightTimer.current = setTimeout(() => {
+      setHighlightedSearchMessageId((current) => current === messageId ? null : current);
+      searchHighlightTimer.current = null;
+    }, 2200);
+  }
+
+  function scrollToSearchMessage(messageId: string) {
+    const y = messageLayoutYByIdRef.current.get(messageId);
+    if (y === undefined) {
+      pendingSearchMessageIdRef.current = messageId;
+      return;
+    }
+    pendingSearchMessageIdRef.current = null;
+    shouldAutoScrollRef.current = false;
+    chatScrollRef.current?.scrollTo({ y: Math.max(0, y - 20), animated: true });
+    highlightSearchMessage(messageId);
+  }
+
+  function openGlobalSearchResult(result: WorkspaceSearchResult) {
+    setHistorySearchQuery('');
+    setSettingsOpen(false);
+    if (result.kind === 'project' && result.projectId) {
+      selectProject(result.projectId);
+      return;
+    }
+    if (result.kind === 'prompt-template') {
+      const templateId = result.id.replace(/^prompt-template:/, '');
+      applyPromptTemplate(templateId);
+      setSidebarOpen(false);
+      return;
+    }
+    if (result.conversationId) {
+      if (result.messageId) {
+        if (result.conversationId !== workspace.activeConversationId) {
+          messageLayoutYByIdRef.current.clear();
+        }
+        pendingSearchMessageIdRef.current = result.messageId;
+        shouldAutoScrollRef.current = false;
+      }
+      selectConversation(result.conversationId);
+      if (result.messageId) {
+        setTimeout(() => scrollToSearchMessage(result.messageId!), 80);
+      }
+      setNotice(result.messageId ? '已打开并定位匹配消息。' : '已打开匹配对话。');
+    }
   }
 
   function selectProvider(providerId: string) {
@@ -1730,8 +2380,8 @@ export default function App() {
     const alreadySelected = workspace.comparisonTargets.some(
       (target) => `${target.providerId}:${target.modelId}` === key
     );
-    if (!alreadySelected && workspace.comparisonTargets.length >= 4) {
-      setNotice('对比模式最多选择 4 个模型。');
+    if (!alreadySelected && workspace.comparisonTargets.length >= comparisonTargetLimit) {
+      setNotice(`当前费用保险丝允许最多选择 ${comparisonTargetLimit} 个对比模型。`);
       return;
     }
     setWorkspace((current) => {
@@ -1844,9 +2494,7 @@ export default function App() {
       const withoutExisting = current.messages.filter(
         (message) => message.promptTemplateId !== template.id
       );
-      const welcome = withoutExisting.filter((message) => message.id === 'welcome');
-      const remaining = withoutExisting.filter((message) => message.id !== 'welcome');
-      const messages = [...welcome, systemMessage, ...remaining];
+      const messages = orderConversationSystemMessages([...withoutExisting, systemMessage]);
       return {
         ...current,
         activeConversationId: conversationId,
@@ -1939,6 +2587,171 @@ export default function App() {
 
   function setActivePricingCurrency(currency: PricingCurrency) {
     updateActiveModelPricing({ currency });
+  }
+
+  function parsedNonNegativeDraft(value: string, label: string, integer = false): number {
+    const parsed = Number(value.trim().replace(',', '.'));
+    if (!Number.isFinite(parsed) || parsed < 0 || (integer && !Number.isSafeInteger(parsed))) {
+      throw new Error(`${label}必须是${integer ? '非负整数' : '非负数字'}。`);
+    }
+    return parsed;
+  }
+
+  function saveCostGuardDrafts() {
+    if (!ensureWorkspaceWritable()) return;
+    try {
+      const maxOutputTokens = parsedNonNegativeDraft(costMaxOutputDraft, '最大输出 Token ', true);
+      const dailyRequestLimit = parsedNonNegativeDraft(costDailyRequestDraft, '每日调用次数 ', true);
+      const dailyCnyBudget = parsedNonNegativeDraft(costDailyCnyDraft, 'CNY 预算 ');
+      const dailyUsdBudget = parsedNonNegativeDraft(costDailyUsdDraft, 'USD 预算 ');
+      if (maxOutputTokens < 64 || maxOutputTokens > 131_072) {
+        throw new Error('最大输出 Token 必须在 64–131072 之间。');
+      }
+      setWorkspace((current) => ({
+        ...current,
+        costGuard: {
+          ...current.costGuard,
+          maxOutputTokens,
+          dailyRequestLimit,
+          dailyCnyBudget,
+          dailyUsdBudget,
+        },
+      }));
+      setNotice('费用保险丝设置已保存在本机；它不是服务商账单或账户级消费上限。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '费用保险丝设置无效。');
+    }
+  }
+
+  function resolveCostConfirmation(confirmed: boolean) {
+    const resolver = costConfirmationResolverRef.current;
+    costConfirmationResolverRef.current = null;
+    setCostConfirmationReason(null);
+    resolver?.(confirmed);
+  }
+
+  function requestCostConfirmation(reason: string): Promise<boolean> {
+    if (costConfirmationResolverRef.current) {
+      return Promise.resolve(false);
+    }
+    setCostConfirmationReason(reason);
+    return new Promise((resolve) => {
+      costConfirmationResolverRef.current = resolve;
+    });
+  }
+
+  async function authorizeProviderRequestPlan(plan: ProviderRequestPlan): Promise<boolean> {
+    if (workspaceReplacementInProgressRef.current) {
+      setNotice('正在验证并导入备份，暂时不能发起新请求。');
+      return false;
+    }
+
+    const current = workspaceRef.current;
+    const evaluation = evaluateProviderRequestPlan(
+      current.costGuard,
+      current.providerUsageEvents,
+      plan,
+      Date.now()
+    );
+    if (evaluation.decision === 'block') {
+      setNotice(`请求未发出：${evaluation.reason}`);
+      return false;
+    }
+    if (evaluation.decision === 'warn') {
+      const confirmed = await requestCostConfirmation(evaluation.reason);
+      if (workspaceReplacementInProgressRef.current) {
+        setNotice('备份导入已开始，本次请求未发出。');
+        return false;
+      }
+      return confirmed;
+    }
+    return !workspaceReplacementInProgressRef.current;
+  }
+
+  async function persistProviderUsageEvents(events: readonly ProviderUsageEvent[]): Promise<void> {
+    const current = workspaceRef.current;
+    const insertedEventIds = new Set(
+      events
+        .filter(
+          (event) => !current.providerUsageEvents.some((existing) => existing.id === event.id)
+        )
+        .map((event) => event.id)
+    );
+    const nextEvents = pruneProviderUsageEvents(
+      events.reduce(
+        (result, event) => upsertProviderUsageEvent(result, event),
+        current.providerUsageEvents
+      ),
+      Date.now()
+    );
+    const next = { ...current, providerUsageEvents: nextEvents };
+    setWorkspace(next);
+    try {
+      await saveWorkspace(next);
+    } catch (error) {
+      if (current.costGuard.enabled) {
+        if (insertedEventIds.size) {
+          const rollback = {
+            ...workspaceRef.current,
+            providerUsageEvents: workspaceRef.current.providerUsageEvents.filter(
+              (event) => !insertedEventIds.has(event.id)
+            ),
+          };
+          setWorkspace(rollback);
+          try {
+            await saveWorkspace(rollback);
+          } catch {
+            // The original durable write already failed. The in-memory rollback
+            // remains authoritative and the provider request stays blocked.
+          }
+        }
+        throw new Error(
+          `费用保险丝台账无法安全写入，请求未发出：${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      setNotice('本机请求台账暂时无法持久化；费用保险丝关闭状态下仍继续本次请求。');
+    }
+  }
+
+  function requestUsageKind(model: ModelInfo, searchEnabled: boolean): ProviderUsageKind {
+    if (searchEnabled) return 'web-search';
+    const task = inferModelTask(model);
+    if (task === 'image-generation') return 'image-generation';
+    if (task === 'video-generation') return 'video-generation';
+    return 'chat';
+  }
+
+  function startedUsageEvent(
+    assistantMessage: ChatMessage,
+    runtime: NonNullable<ReturnType<typeof resolveMessageRuntime>>
+  ): ProviderUsageEvent {
+    return createStartedProviderUsageEvent({
+      id: createId('usage'),
+      kind: requestUsageKind(runtime.model, workspaceRef.current.webSearch.enabled),
+      providerId: runtime.provider.id,
+      modelId: runtime.modelId,
+      createdAt: Date.now(),
+      messageId: assistantMessage.id,
+      comparisonGroupId: assistantMessage.comparisonGroupId,
+    });
+  }
+
+  async function finishUsageEvent(
+    event: ProviderUsageEvent,
+    status: 'succeeded' | 'failed' | 'cancelled',
+    knownCostEstimate?: ChatMessage['costEstimate']
+  ): Promise<void> {
+    const completed = completeProviderUsageEvent(event, {
+      status,
+      completedAt: Date.now(),
+      ...(knownCostEstimate ? { knownCostEstimate } : {}),
+    });
+    try {
+      await persistProviderUsageEvents([completed]);
+    } catch {
+      // The provider request has already completed; keep UI status truthful and
+      // leave the started event as an unknown cost instead of pretending zero.
+    }
   }
 
   function applyComparisonSelection(groupId: string, messageId: string) {
@@ -2098,6 +2911,16 @@ export default function App() {
       const reasoningEffortByModel = Object.fromEntries(
         Object.entries(current.reasoningEffortByModel).filter(([key]) => !key.startsWith(`${providerId}:`))
       );
+      const comparisonTargets = current.comparisonTargets.filter(
+        (target) => target.providerId !== providerId
+      );
+      const voice = { ...current.voice };
+      if (voice.transcriptionTarget?.providerId === providerId) {
+        delete voice.transcriptionTarget;
+      }
+      if (voice.speechTarget?.providerId === providerId) {
+        delete voice.speechTarget;
+      }
 
       return {
         ...current,
@@ -2106,6 +2929,17 @@ export default function App() {
         activeModelIdByProvider,
         modelCandidatesByProvider,
         reasoningEffortByModel,
+        comparisonTargets,
+        comparisonEnabled: current.comparisonEnabled && comparisonTargets.length >= 2,
+        voice,
+        projects: current.projects.map((project) =>
+          project.defaultTarget?.providerId === providerId
+            ? { ...project, defaultTarget: undefined, updatedAt: Date.now() }
+            : project
+        ),
+        modelPricing: current.modelPricing.filter(
+          (pricing) => pricing.providerId !== providerId
+        ),
       };
     });
     setDeleteConfirmProviderId(null);
@@ -2189,6 +3023,16 @@ export default function App() {
       const provider = current.providers.find((item) => item.id === activeProvider.id);
       const nextModels = provider?.models.filter((model) => model.id !== modelId) ?? [];
       const currentActiveModelId = current.activeModelIdByProvider[activeProvider.id];
+      const removedTarget = (target: { providerId: string; modelId: string } | undefined) =>
+        target?.providerId === activeProvider.id && target.modelId === modelId;
+      const comparisonTargets = current.comparisonTargets.filter(
+        (target) => !removedTarget(target)
+      );
+      const voice = { ...current.voice };
+      if (removedTarget(voice.transcriptionTarget)) delete voice.transcriptionTarget;
+      if (removedTarget(voice.speechTarget)) delete voice.speechTarget;
+      const reasoningEffortByModel = { ...current.reasoningEffortByModel };
+      delete reasoningEffortByModel[`${activeProvider.id}:${modelId}`];
 
       return {
         ...current,
@@ -2200,6 +3044,19 @@ export default function App() {
           [activeProvider.id]:
             currentActiveModelId === modelId ? nextModels[0]?.id ?? '' : currentActiveModelId,
         },
+        comparisonTargets,
+        comparisonEnabled: current.comparisonEnabled && comparisonTargets.length >= 2,
+        voice,
+        projects: current.projects.map((project) =>
+          removedTarget(project.defaultTarget)
+            ? { ...project, defaultTarget: undefined, updatedAt: Date.now() }
+            : project
+        ),
+        modelPricing: current.modelPricing.filter(
+          (pricing) =>
+            pricing.providerId !== activeProvider.id || pricing.modelId !== modelId
+        ),
+        reasoningEffortByModel,
       };
     });
     setNotice('已移除模型。');
@@ -2209,19 +3066,52 @@ export default function App() {
     if (!ensureWorkspaceWritable() || !activeProvider || !activeModel) {
       return;
     }
-    setWorkspace((current) => ({
-      ...current,
-      providers: current.providers.map((provider) =>
-        provider.id === activeProvider.id
-          ? {
-              ...provider,
-              models: provider.models.map((model) =>
-                model.id === activeModel.id ? { ...model, ...patch, source: 'manual' as const } : model
-              ),
-            }
-          : provider
-      ),
-    }));
+    setWorkspace((current) => {
+      const provider = current.providers.find((item) => item.id === activeProvider.id);
+      const model = provider?.models.find((item) => item.id === activeModel.id);
+      if (!provider || !model) return current;
+      const nextModel: ModelInfo = { ...model, ...patch, source: 'manual' };
+      const nextTask = inferModelTask(nextModel);
+      const matchesTarget = (target: ModelTargetRef | undefined) =>
+        target?.providerId === provider.id && target.modelId === model.id;
+      const comparisonTargets = nextTask === 'chat'
+        ? current.comparisonTargets
+        : current.comparisonTargets.filter((target) => !matchesTarget(target));
+      const voice = { ...current.voice };
+      if (
+        matchesTarget(voice.transcriptionTarget) &&
+        (nextTask !== 'audio-transcription' || !nextModel.capabilities.includes('speech-to-text'))
+      ) {
+        delete voice.transcriptionTarget;
+      }
+      if (
+        matchesTarget(voice.speechTarget) &&
+        (nextTask !== 'speech-generation' || !nextModel.capabilities.includes('text-to-speech'))
+      ) {
+        delete voice.speechTarget;
+      }
+      const reasoningEffortByModel = { ...current.reasoningEffortByModel };
+      if (nextTask !== 'chat' || !nextModel.capabilities.includes('reasoning')) {
+        delete reasoningEffortByModel[`${provider.id}:${model.id}`];
+      }
+      return {
+        ...current,
+        providers: current.providers.map((item) =>
+          item.id === provider.id
+            ? {
+                ...item,
+                models: item.models.map((candidate) =>
+                  candidate.id === model.id ? nextModel : candidate
+                ),
+              }
+            : item
+        ),
+        comparisonTargets,
+        comparisonEnabled: current.comparisonEnabled && comparisonTargets.length >= 2,
+        voice,
+        reasoningEffortByModel,
+      };
+    });
   }
 
   function setActiveModelTask(task: ModelTask) {
@@ -2276,20 +3166,26 @@ export default function App() {
     if (!ensureWorkspaceWritable() || !activeProvider) {
       return;
     }
+    const configuredProvider = saveProviderDraft();
+    if (!configuredProvider) return;
+    if (!configuredProvider.apiKey?.trim() && configuredProvider.kind !== 'volcengine-ark') {
+      setNotice('连接检查需要该服务商自己的 API Key；不会发送生成请求，只请求模型目录。');
+      return;
+    }
 
     const controller = beginActiveRequest('模型列表刷新');
     if (!controller) {
       return;
     }
-    setNotice('');
+    setNotice('正在请求服务商模型目录；这不是模型生成测试，也不会由 Embezzle Studio 提供额度。');
 
     try {
-      const result = await refreshProviderModels(activeProvider, controller.signal);
+      const result = await refreshProviderModels(configuredProvider, controller.signal);
       setWorkspace((current) => ({
         ...current,
         modelCandidatesByProvider: {
           ...current.modelCandidatesByProvider,
-          [activeProvider.id]: result.models,
+          [configuredProvider.id]: result.models,
         },
       }));
       setModelSearchQuery('');
@@ -2304,7 +3200,7 @@ export default function App() {
         ...current,
         modelCandidatesByProvider: {
           ...current.modelCandidatesByProvider,
-          [activeProvider.id]: [],
+          [configuredProvider.id]: [],
         },
       }));
       setNotice(error instanceof Error ? error.message : '模型列表获取失败。');
@@ -2314,6 +3210,11 @@ export default function App() {
   }
 
   function resetComposerForConversationChange() {
+    if (!pendingSearchMessageIdRef.current) {
+      messageLayoutYByIdRef.current.clear();
+      shouldAutoScrollRef.current = true;
+      setHighlightedSearchMessageId(null);
+    }
     setInput('');
     clearPendingAttachments();
     setActiveVideoAttachmentId(null);
@@ -2339,21 +3240,126 @@ export default function App() {
     });
   }
 
-  function startNewConversation() {
-    if (!ensureWorkspaceWritable()) {
+  function startConversationInProject(projectId: string, noticeText = '') {
+    if (!ensureWorkspaceWritable()) return;
+    const project = workspace.projects.find((candidate) => candidate.id === projectId);
+    if (!project) {
+      setNotice('找不到要使用的项目。');
       return;
     }
-
+    const activeEmptyConversation = workspace.conversations.find(
+      (conversation) =>
+        conversation.id === workspace.activeConversationId &&
+        conversation.projectId === projectId &&
+        !hasConversationHistory(conversation)
+    );
+    if (activeEmptyConversation) {
+      const now = Date.now();
+      const messages = syncProjectInstructionSnapshot(
+        activeEmptyConversation.messages,
+        project,
+        now
+      );
+      const defaultTarget = resolveProjectDefaultTarget(project, workspace.providers);
+      setWorkspace((current) => ({
+        ...current,
+        messages,
+        conversations: current.conversations.map((conversation) =>
+          conversation.id === activeEmptyConversation.id
+            ? { ...conversation, messages, updatedAt: now }
+            : conversation
+        ),
+        ...(defaultTarget
+          ? {
+              activeProviderId: defaultTarget.providerId,
+              activeModelIdByProvider: {
+                ...current.activeModelIdByProvider,
+                [defaultTarget.providerId]: defaultTarget.modelId,
+              },
+            }
+          : {}),
+      }));
+      resetComposerForConversationChange();
+      setExpandedReasoningByMessageId({});
+      setQueryingTaskByMessageId({});
+      setSidebarOpen(false);
+      setNotice(noticeText);
+      return;
+    }
+    if (workspace.conversations.length >= maxSavedConversations) {
+      setNotice(`本机最多保存 ${maxSavedConversations} 个对话；请先导出备份并删除不需要的对话。`);
+      return;
+    }
+    const now = Date.now();
     const conversationId = createId('conversation');
-
+    const instruction = projectInstructionMessage(project, now);
+    const messages = instruction ? [instruction] : [];
+    const defaultTarget = resolveProjectDefaultTarget(project, workspace.providers);
+    const conversation: ChatConversation = {
+      id: conversationId,
+      title: '新对话',
+      projectId,
+      createdAt: now,
+      updatedAt: now,
+      messages,
+    };
     setWorkspace((current) => ({
       ...current,
+      activeProjectId: projectId,
       activeConversationId: conversationId,
-      messages: [],
+      conversations: sortConversations([conversation, ...current.conversations]),
+      messages,
+      ...(defaultTarget
+        ? {
+            activeProviderId: defaultTarget.providerId,
+            activeModelIdByProvider: {
+              ...current.activeModelIdByProvider,
+              [defaultTarget.providerId]: defaultTarget.modelId,
+            },
+          }
+        : {}),
     }));
     resetComposerForConversationChange();
     setExpandedReasoningByMessageId({});
     setQueryingTaskByMessageId({});
+    setSidebarOpen(false);
+    setNotice(noticeText);
+  }
+
+  function startNewConversation() {
+    startConversationInProject(workspace.activeProjectId);
+  }
+
+  function selectProject(projectId: string) {
+    if (!ensureWorkspaceWritable()) return;
+    const conversation = sortConversations(
+      workspace.conversations.filter((candidate) => candidate.projectId === projectId)
+    )[0];
+    if (!conversation) {
+      startConversationInProject(projectId, '已进入项目并创建本地新对话。');
+      return;
+    }
+    const project = workspace.projects.find((candidate) => candidate.id === projectId);
+    const defaultTarget = !hasConversationHistory(conversation)
+      ? resolveProjectDefaultTarget(project, workspace.providers)
+      : undefined;
+    setWorkspace((current) => ({
+      ...current,
+      activeProjectId: projectId,
+      activeConversationId: conversation.id,
+      messages: conversation.messages,
+      ...(defaultTarget
+        ? {
+            activeProviderId: defaultTarget.providerId,
+            activeModelIdByProvider: {
+              ...current.activeModelIdByProvider,
+              [defaultTarget.providerId]: defaultTarget.modelId,
+            },
+          }
+        : {}),
+    }));
+    resetComposerForConversationChange();
+    setSidebarOpen(false);
     setNotice('');
   }
 
@@ -2363,11 +3369,27 @@ export default function App() {
       if (!conversation) {
         return current;
       }
+      const project = current.projects.find(
+        (candidate) => candidate.id === conversation.projectId
+      );
+      const defaultTarget = !hasConversationHistory(conversation)
+        ? resolveProjectDefaultTarget(project, current.providers)
+        : undefined;
 
       return {
         ...current,
+        activeProjectId: conversation.projectId ?? current.projects[0].id,
         activeConversationId: conversation.id,
         messages: conversation.messages,
+        ...(defaultTarget
+          ? {
+              activeProviderId: defaultTarget.providerId,
+              activeModelIdByProvider: {
+                ...current.activeModelIdByProvider,
+                [defaultTarget.providerId]: defaultTarget.modelId,
+              },
+            }
+          : {}),
       };
     });
     resetComposerForConversationChange();
@@ -2375,6 +3397,39 @@ export default function App() {
     setQueryingTaskByMessageId({});
     setSidebarOpen(false);
     setNotice('');
+  }
+
+  function branchConversation(messageId: string) {
+    if (!ensureWorkspaceWritable()) return;
+    if (workspace.conversations.length >= maxSavedConversations) {
+      setNotice(`本机最多保存 ${maxSavedConversations} 个对话，未创建分支。`);
+      return;
+    }
+    try {
+      const branch = forkConversationAtMessage(
+        workspace.conversations,
+        workspace.activeConversationId,
+        messageId,
+        {
+          conversationId: createId('conversation'),
+          now: Date.now(),
+          createMessageId: () => createId('msg'),
+          createComparisonGroupId: () => createId('compare'),
+        }
+      );
+      setWorkspace((current) => ({
+        ...current,
+        activeProjectId: branch.projectId ?? current.activeProjectId,
+        activeConversationId: branch.id,
+        messages: branch.messages,
+        conversations: sortConversations([branch, ...current.conversations]),
+      }));
+      resetComposerForConversationChange();
+      setSidebarOpen(false);
+      setNotice('已创建本地对话分支；复制历史不会重复计入用量统计，也不会发起模型请求。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '创建对话分支失败。');
+    }
   }
 
   function openConversationActionMenu(conversationId: string, pageY: number) {
@@ -2395,6 +3450,10 @@ export default function App() {
     if (!ensureWorkspaceWritable()) {
       return;
     }
+    if (activeRequestRef.current) {
+      setNotice('当前仍有服务商请求进行中；请先停止或等待完成，再删除对话。');
+      return;
+    }
 
     setConversationActionId(null);
     setRenamingConversationId(null);
@@ -2408,20 +3467,40 @@ export default function App() {
       setDeleteConfirmConversationId(null);
       return;
     }
+    if (activeRequestRef.current) {
+      setDeleteConfirmConversationId(null);
+      setNotice('当前仍有服务商请求进行中；本次删除未执行。');
+      return;
+    }
 
     const deletingActiveConversation = workspace.activeConversationId === conversationId;
     const deletedConversation = workspace.conversations.find((conversation) => conversation.id === conversationId);
     if (deletedConversation) {
-      void deletePersistedAttachments(messageAttachments(deletedConversation.messages));
+      const retainedUris = new Set(
+        workspace.conversations
+          .filter((conversation) => conversation.id !== conversationId)
+          .flatMap((conversation) => messageAttachments(conversation.messages))
+          .map((attachment) => attachment.uri)
+      );
+      void deletePersistedAttachments(
+        messageAttachments(deletedConversation.messages).filter(
+          (attachment) => !retainedUris.has(attachment.uri)
+        )
+      );
     }
     setWorkspace((current) => {
-      const conversations = current.conversations.filter((conversation) => conversation.id !== conversationId);
+      const conversations = removeConversationPreservingBranches(current.conversations, conversationId);
       const deletedActive = current.activeConversationId === conversationId;
-      const nextActive = deletedActive ? conversations[0] : current.conversations.find((item) => item.id === current.activeConversationId);
+      const nextActive = deletedActive
+        ? sortConversations(
+            conversations.filter((conversation) => conversation.projectId === current.activeProjectId)
+          )[0] ?? conversations[0]
+        : conversations.find((item) => item.id === current.activeConversationId);
 
       return {
         ...current,
         conversations,
+        activeProjectId: nextActive?.projectId ?? current.projects[0].id,
         activeConversationId: nextActive?.id ?? 'conversation-default',
         messages: deletedActive ? nextActive?.messages ?? [] : current.messages,
       };
@@ -2603,7 +3682,11 @@ export default function App() {
     setAttachments([]);
   }
 
-  function updateAssistantMessage(messageId: string, patch: Partial<ChatMessage>) {
+  function updateAssistantMessage(
+    messageId: string,
+    patch: Partial<ChatMessage>,
+    conversationId?: string
+  ) {
     setWorkspace((current) => {
       const now = Date.now();
       const updateMessages = (messages: ChatMessage[]) =>
@@ -2612,6 +3695,9 @@ export default function App() {
         );
       const messages = updateMessages(current.messages);
       const conversations = current.conversations.map((conversation) => {
+        if (conversationId && conversation.id !== conversationId) {
+          return conversation;
+        }
         if (!conversation.messages.some((message) => message.id === messageId)) {
           return conversation;
         }
@@ -2630,6 +3716,35 @@ export default function App() {
         ...current,
         messages,
         conversations,
+      };
+    });
+  }
+
+  function updateGenerationTaskMessageCopies(
+    source: ChatMessage,
+    patch: Partial<ChatMessage>
+  ) {
+    const canonicalId = canonicalMessageId(source);
+    const taskId = source.generationTask?.taskId;
+    setWorkspace((current) => {
+      const now = Date.now();
+      const updateMessages = (messages: ChatMessage[]) =>
+        messages.map((message) =>
+          message.role === 'assistant' &&
+          canonicalMessageId(message) === canonicalId &&
+          (!taskId || message.generationTask?.taskId === taskId)
+            ? { ...message, ...patch }
+            : message
+        );
+      return {
+        ...current,
+        messages: updateMessages(current.messages),
+        conversations: current.conversations.map((conversation) => {
+          const messages = updateMessages(conversation.messages);
+          return messages.some((message, index) => message !== conversation.messages[index])
+            ? { ...conversation, messages, updatedAt: now }
+            : conversation;
+        }),
       };
     });
   }
@@ -2678,7 +3793,11 @@ export default function App() {
     return '找不到这条消息对应的模型配置。';
   }
 
-  function applyAssistantResult(messageId: string, result: ChatCompletionResult) {
+  function applyAssistantResult(
+    messageId: string,
+    result: ChatCompletionResult,
+    conversationId: string
+  ) {
     updateAssistantMessage(messageId, {
       content: result.content,
       reasoningContent: result.reasoningContent,
@@ -2689,21 +3808,25 @@ export default function App() {
       generationTask: result.generationTask,
       status: 'ready',
       error: undefined,
-    });
+    }, conversationId);
   }
 
   async function runAssistantRequest({
     assistantMessage,
+    conversationId,
     transcript,
     runtime,
     controller,
+    usageEvent,
     finishRequest = true,
     announceCancellation = true,
   }: {
     assistantMessage: ChatMessage;
+    conversationId: string;
     transcript: ChatMessage[];
     runtime: NonNullable<ReturnType<typeof resolveMessageRuntime>>;
     controller: AbortController;
+    usageEvent: ProviderUsageEvent;
     finishRequest?: boolean;
     announceCancellation?: boolean;
   }): Promise<AssistantRequestOutcome> {
@@ -2723,7 +3846,7 @@ export default function App() {
         reasoningContent: latestUpdate.reasoningContent,
         usage: latestUpdate.usage,
         status: 'pending',
-      });
+      }, conversationId);
     };
 
     try {
@@ -2734,6 +3857,9 @@ export default function App() {
         messages: transcript,
         reasoningEffort: runtime.reasoningEffort,
         parameterSettings,
+        maxOutputTokens: workspaceRef.current.costGuard.enabled
+          ? workspaceRef.current.costGuard.maxOutputTokens
+          : undefined,
         webSearch: workspaceRef.current.webSearch,
         onStreamUpdate: (update) => {
           if (update.content || update.reasoningContent) {
@@ -2744,11 +3870,18 @@ export default function App() {
             streamTimer = setTimeout(() => {
               streamTimer = null;
               publishLatestUpdate();
-            }, 60);
+            }, Platform.OS === 'android' ? 120 : 60);
           }
         },
         signal: controller.signal,
       });
+
+      if (controller.signal.aborted) {
+        await discardUncommittedAttachments(result.attachments ?? []);
+        const aborted = new Error('请求已停止。');
+        aborted.name = 'AbortError';
+        throw aborted;
+      }
 
       if (streamTimer) {
         clearTimeout(streamTimer);
@@ -2778,11 +3911,12 @@ export default function App() {
       );
       applyAssistantResult(assistantMessage.id, {
         ...result,
-      });
+      }, conversationId);
       updateAssistantMessage(assistantMessage.id, {
         requestMetrics,
         ...(costEstimate ? { costEstimate } : { costEstimate: undefined }),
-      });
+      }, conversationId);
+      await finishUsageEvent(usageEvent, 'succeeded', costEstimate ?? undefined);
       return { status: 'success' };
     } catch (error) {
       if (streamTimer) {
@@ -2801,10 +3935,11 @@ export default function App() {
             durationMs: Date.now() - startedAt,
             ...(firstTokenAt !== undefined ? { timeToFirstTokenMs: firstTokenAt - startedAt } : {}),
           },
-        });
+        }, conversationId);
         if (announceCancellation) {
           setNotice('已停止生成，已保留收到的内容。');
         }
+        await finishUsageEvent(usageEvent, 'cancelled');
         return { status: 'cancelled' };
       }
 
@@ -2819,7 +3954,8 @@ export default function App() {
           durationMs: Date.now() - startedAt,
           ...(firstTokenAt !== undefined ? { timeToFirstTokenMs: firstTokenAt - startedAt } : {}),
         },
-      });
+      }, conversationId);
+      await finishUsageEvent(usageEvent, 'failed');
       return { status: 'error', error: message };
     } finally {
       if (finishRequest) {
@@ -2876,8 +4012,8 @@ export default function App() {
       return;
     }
 
-    if (message.role === 'system') {
-      setNotice('系统消息暂不支持编辑。');
+    if (message.role !== 'user') {
+      setNotice('只有用户消息支持直接编辑；模型回答请使用重新生成。');
       return;
     }
 
@@ -2989,6 +4125,14 @@ export default function App() {
     ) {
       return;
     }
+    if (!(await authorizeProviderRequestPlan({
+      potentialMultipleCharges: workspace.webSearch.enabled,
+      operations: [{
+        kind: requestUsageKind(runtime.model, workspace.webSearch.enabled),
+        providerId: runtime.provider.id,
+        modelId: runtime.modelId,
+      }],
+    }))) return;
     const controller = beginActiveRequest('回答生成');
     if (!controller) {
       return;
@@ -3010,8 +4154,19 @@ export default function App() {
       providerId: runtime.provider.id,
       providerName: runtime.provider.name,
     };
+    // A regeneration is a new provider request, not an inherited branch
+    // snapshot. Keeping the old canonical origin would hide its usage/task.
+    delete pendingMessage.originMessageId;
     const conversationId = workspace.activeConversationId || createId('conversation');
     const removedAttachments = messageAttachments(messages.slice(messageIndex));
+    const usageEvent = startedUsageEvent(pendingMessage, runtime);
+    try {
+      await persistProviderUsageEvents([usageEvent]);
+    } catch (error) {
+      finishActiveRequest(controller);
+      setNotice(error instanceof Error ? error.message : '费用保险丝台账写入失败，请求未发出。');
+      return;
+    }
     setNotice('');
     setMessageActionMenuId(null);
     setWorkspace((current) => {
@@ -3026,9 +4181,11 @@ export default function App() {
 
     const outcome = await runAssistantRequest({
       assistantMessage: pendingMessage,
+      conversationId,
       transcript,
       runtime,
       controller,
+      usageEvent,
     });
     if (outcome.status === 'success') {
       void deletePersistedAttachments(removedAttachments);
@@ -3096,6 +4253,14 @@ export default function App() {
     ) {
       return;
     }
+    if (!(await authorizeProviderRequestPlan({
+      potentialMultipleCharges: workspace.webSearch.enabled,
+      operations: [{
+        kind: requestUsageKind(runtime.model, workspace.webSearch.enabled),
+        providerId: runtime.provider.id,
+        modelId: runtime.modelId,
+      }],
+    }))) return;
 
     const conversationId = workspace.activeConversationId || createId('conversation');
     const editedMessage: ChatMessage = {
@@ -3103,6 +4268,7 @@ export default function App() {
       content,
       status: 'ready',
     };
+    delete editedMessage.originMessageId;
     const assistantMessage = createAssistantPlaceholder(runtime);
     const baseMessages = [
       ...messages.slice(0, messageIndex),
@@ -3115,6 +4281,14 @@ export default function App() {
       return;
     }
     const removedAttachments = messageAttachments(messages.slice(messageIndex + 1));
+    const usageEvent = startedUsageEvent(assistantMessage, runtime);
+    try {
+      await persistProviderUsageEvents([usageEvent]);
+    } catch (error) {
+      finishActiveRequest(controller);
+      setNotice(error instanceof Error ? error.message : '费用保险丝台账写入失败，请求未发出。');
+      return;
+    }
 
     setNotice('');
     setMessageActionMenuId(null);
@@ -3128,9 +4302,11 @@ export default function App() {
 
     const outcome = await runAssistantRequest({
       assistantMessage,
+      conversationId,
       transcript,
       runtime,
       controller,
+      usageEvent,
     });
     if (outcome.status === 'success') {
       void deletePersistedAttachments(removedAttachments);
@@ -3212,9 +4388,43 @@ export default function App() {
     void rerunFromUserMessage(message);
   }
 
+  async function removeSystemInstruction(message: ChatMessage) {
+    if (!ensureWorkspaceWritable() || message.role !== 'system') return;
+    if (activeRequestRef.current) {
+      setNotice('当前仍有服务商请求进行中；请先停止或等待完成，再移除会话指令。');
+      return;
+    }
+    if (!(await confirmDestructiveAction(
+      '只移除这条会话指令？',
+      '后续用户消息和模型回答会完整保留；此操作不会修改项目或提示词模板本身。'
+    ))) {
+      return;
+    }
+    setWorkspace((current) => {
+      const now = Date.now();
+      const removeFrom = (messages: ChatMessage[]) =>
+        messages.filter((candidate) => candidate.id !== message.id);
+      return {
+        ...current,
+        messages: removeFrom(current.messages),
+        conversations: current.conversations.map((conversation) =>
+          conversation.messages.some((candidate) => candidate.id === message.id)
+            ? { ...conversation, messages: removeFrom(conversation.messages), updatedAt: now }
+            : conversation
+        ),
+      };
+    });
+    setNotice('已仅移除这条会话指令，后续消息保持不变。');
+  }
+
   async function removeMessage(message: ChatMessage) {
     if (!ensureWorkspaceWritable()) {
       setMessageActionMenuId(null);
+      return;
+    }
+    if (activeRequestRef.current) {
+      setMessageActionMenuId(null);
+      setNotice('当前仍有服务商请求进行中；请先停止或等待完成，再删除消息。');
       return;
     }
 
@@ -3230,6 +4440,10 @@ export default function App() {
         `将删除这条消息及其后的 ${Math.max(0, removedCount - 1)} 条消息。此操作无法自动撤销。`
       ))
     ) {
+      return;
+    }
+    if (activeRequestRef.current) {
+      setNotice('确认期间开始了新的服务商请求；本次删除未执行。');
       return;
     }
     if (messageIndex >= 0) {
@@ -3317,7 +4531,19 @@ export default function App() {
 
     try {
       const result = await queryGenerationTask(provider, task, controller.signal);
-      updateAssistantMessage(message.id, {
+      const canonicalId = canonicalMessageId(message);
+      const taskStillExists = workspaceRef.current.conversations.some((conversation) =>
+        conversation.messages.some(
+          (candidate) =>
+            canonicalMessageId(candidate) === canonicalId &&
+            candidate.generationTask?.taskId === task.taskId
+        )
+      );
+      if (controller.signal.aborted || !taskStillExists) {
+        await discardUncommittedAttachments(result.attachments ?? []);
+        return;
+      }
+      updateGenerationTaskMessageCopies(message, {
         content: result.content,
         attachments: result.attachments ?? message.attachments,
         generationTask: result.generationTask,
@@ -3396,8 +4622,18 @@ export default function App() {
     if (!ensureWorkspaceWritable() || backupBusy) {
       return;
     }
+    const hasInFlightWorkspaceOperation = () =>
+      Boolean(activeRequestRef.current) ||
+      Boolean(activeAudioOperationRef.current) ||
+      Boolean(costConfirmationResolverRef.current) ||
+      generationTaskControllersRef.current.size > 0;
+    if (hasInFlightWorkspaceOperation()) {
+      setNotice('仍有对话、语音或媒体任务请求进行中；请先停止或等待完成，再导入备份。');
+      return;
+    }
     setBackupBusy(true);
     setNotice('');
+    let replacementLockAcquired = false;
     try {
       const serialized = await pickWorkspaceBackupFile();
       if (serialized === null) {
@@ -3412,6 +4648,17 @@ export default function App() {
         setNotice('已取消导入。');
         return;
       }
+      if (workspaceReplacementInProgressRef.current) {
+        setNotice('另一个备份导入正在进行中，本次导入未执行。');
+        return;
+      }
+      if (hasInFlightWorkspaceOperation()) {
+        setNotice('确认期间开始了新的请求；为避免旧响应写入新工作区，本次导入未执行。');
+        return;
+      }
+      workspaceReplacementInProgressRef.current = true;
+      replacementLockAcquired = true;
+      await flushWorkspace();
       const imported = await importEncryptedWorkspaceBackup(
         serialized,
         backupPassword,
@@ -3421,11 +4668,35 @@ export default function App() {
       clearPendingAttachments();
       workspaceRef.current = imported;
       setWorkspace(imported);
+      const importedProvider = imported.providers.find(
+        (provider) => provider.id === imported.activeProviderId
+      ) ?? imported.providers[0];
+      if (importedProvider) {
+        setProviderNameDraft(importedProvider.name);
+        setProviderKindDraft(importedProvider.kind);
+        setProviderBaseUrlDraft(importedProvider.baseUrl);
+        setProviderApiKeyDraft(importedProvider.apiKey ?? '');
+        setProviderKeyBindingFingerprint(
+          importedProvider.apiKey
+            ? providerEndpointFingerprint(importedProvider) ?? null
+            : null
+        );
+      }
+      const importedProject = imported.projects.find(
+        (project) => project.id === imported.activeProjectId
+      ) ?? imported.projects[0];
+      if (importedProject) {
+        setProjectNameDraft(importedProject.name);
+        setProjectSystemPromptDraft(importedProject.systemPrompt ?? '');
+      }
       setBackupPassword('');
       setNotice('加密备份已验证并导入；API Key 仍来自本机安全存储。');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '备份验证或导入失败，现有工作区未改动。');
     } finally {
+      if (replacementLockAcquired) {
+        workspaceReplacementInProgressRef.current = false;
+      }
       setBackupBusy(false);
     }
   }
@@ -3531,6 +4802,13 @@ export default function App() {
       return;
     }
     const capability = kind === 'transcription' ? 'speech-to-text' : 'text-to-speech';
+    const expectedTask: ModelTask = kind === 'transcription'
+      ? 'audio-transcription'
+      : 'speech-generation';
+    if (inferModelTask(activeModel) !== expectedTask) {
+      setNotice(`当前模型用途必须设为${kind === 'transcription' ? '语音转写' : '语音合成'}，不能只勾选能力标签。`);
+      return;
+    }
     if (!activeModel.capabilities.includes(capability)) {
       setNotice(`当前模型未明确标记为${kind === 'transcription' ? '语音转写' : '语音合成'}能力。`);
       return;
@@ -3577,18 +4855,7 @@ export default function App() {
   }
 
   function resolveConfiguredVoiceTarget(kind: 'transcription' | 'speech') {
-    const current = workspaceRef.current;
-    const target = kind === 'transcription'
-      ? current.voice.transcriptionTarget
-      : current.voice.speechTarget;
-    if (!target) {
-      return null;
-    }
-    const provider = current.providers.find((item) => item.id === target.providerId);
-    if (!provider) {
-      return null;
-    }
-    return { provider, modelId: target.modelId };
+    return resolveValidVoiceTarget(workspaceRef.current, kind);
   }
 
   async function toggleVoiceInput() {
@@ -3603,6 +4870,7 @@ export default function App() {
         return;
       }
       let recordedUri: string | null = null;
+      let usageEvent: ProviderUsageEvent | null = null;
       try {
         await voiceRecorder.stop();
         await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
@@ -3620,6 +4888,24 @@ export default function App() {
         if (!readiness.canTranscribe) {
           throw new Error(readiness.message ?? '当前服务商语音转写尚未就绪。');
         }
+        if (!(await authorizeProviderRequestPlan({
+          operations: [{
+            kind: 'audio-transcription',
+            providerId: target.provider.id,
+            modelId: target.modelId,
+          }],
+        }))) {
+          return;
+        }
+        const started = createStartedProviderUsageEvent({
+          id: createId('usage'),
+          kind: 'audio-transcription',
+          providerId: target.provider.id,
+          modelId: target.modelId,
+          createdAt: Date.now(),
+        });
+        await persistProviderUsageEvents([started]);
+        usageEvent = started;
         setNotice('正在使用你的服务商账号转写录音…');
         const result = await transcribeAudio({
           provider: target.provider,
@@ -3633,9 +4919,32 @@ export default function App() {
         });
         assertAudioOperationCurrent(activeOperation);
         setInput((current) => current.trim() ? `${current}\n${result.text}` : result.text);
+        const transcriptCost = result.usage
+          ? estimateMessageCost(
+              {
+                id: createId('usage-message'),
+                role: 'assistant',
+                content: result.text,
+                createdAt: Date.now(),
+                status: 'ready',
+                providerId: target.provider.id,
+                modelId: target.modelId,
+                usage: result.usage,
+              },
+              workspaceRef.current.modelPricing
+                .filter((pricing) => pricing.providerId === target.provider.id && pricing.modelId === target.modelId)
+                .sort((left, right) => right.updatedAt - left.updatedAt)[0]
+            )
+          : undefined;
+        await finishUsageEvent(usageEvent, 'succeeded', transcriptCost ?? undefined);
+        usageEvent = null;
         setNotice('语音已转写到输入框，尚未自动发送。');
       } catch (error) {
         const aborted = error instanceof Error && error.name === 'AbortError';
+        if (usageEvent) {
+          await finishUsageEvent(usageEvent, aborted ? 'cancelled' : 'failed');
+          usageEvent = null;
+        }
         setNotice(aborted ? '语音转写已停止。' : error instanceof Error ? error.message : '语音转写失败。');
       } finally {
         try {
@@ -3743,6 +5052,15 @@ export default function App() {
       setNotice(readiness.message ?? '当前服务商语音合成尚未就绪。');
       return;
     }
+    if (!(await authorizeProviderRequestPlan({
+      operations: [{
+        kind: 'speech-generation',
+        providerId: target.provider.id,
+        modelId: target.modelId,
+      }],
+    }))) {
+      return;
+    }
     speechPlayerRef.current?.release();
     speechPlayerRef.current = null;
     await deleteTemporaryAudioFile(speechCacheUriRef.current);
@@ -3750,6 +5068,23 @@ export default function App() {
     const operation = beginAudioOperation('synthesizing');
     if (!operation) {
       setNotice('另一项语音操作仍在进行中。');
+      return;
+    }
+    let usageEvent: ProviderUsageEvent | null = null;
+    try {
+      const started = createStartedProviderUsageEvent({
+        id: createId('usage'),
+        kind: 'speech-generation',
+        providerId: target.provider.id,
+        modelId: target.modelId,
+        createdAt: Date.now(),
+        messageId: message.id,
+      });
+      await persistProviderUsageEvents([started]);
+      usageEvent = started;
+    } catch (error) {
+      finishAudioOperation(operation);
+      setNotice(error instanceof Error ? error.message : '费用保险丝台账写入失败，语音请求未发出。');
       return;
     }
     setSpeakingMessageId(message.id);
@@ -3784,9 +5119,15 @@ export default function App() {
         setSpeakingMessageId(null);
       });
       player.play();
+      await finishUsageEvent(usageEvent, 'succeeded');
+      usageEvent = null;
       setNotice('正在播放 AI 合成语音。');
     } catch (error) {
       const aborted = error instanceof Error && error.name === 'AbortError';
+      if (usageEvent) {
+        await finishUsageEvent(usageEvent, aborted ? 'cancelled' : 'failed');
+        usageEvent = null;
+      }
       if (speechCacheUriRef.current === generatedUri) {
         speechPlayerRef.current?.release();
         speechPlayerRef.current = null;
@@ -3803,8 +5144,8 @@ export default function App() {
   }
 
   async function sendComparisonMessage(content: string) {
-    if (comparisonRuntimes.length < 2 || comparisonRuntimes.length > 4) {
-      setNotice('对比模式需要 2–4 个当前可用的对话模型，请先检查设置。');
+    if (comparisonRuntimes.length < 2 || comparisonRuntimes.length > comparisonTargetLimit) {
+      setNotice(`对比模式需要 2–${comparisonTargetLimit} 个当前可用的对话模型，请先检查设置。`);
       return;
     }
     if (workspace.webSearch.enabled && !webSearchReady) {
@@ -3841,6 +5182,19 @@ export default function App() {
       return;
     }
 
+    const comparisonPlan: ProviderRequestPlan = {
+      comparison: true,
+      potentialMultipleCharges: true,
+      operations: comparisonRuntimes.map((runtime) => ({
+        kind: requestUsageKind(runtime.model, workspace.webSearch.enabled),
+        providerId: runtime.provider.id,
+        modelId: runtime.modelId,
+      })),
+    };
+    if (!(await authorizeProviderRequestPlan(comparisonPlan))) {
+      return;
+    }
+
     const controller = beginActiveRequest('多模型对比');
     if (!controller) {
       return;
@@ -3868,6 +5222,16 @@ export default function App() {
       providerName: runtime.provider.name,
       comparisonGroupId,
     }));
+    const usageEvents = assistantMessages.map((message, index) =>
+      startedUsageEvent(message, comparisonRuntimes[index])
+    );
+    try {
+      await persistProviderUsageEvents(usageEvents);
+    } catch (error) {
+      finishActiveRequest(controller);
+      setNotice(error instanceof Error ? error.message : '费用保险丝台账写入失败，请求未发出。');
+      return;
+    }
     const baseMessages = [...workspace.messages, userMessage];
 
     setInput('');
@@ -3886,7 +5250,13 @@ export default function App() {
         ...current,
         activeConversationId: conversationId,
         messages,
-        conversations: upsertConversation(current.conversations, conversationId, messages, createdAt),
+        conversations: upsertConversation(
+          current.conversations,
+          conversationId,
+          messages,
+          createdAt,
+          current.activeProjectId
+        ),
       };
     });
 
@@ -3895,11 +5265,13 @@ export default function App() {
         assistantMessages.map((assistantMessage, index) =>
           runAssistantRequest({
             assistantMessage,
+            conversationId,
             transcript: buildChatTranscript(
               baseMessages,
               comparisonRuntimes[index].model.contextWindow
             ),
             runtime: comparisonRuntimes[index],
+            usageEvent: usageEvents[index],
             controller,
             finishRequest: false,
             announceCancellation: false,
@@ -3907,7 +5279,12 @@ export default function App() {
         )
       );
       const firstSuccessIndex = outcomes.findIndex((outcome) => outcome.status === 'success');
-      if (firstSuccessIndex >= 0) {
+      const userAlreadySelected = workspaceRef.current.messages.some(
+        (message) =>
+          message.comparisonGroupId === comparisonGroupId &&
+          message.selectedForContext === true
+      );
+      if (firstSuccessIndex >= 0 && !userAlreadySelected) {
         applyComparisonSelection(comparisonGroupId, assistantMessages[firstSuccessIndex].id);
       }
       const failedCount = outcomes.filter((outcome) => outcome.status === 'error').length;
@@ -3918,6 +5295,8 @@ export default function App() {
         setNotice('本次对比没有模型成功返回，请查看各候选错误信息。');
       } else if (failedCount || cancelledCount) {
         setNotice(`对比已完成；${failedCount + cancelledCount} 个候选未完整返回。`);
+      } else if (userAlreadySelected) {
+        setNotice('对比已完成；已保留你选择的回答作为后续上下文。');
       } else {
         setNotice('对比已完成；默认使用首个成功回答作为后续上下文。');
       }
@@ -3976,6 +5355,17 @@ export default function App() {
       return;
     }
 
+    if (!(await authorizeProviderRequestPlan({
+      potentialMultipleCharges: workspace.webSearch.enabled,
+      operations: [{
+        kind: requestUsageKind(activeModel, workspace.webSearch.enabled),
+        providerId: activeProvider.id,
+        modelId: activeModelId,
+      }],
+    }))) {
+      return;
+    }
+
     const controller = beginActiveRequest('回答生成');
     if (!controller) {
       return;
@@ -4000,6 +5390,20 @@ export default function App() {
       providerId: activeProvider.id,
       providerName: activeProvider.name,
     };
+    const runtime = {
+      provider: activeProvider,
+      model: activeModel,
+      modelId: activeModelId,
+      reasoningEffort: activeReasoningEffort,
+    };
+    const usageEvent = startedUsageEvent(assistantMessage, runtime);
+    try {
+      await persistProviderUsageEvents([usageEvent]);
+    } catch (error) {
+      finishActiveRequest(controller);
+      setNotice(error instanceof Error ? error.message : '费用保险丝台账写入失败，请求未发出。');
+      return;
+    }
     const transcript = buildChatTranscript(
       [...workspace.messages, userMessage],
       activeModel.contextWindow
@@ -4020,20 +5424,23 @@ export default function App() {
         ...current,
         activeConversationId: conversationId,
         messages,
-        conversations: upsertConversation(current.conversations, conversationId, messages, userMessage.createdAt),
+        conversations: upsertConversation(
+          current.conversations,
+          conversationId,
+          messages,
+          userMessage.createdAt,
+          current.activeProjectId
+        ),
       };
     });
 
     await runAssistantRequest({
       assistantMessage,
+      conversationId,
       transcript,
-      runtime: {
-        provider: activeProvider,
-        model: activeModel,
-        modelId: activeModelId,
-        reasoningEffort: activeReasoningEffort,
-      },
+      runtime,
       controller,
+      usageEvent,
     });
   }
 
@@ -4044,6 +5451,11 @@ export default function App() {
     setParameterMenuOpen(false);
     const nextOpen = !settingsOpen;
     if (nextOpen) {
+      const current = workspaceRef.current;
+      setAnalyticsSnapshot({
+        conversations: current.conversations,
+        modelPricing: current.modelPricing,
+      });
       setSettingsMounted(true);
       setActiveVideoAttachmentId(null);
     }
@@ -4172,6 +5584,87 @@ export default function App() {
                   keyboardShouldPersistTaps="handled"
                 >
 
+              <View style={styles.settingsCard} testID="project-workspace-settings-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>项目工作区</Text>
+                  <Text style={styles.modelOverrideHint}>{workspace.projects.length}/50</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  项目、分支和搜索完全在本机运行。项目系统提示只在你主动发送消息时随正常请求交给所选服务商，不会额外调用模型。
+                </Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRow}>
+                  {workspace.projects.map((project) => (
+                    <AnimatedPressable
+                      key={`settings-project:${project.id}`}
+                      accessibilityRole="button"
+                      onPress={() => selectProject(project.id)}
+                      style={[styles.providerChip, project.id === workspace.activeProjectId && styles.providerChipActive]}
+                    >
+                      <Text style={[styles.providerChipText, project.id === workspace.activeProjectId && styles.providerChipTextActive]}>
+                        {project.name}
+                      </Text>
+                    </AnimatedPressable>
+                  ))}
+                </ScrollView>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>新项目名称</Text>
+                  <TextInput
+                    value={projectNewName}
+                    editable={!workspaceReadOnly}
+                    onChangeText={setProjectNewName}
+                    placeholder="例如：产品研究"
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  disabled={workspaceReadOnly || !projectNewName.trim()}
+                  onPress={createProject}
+                  style={[styles.secondaryButton, (workspaceReadOnly || !projectNewName.trim()) && styles.buttonDisabled]}
+                >
+                  <Text style={styles.secondaryButtonText}>创建本地项目</Text>
+                </AnimatedPressable>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>当前项目名称</Text>
+                  <TextInput
+                    value={projectNameDraft}
+                    editable={!workspaceReadOnly}
+                    onChangeText={setProjectNameDraft}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>新对话系统提示（可选）</Text>
+                  <TextInput
+                    value={projectSystemPromptDraft}
+                    editable={!workspaceReadOnly}
+                    multiline
+                    onChangeText={setProjectSystemPromptDraft}
+                    placeholder="仅为之后的新对话保存一份本地快照"
+                    placeholderTextColor={palette.placeholder}
+                    style={[styles.input, styles.promptTemplateContentInput]}
+                  />
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  默认模型：{activeProject?.defaultTarget
+                    ? `${activeProject.defaultTarget.providerId} / ${activeProject.defaultTarget.modelId}`
+                    : '未设置'}
+                </Text>
+                <AnimatedPressable accessibilityRole="button" onPress={saveActiveProject} style={styles.primaryButton}>
+                  <Text style={styles.primaryButtonText}>保存当前项目</Text>
+                </AnimatedPressable>
+                <AnimatedPressable accessibilityRole="button" onPress={setProjectDefaultToCurrentModel} style={styles.secondaryButton}>
+                  <Text style={styles.secondaryButtonText}>将当前模型设为项目默认</Text>
+                </AnimatedPressable>
+                {workspace.projects.length > 1 ? (
+                  <AnimatedPressable accessibilityRole="button" onPress={removeActiveProject} style={styles.providerDeleteButton}>
+                    <Trash2 size={15} color={palette.danger} strokeWidth={2.2} />
+                    <Text style={styles.providerDeleteButtonText}>删除项目并迁移其中对话</Text>
+                  </AnimatedPressable>
+                ) : null}
+              </View>
+
               <View style={styles.settingsCard}>
                 <Text style={styles.settingsCardTitle}>服务商</Text>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRow}>
@@ -4206,24 +5699,54 @@ export default function App() {
                 </ScrollView>
               </View>
 
-              <View style={styles.settingsCard}>
-                <Text style={styles.settingsCardTitle}>连接配置</Text>
+              <View style={styles.settingsCard} testID="provider-setup-wizard-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>服务商配置向导</Text>
+                  <Text style={styles.modelOverrideHint}>
+                    {providerEndpointInspection.valid ? '本地校验通过' : '等待修正'}
+                  </Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  先在本机校验协议、地址和密钥绑定，再请求模型目录。模型目录请求不生成内容；不会使用 Embezzle Studio 的额度或服务器。
+                </Text>
                 <View style={styles.fieldGroup}>
                   <Text style={styles.fieldLabel}>名称</Text>
                    <TextInput
-                    value={activeProvider.name}
+                    value={providerNameDraft}
                     editable={!workspaceReadOnly}
-                    onChangeText={(name) => updateActiveProvider({ name })}
+                    onChangeText={setProviderNameDraft}
                     style={styles.input}
                   />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>协议类型</Text>
+                  <View style={styles.toolSegmentRow}>
+                    {([
+                      ['volcengine-ark', '火山方舟'],
+                      ['bailian-compatible', '阿里百炼'],
+                      ['openai-compatible', 'OpenAI'],
+                      ['custom', '兼容接口'],
+                    ] as const).map(([kind, label]) => (
+                      <AnimatedPressable
+                        key={kind}
+                        accessibilityRole="button"
+                        onPress={() => changeProviderBindingDraft({ kind })}
+                        style={[styles.toolSegment, providerKindDraft === kind && styles.toolSegmentActive]}
+                      >
+                        <Text style={[styles.toolSegmentText, providerKindDraft === kind && styles.toolSegmentTextActive]}>
+                          {label}
+                        </Text>
+                      </AnimatedPressable>
+                    ))}
+                  </View>
                 </View>
                 <View style={styles.fieldGroup}>
                   <Text style={styles.fieldLabel}>Base URL</Text>
                   <TextInput
                     autoCapitalize="none"
-                    value={activeProvider.baseUrl}
+                    value={providerBaseUrlDraft}
                     editable={!workspaceReadOnly}
-                    onChangeText={(baseUrl) => updateActiveProvider({ baseUrl })}
+                    onChangeText={(baseUrl) => changeProviderBindingDraft({ baseUrl })}
                     style={styles.input}
                   />
                 </View>
@@ -4232,9 +5755,19 @@ export default function App() {
                   <TextInput
                     autoCapitalize="none"
                     secureTextEntry
-                    value={activeProvider.apiKey ?? ''}
+                    value={providerApiKeyDraft}
                     editable={!workspaceReadOnly}
-                   onChangeText={(apiKey) => updateActiveProvider({ apiKey })}
+                   onChangeText={(apiKey) => {
+                     setProviderApiKeyDraft(apiKey);
+                     setProviderKeyBindingFingerprint(
+                       apiKey.trim()
+                         ? providerEndpointFingerprint({
+                             kind: providerKindDraft,
+                             baseUrl: providerBaseUrlDraft,
+                           }) ?? null
+                         : null
+                     );
+                   }}
                    style={styles.input}
                  />
                   {Platform.OS === 'web' ? (
@@ -4244,13 +5777,29 @@ export default function App() {
                   ) : null}
                 </View>
 
+                {providerEndpointInspection.errors.map((error) => (
+                  <Text key={error} style={styles.providerWizardError}>• {error}</Text>
+                ))}
+                {providerEndpointInspection.warnings.map((warning) => (
+                  <Text key={warning} style={styles.providerWizardWarning}>• {warning}</Text>
+                ))}
+
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  disabled={workspaceReadOnly}
+                  onPress={saveProviderDraft}
+                  style={[styles.secondaryButton, workspaceReadOnly && styles.buttonDisabled]}
+                >
+                  <Text style={styles.secondaryButtonText}>保存并绑定此端点</Text>
+                </AnimatedPressable>
+
                 <AnimatedPressable
                   accessibilityRole="button"
                   disabled={busy || workspaceReadOnly}
                   onPress={refreshModels}
                   style={[styles.primaryButton, (busy || workspaceReadOnly) && styles.buttonDisabled]}
                 >
-                  <Text style={styles.primaryButtonText}>{busy ? '请求中...' : '获取模型'}</Text>
+                  <Text style={styles.primaryButtonText}>{busy ? '请求中...' : '检查连接并获取模型目录'}</Text>
                 </AnimatedPressable>
                 {workspace.providers.length > 1 ? (
                   <AnimatedPressable
@@ -4266,13 +5815,65 @@ export default function App() {
                 ) : null}
               </View>
 
+              <View style={styles.settingsCard} testID="model-capability-matrix-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>模型能力矩阵</Text>
+                  <Text style={styles.modelOverrideHint}>{capabilityMatrixRows.length} 个已添加模型</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  “可用”同时要求模型声明支持、端点通过检查且客户端已经实现对应协议；“服务商侧”表示模型可能支持，但当前客户端尚未开放该入口。
+                </Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.capabilityMatrixTable}>
+                  <View>
+                    <View style={styles.capabilityMatrixHeaderRow}>
+                      <Text style={[styles.capabilityMatrixModelCell, styles.capabilityMatrixHeaderText]}>模型</Text>
+                      {([
+                        ['text', '文本'],
+                        ['image-input', '图片'],
+                        ['file-input', '文件'],
+                        ['reasoning', '思考'],
+                        ['web-search', '搜索'],
+                        ['image-generation', '生图'],
+                        ['video-generation', '视频'],
+                        ['speech-to-text', '转写'],
+                        ['text-to-speech', '朗读'],
+                      ] as const).map(([capability, label]) => (
+                        <Text key={capability} style={[styles.capabilityMatrixCell, styles.capabilityMatrixHeaderText]}>{label}</Text>
+                      ))}
+                    </View>
+                    {capabilityMatrixRows.slice(0, 50).map((row) => (
+                      <View key={`matrix:${row.providerId}:${row.modelId}`} style={styles.capabilityMatrixRow}>
+                        <Text numberOfLines={1} style={styles.capabilityMatrixModelCell}>{row.modelName}</Text>
+                        {(['text', 'image-input', 'file-input', 'reasoning', 'web-search', 'image-generation', 'video-generation', 'speech-to-text', 'text-to-speech'] as const).map((capability) => {
+                          const status = row.cells[capability].status;
+                          return (
+                            <View key={capability} style={styles.capabilityMatrixCell}>
+                              {status === 'available' ? (
+                                <Check size={15} color={palette.accent} strokeWidth={2.5} />
+                              ) : (
+                                <Text style={status === 'provider-only' ? styles.capabilityMatrixProviderOnly : styles.capabilityMatrixUnavailable}>
+                                  {status === 'provider-only' ? '侧' : '—'}
+                                </Text>
+                              )}
+                            </View>
+                          );
+                        })}
+                      </View>
+                    ))}
+                  </View>
+                </ScrollView>
+                {!capabilityMatrixRows.length ? (
+                  <Text style={styles.sidebarEmpty}>完成向导并添加模型后显示能力矩阵。</Text>
+                ) : null}
+              </View>
+
               <View style={styles.settingsCard} testID="comparison-settings-card">
                 <View style={styles.settingsCardHeader}>
                   <Text style={styles.settingsCardTitle}>多模型同问对比</Text>
-                  <Text style={styles.modelOverrideHint}>{workspace.comparisonTargets.length}/4</Text>
+                  <Text style={styles.modelOverrideHint}>{workspace.comparisonTargets.length}/{comparisonTargetLimit}</Text>
                 </View>
                 <Text style={styles.modelOverrideHint}>
-                  在各服务商标签间切换并选择 2–4 个聊天模型。发送一次会产生同等数量的独立调用，费用由你的服务商账户结算。
+                  在各服务商标签间切换并选择 2–{comparisonTargetLimit} 个聊天模型。发送一次会产生同等数量的独立调用，费用由你的服务商账户结算。
                 </Text>
                 <ScrollView
                   horizontal
@@ -4466,6 +6067,125 @@ export default function App() {
                 ))}
               </View>
 
+              <View style={styles.settingsCard} testID="cost-guard-settings-card">
+                <View style={styles.settingsCardHeader}>
+                  <View style={styles.costGuardTitleRow}>
+                    <ShieldCheck size={18} color={palette.text} strokeWidth={2.2} />
+                    <Text style={styles.settingsCardTitle}>费用保险丝</Text>
+                  </View>
+                  <Text style={styles.modelOverrideHint}>{workspace.costGuard.enabled ? '已开启' : '未开启'}</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  只依据本机请求台账和用户填写的价格进行提醒或阻断，不是服务商账单，也无法覆盖其他设备、控制台调用或服务商未返回的费用。未知费用永远不会按 0 处理。
+                </Text>
+                <AnimatedPressable
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: workspace.costGuard.enabled }}
+                  onPress={() => setWorkspace((current) => ({
+                    ...current,
+                    costGuard: { ...current.costGuard, enabled: !current.costGuard.enabled },
+                  }))}
+                  style={styles.primaryButton}
+                >
+                  <Text style={styles.primaryButtonText}>{workspace.costGuard.enabled ? '关闭费用保险丝' : '开启费用保险丝'}</Text>
+                </AnimatedPressable>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>单次最大输出 Token</Text>
+                  <TextInput value={costMaxOutputDraft} onChangeText={setCostMaxOutputDraft} keyboardType="numeric" style={styles.input} />
+                  <Text style={styles.modelOverrideHint}>聊天/Responses 会按官方协议发送对应上限；推理模型的思考 Token 也可能占用上限。图片和视频生成不受该 Token 字段保护。</Text>
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>每日本机请求次数（0 为关闭）</Text>
+                  <TextInput value={costDailyRequestDraft} onChangeText={setCostDailyRequestDraft} keyboardType="numeric" style={styles.input} />
+                </View>
+                <View style={styles.usagePricingGrid}>
+                  <View style={styles.usagePricingField}>
+                    <Text style={styles.fieldLabel}>每日 CNY 已知累计阈值（0 关闭）</Text>
+                    <TextInput value={costDailyCnyDraft} onChangeText={setCostDailyCnyDraft} keyboardType="decimal-pad" style={styles.input} />
+                  </View>
+                  <View style={styles.usagePricingField}>
+                    <Text style={styles.fieldLabel}>每日 USD 已知累计阈值（0 关闭）</Text>
+                    <TextInput value={costDailyUsdDraft} onChangeText={setCostDailyUsdDraft} keyboardType="decimal-pad" style={styles.input} />
+                  </View>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  本机无法可靠预测本次输入、输出和工具的最终费用；CNY/USD 阈值只会在已完成请求的已知累计达到后，对下一次请求提醒或阻断。
+                </Text>
+                <Text style={styles.fieldLabel}>最多对比模型</Text>
+                <View style={styles.toolSegmentRow}>
+                  {([2, 3, 4] as const).map((count) => (
+                    <AnimatedPressable
+                      key={`guard-compare:${count}`}
+                      accessibilityRole="button"
+                      onPress={() => setWorkspace((current) => ({
+                        ...current,
+                        costGuard: { ...current.costGuard, maxComparisonTargets: count },
+                      }))}
+                      style={[styles.toolSegment, workspace.costGuard.maxComparisonTargets === count && styles.toolSegmentActive]}
+                    >
+                      <Text style={[styles.toolSegmentText, workspace.costGuard.maxComparisonTargets === count && styles.toolSegmentTextActive]}>{count}</Text>
+                    </AnimatedPressable>
+                  ))}
+                </View>
+                <Text style={styles.fieldLabel}>达到次数或已知预算时</Text>
+                <View style={styles.toolSegmentRow}>
+                  {(['warn', 'block'] as const).map((action) => (
+                    <AnimatedPressable
+                      key={`limit-action:${action}`}
+                      accessibilityRole="button"
+                      onPress={() => setWorkspace((current) => ({
+                        ...current,
+                        costGuard: { ...current.costGuard, limitAction: action },
+                      }))}
+                      style={[styles.toolSegment, workspace.costGuard.limitAction === action && styles.toolSegmentActive]}
+                    >
+                      <Text style={[styles.toolSegmentText, workspace.costGuard.limitAction === action && styles.toolSegmentTextActive]}>{action === 'warn' ? '提醒确认' : '直接阻断'}</Text>
+                    </AnimatedPressable>
+                  ))}
+                </View>
+                <Text style={styles.fieldLabel}>存在未知费用时</Text>
+                <View style={styles.toolSegmentRow}>
+                  {(['warn', 'block'] as const).map((action) => (
+                    <AnimatedPressable
+                      key={`unknown-action:${action}`}
+                      accessibilityRole="button"
+                      onPress={() => setWorkspace((current) => ({
+                        ...current,
+                        costGuard: { ...current.costGuard, unknownCostAction: action },
+                      }))}
+                      style={[styles.toolSegment, workspace.costGuard.unknownCostAction === action && styles.toolSegmentActive]}
+                    >
+                      <Text style={[styles.toolSegmentText, workspace.costGuard.unknownCostAction === action && styles.toolSegmentTextActive]}>{action === 'warn' ? '提醒确认' : '直接阻断'}</Text>
+                    </AnimatedPressable>
+                  ))}
+                </View>
+                <AnimatedPressable
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: workspace.costGuard.confirmPotentialMultipleCharges }}
+                  onPress={() => setWorkspace((current) => ({
+                    ...current,
+                    costGuard: {
+                      ...current.costGuard,
+                      confirmPotentialMultipleCharges: !current.costGuard.confirmPotentialMultipleCharges,
+                    },
+                  }))}
+                  style={styles.secondaryButton}
+                >
+                  <Text style={styles.secondaryButtonText}>
+                    {workspace.costGuard.confirmPotentialMultipleCharges ? '多项潜在计费：发送前确认' : '多项潜在计费：不额外确认'}
+                  </Text>
+                </AnimatedPressable>
+                <View style={styles.costGuardTodayRow}>
+                  <Text style={styles.modelOverrideHint}>今日 {costGuardToday.requestCount} 次请求</Text>
+                  <Text style={styles.modelOverrideHint}>CNY {costGuardToday.knownCostByCurrency.CNY.toFixed(6)}</Text>
+                  <Text style={styles.modelOverrideHint}>USD {costGuardToday.knownCostByCurrency.USD.toFixed(6)}</Text>
+                  <Text style={styles.modelOverrideHint}>未知 {costGuardToday.unknownEventCount} 次</Text>
+                </View>
+                <AnimatedPressable accessibilityRole="button" onPress={saveCostGuardDrafts} style={styles.primaryButton}>
+                  <Text style={styles.primaryButtonText}>保存保险丝数值</Text>
+                </AnimatedPressable>
+              </View>
+
               <View style={styles.settingsCard} testID="usage-dashboard-card">
                 <View style={styles.settingsCardHeader}>
                   <Text style={styles.settingsCardTitle}>本机用量与费用估算</Text>
@@ -4656,7 +6376,7 @@ export default function App() {
               <View style={styles.settingsCard} testID="encrypted-backup-card">
                 <Text style={styles.settingsCardTitle}>本地加密备份</Text>
                 <Text style={styles.modelOverrideHint}>
-                  使用密码在本机完成认证加密。备份包含配置、文字对话、模板和任务 ID，但永远不包含 API Key、MCP 授权或媒体文件。
+                  使用密码在本机完成认证加密。专用 API Key/MCP 授权字段、媒体文件和本机费用账本不会导出；普通对话、提示词和错误文字会原样备份，请勿在其中粘贴密钥。
                 </Text>
                 <View style={styles.fieldGroup}>
                   <Text style={styles.fieldLabel}>备份密码（至少 8 个字符）</Text>
@@ -4706,7 +6426,7 @@ export default function App() {
                     <Text style={styles.fieldLabel}>语音输入转写</Text>
                     <Text numberOfLines={1} style={styles.modelOverrideHint}>
                       {workspace.voice.transcriptionTarget
-                        ? `${workspace.voice.transcriptionTarget.providerId} · ${workspace.voice.transcriptionTarget.modelId}`
+                        ? `${workspace.voice.transcriptionTarget.providerId} · ${workspace.voice.transcriptionTarget.modelId}${configuredTranscriptionTarget ? '' : '（已失效）'}`
                         : '未配置'}
                     </Text>
                   </View>
@@ -4721,11 +6441,11 @@ export default function App() {
                   ) : null}
                   <AnimatedPressable
                     accessibilityRole="button"
-                    disabled={!activeModel?.capabilities.includes('speech-to-text')}
+                    disabled={!canSetActiveTranscriptionTarget}
                     onPress={() => setVoiceTarget('transcription')}
                     style={[
                       styles.providerChip,
-                      !activeModel?.capabilities.includes('speech-to-text') && styles.buttonDisabled,
+                      !canSetActiveTranscriptionTarget && styles.buttonDisabled,
                     ]}
                   >
                     <Text style={styles.providerChipText}>使用当前模型</Text>
@@ -4736,7 +6456,7 @@ export default function App() {
                     <Text style={styles.fieldLabel}>回答朗读</Text>
                     <Text numberOfLines={1} style={styles.modelOverrideHint}>
                       {workspace.voice.speechTarget
-                        ? `${workspace.voice.speechTarget.providerId} · ${workspace.voice.speechTarget.modelId}`
+                        ? `${workspace.voice.speechTarget.providerId} · ${workspace.voice.speechTarget.modelId}${configuredSpeechTarget ? '' : '（已失效）'}`
                         : '未配置'}
                     </Text>
                   </View>
@@ -4751,11 +6471,11 @@ export default function App() {
                   ) : null}
                   <AnimatedPressable
                     accessibilityRole="button"
-                    disabled={!activeModel?.capabilities.includes('text-to-speech')}
+                    disabled={!canSetActiveSpeechTarget}
                     onPress={() => setVoiceTarget('speech')}
                     style={[
                       styles.providerChip,
-                      !activeModel?.capabilities.includes('text-to-speech') && styles.buttonDisabled,
+                      !canSetActiveSpeechTarget && styles.buttonDisabled,
                     ]}
                   >
                     <Text style={styles.providerChipText}>使用当前模型</Text>
@@ -5195,6 +6915,12 @@ export default function App() {
                   <AnimatedMessage
                     key={message.id}
                     animate={Platform.OS !== 'android' && animatedMessageIds.has(message.id)}
+                    onLayout={(event) => {
+                      messageLayoutYByIdRef.current.set(message.id, event.nativeEvent.layout.y);
+                      if (pendingSearchMessageIdRef.current === message.id) {
+                        scrollToSearchMessage(message.id);
+                      }
+                    }}
                     style={[
                       styles.messageBubble,
                       message.role === 'user'
@@ -5203,6 +6929,7 @@ export default function App() {
                           ? styles.systemMessageBlock
                           : styles.assistantBubble,
                       message.status === 'error' && styles.errorBubble,
+                      highlightedSearchMessageId === message.id && styles.searchHighlightedMessage,
                     ]}
                   >
                     {message.role === 'user' ? (
@@ -5252,6 +6979,7 @@ export default function App() {
                           <MessageActionMenu
                             role="user"
                             onEdit={() => beginEditUserMessage(message)}
+                            onBranch={() => branchConversation(message.id)}
                             onDelete={() => removeMessage(message)}
                           />
                         ) : null}
@@ -5267,7 +6995,7 @@ export default function App() {
                             accessibilityRole="button"
                             accessibilityLabel="移除会话指令"
                             disabled={busy || workspaceReadOnly}
-                            onPress={() => removeMessage(message)}
+                            onPress={() => void removeSystemInstruction(message)}
                             style={styles.iconButton}
                           >
                             <X size={15} color={palette.textSecondary} strokeWidth={2} />
@@ -5389,7 +7117,7 @@ export default function App() {
                               onShare={() => void shareMessage(message)}
                               onMore={() => openMessageActionMenu(message)}
                             />
-                            {workspace.voice.speechTarget && message.status === 'ready' && message.content.trim() ? (
+                            {configuredSpeechTarget && message.status === 'ready' && message.content.trim() ? (
                               <AnimatedPressable
                                 accessibilityRole="button"
                                 disabled={
@@ -5425,6 +7153,7 @@ export default function App() {
                           <MessageActionMenu
                             role="assistant"
                             onEdit={() => beginEditUserMessage(message)}
+                            onBranch={() => branchConversation(message.id)}
                             onDelete={() => removeMessage(message)}
                           />
                         ) : null}
@@ -5691,7 +7420,7 @@ export default function App() {
                           />
                         </AnimatedPressable>
                       ) : null}
-                      {workspace.voice.transcriptionTarget && composerSupportsMessages ? (
+                      {configuredTranscriptionTarget && composerSupportsMessages ? (
                         <AnimatedPressable
                           accessibilityRole="button"
                           accessibilityLabel={
@@ -5840,12 +7569,36 @@ export default function App() {
             <Text style={styles.sidebarNewChatText}>新对话</Text>
           </AnimatedPressable>
 
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.sidebarProjectRow}
+            testID="project-switcher"
+          >
+            {workspace.projects.map((project) => {
+              const selected = project.id === workspace.activeProjectId;
+              return (
+                <AnimatedPressable
+                  key={project.id}
+                  accessibilityRole="button"
+                  onPress={() => selectProject(project.id)}
+                  style={[styles.sidebarProjectChip, selected && styles.sidebarProjectChipActive]}
+                >
+                  <Folder size={13} color={selected ? palette.textOnAccent : palette.textSecondary} strokeWidth={2.2} />
+                  <Text numberOfLines={1} style={[styles.sidebarProjectChipText, selected && styles.sidebarProjectChipTextActive]}>
+                    {project.name}
+                  </Text>
+                </AnimatedPressable>
+              );
+            })}
+          </ScrollView>
+
           <View style={styles.sidebarSearchBox}>
             <Search size={16} color={palette.textSecondary} strokeWidth={2} />
             <TextInput
               value={historySearchQuery}
               onChangeText={setHistorySearchQuery}
-              placeholder="搜索聊天记录"
+              placeholder="全局搜索项目、消息和模板"
               placeholderTextColor={palette.placeholder}
               style={styles.sidebarSearchInput}
             />
@@ -5861,8 +7614,50 @@ export default function App() {
             ) : null}
           </View>
 
-          <View style={styles.sidebarSection}>
-            <Text style={styles.sidebarSectionTitle}>最近</Text>
+          {historySearchQuery ? (
+            <View style={styles.sidebarSection} testID="global-search-results">
+              <Text style={styles.sidebarSectionTitle}>
+                {globalSearchIndex ? `全局结果 · ${globalSearchResults.length}` : '正在准备本地索引…'}
+              </Text>
+              {!globalSearchIndex ? (
+                <Text style={styles.sidebarEmpty}>只在本机整理内容，不会上传搜索文本</Text>
+              ) : globalSearchResults.length ? (
+                <ScrollView
+                  style={styles.sidebarConversationList}
+                  showsVerticalScrollIndicator={false}
+                  contentContainerStyle={styles.sidebarConversationListContent}
+                >
+                  {globalSearchResults.map((result) => (
+                    <AnimatedPressable
+                      key={result.id}
+                      accessibilityRole="button"
+                      onPress={() => openGlobalSearchResult(result)}
+                      style={styles.globalSearchResultRow}
+                    >
+                      <View style={styles.globalSearchResultHeader}>
+                        <Text numberOfLines={1} style={styles.globalSearchResultTitle}>{result.title}</Text>
+                        <Text style={styles.globalSearchResultKind}>
+                          {result.kind === 'project'
+                            ? '项目'
+                            : result.kind === 'prompt-template'
+                              ? '模板'
+                              : result.kind === 'message'
+                                ? '消息'
+                                : '对话'}
+                        </Text>
+                      </View>
+                      <Text numberOfLines={3} style={styles.globalSearchResultSnippet}>{result.snippet}</Text>
+                    </AnimatedPressable>
+                  ))}
+                </ScrollView>
+              ) : (
+                <Text style={styles.sidebarEmpty}>没有匹配的本地内容</Text>
+              )}
+            </View>
+          ) : null}
+
+          <View style={[styles.sidebarSection, historySearchQuery ? { display: 'none' } : undefined]}>
+            <Text style={styles.sidebarSectionTitle}>{activeProject?.name ?? '最近'}</Text>
             {filteredConversations.length ? (
               <ScrollView
                 style={styles.sidebarConversationList}
@@ -5983,6 +7778,18 @@ export default function App() {
                 </AnimatedPressable>
                 <AnimatedPressable
                   accessibilityRole="button"
+                  onPress={() => {
+                    setConversationActionId(null);
+                    setSidebarOpen(false);
+                    setMoveConversationId(conversationActionConversation.id);
+                  }}
+                  style={styles.sidebarConversationActionRow}
+                >
+                  <Text style={styles.sidebarConversationActionText}>移动到项目</Text>
+                  <Folder size={16} color={palette.textSecondary} strokeWidth={2.3} />
+                </AnimatedPressable>
+                <AnimatedPressable
+                  accessibilityRole="button"
                   onPress={() => requestDeleteConversation(conversationActionConversation.id)}
                   style={[styles.sidebarConversationActionRow, styles.sidebarConversationActionDangerRow]}
                 >
@@ -6050,6 +7857,65 @@ export default function App() {
               </Pressable>
             </Pressable>
           </KeyboardAvoidingView>
+        </Modal>
+
+        <Modal
+          visible={Boolean(costConfirmationReason)}
+          transparent
+          animationType="fade"
+          onRequestClose={() => resolveCostConfirmation(false)}
+        >
+          <Pressable style={styles.deleteConfirmScrim} onPress={() => resolveCostConfirmation(false)}>
+            <Pressable style={styles.deleteConfirmDialog} onPress={(event) => event.stopPropagation()}>
+              <View style={styles.deleteConfirmIconWrap}>
+                <ShieldCheck size={22} color={palette.warning} strokeWidth={2.3} />
+              </View>
+              <Text style={styles.deleteConfirmTitle}>确认可能产生的服务商费用</Text>
+              <Text style={styles.deleteConfirmDescription}>{costConfirmationReason}</Text>
+              <Text style={styles.modelOverrideHint}>这里只显示本机估算，真实费用与是否计费以你的服务商账单为准。</Text>
+              <View style={styles.deleteConfirmActions}>
+                <AnimatedPressable accessibilityRole="button" onPress={() => resolveCostConfirmation(false)} style={styles.deleteConfirmCancelButton}>
+                  <Text style={styles.deleteConfirmCancelText}>取消，不发送</Text>
+                </AnimatedPressable>
+                <AnimatedPressable accessibilityRole="button" onPress={() => resolveCostConfirmation(true)} style={styles.deleteConfirmDeleteButton}>
+                  <Text style={styles.deleteConfirmButtonText}>确认并继续</Text>
+                </AnimatedPressable>
+              </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
+
+        <Modal
+          visible={Boolean(moveConversationId)}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setMoveConversationId(null)}
+        >
+          <Pressable style={styles.deleteConfirmScrim} onPress={() => setMoveConversationId(null)}>
+            <Pressable style={styles.deleteConfirmDialog} onPress={(event) => event.stopPropagation()}>
+              <View style={styles.deleteConfirmIconWrap}>
+                <Folder size={22} color={palette.text} strokeWidth={2.2} />
+              </View>
+              <Text style={styles.deleteConfirmTitle}>移动到项目</Text>
+              <Text style={styles.deleteConfirmDescription}>只调整本地归类，不会发送请求或移动媒体文件。</Text>
+              <ScrollView style={styles.projectMoveList}>
+                {workspace.projects.map((project) => (
+                  <AnimatedPressable
+                    key={`move:${project.id}`}
+                    accessibilityRole="button"
+                    onPress={() => moveConversation(moveConversationId!, project.id)}
+                    style={styles.projectMoveRow}
+                  >
+                    <Folder size={16} color={palette.textSecondary} strokeWidth={2} />
+                    <Text numberOfLines={1} style={styles.projectMoveRowText}>{project.name}</Text>
+                    {workspace.conversations.find((conversation) => conversation.id === moveConversationId)?.projectId === project.id ? (
+                      <Check size={16} color={palette.accent} strokeWidth={2.4} />
+                    ) : null}
+                  </AnimatedPressable>
+                ))}
+              </ScrollView>
+            </Pressable>
+          </Pressable>
         </Modal>
 
         <Modal
@@ -6437,17 +8303,25 @@ function MessageInlineEditor({
 function MessageActionMenu({
   role,
   onEdit,
+  onBranch,
   onDelete,
 }: {
   role: MessageRole;
   onEdit: () => void;
+  onBranch: () => void;
   onDelete: () => void;
 }) {
   return (
     <View style={[styles.messageActionMenu, role === 'user' && styles.userMessageActionMenu]}>
-      <AnimatedPressable accessibilityRole="button" onPress={onEdit} style={styles.messageActionMenuRow}>
-        <Text style={styles.messageActionMenuText}>编辑消息</Text>
-        <Pencil size={15} color={palette.textSecondary} strokeWidth={2.2} />
+      {role === 'user' ? (
+        <AnimatedPressable accessibilityRole="button" onPress={onEdit} style={styles.messageActionMenuRow}>
+          <Text style={styles.messageActionMenuText}>编辑消息</Text>
+          <Pencil size={15} color={palette.textSecondary} strokeWidth={2.2} />
+        </AnimatedPressable>
+      ) : null}
+      <AnimatedPressable accessibilityRole="button" onPress={onBranch} style={styles.messageActionMenuRow}>
+        <Text style={styles.messageActionMenuText}>从这里创建分支</Text>
+        <GitBranch size={15} color={palette.textSecondary} strokeWidth={2.2} />
       </AnimatedPressable>
       <AnimatedPressable
         accessibilityRole="button"
@@ -8228,6 +10102,13 @@ const styles = StyleSheet.create({
   messageBubble: {
     maxWidth: '100%',
   },
+  searchHighlightedMessage: {
+    borderLeftWidth: 3,
+    borderLeftColor: palette.warning,
+    borderRadius: radii.sm,
+    backgroundColor: 'rgba(217, 119, 6, 0.08)',
+    paddingLeft: 6,
+  },
   userMessageBlock: {
     alignSelf: 'stretch',
     alignItems: 'flex-end',
@@ -9593,5 +11474,199 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '800',
+  },
+  deleteConfirmDescription: {
+    color: palette.textSecondary,
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  providerWizardError: {
+    color: palette.danger,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  providerWizardWarning: {
+    color: palette.warning,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  capabilityMatrixTable: {
+    paddingTop: 8,
+    paddingBottom: 4,
+  },
+  capabilityMatrixHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: palette.borderStrong,
+    backgroundColor: palette.surface,
+  },
+  capabilityMatrixRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 38,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.border,
+  },
+  capabilityMatrixModelCell: {
+    width: 160,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    color: palette.text,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  capabilityMatrixCell: {
+    width: 54,
+    minHeight: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: palette.textSecondary,
+    fontSize: 11,
+  },
+  capabilityMatrixHeaderText: {
+    color: palette.textSecondary,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  capabilityMatrixProviderOnly: {
+    color: palette.warning,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  capabilityMatrixUnavailable: {
+    color: palette.textMutedSolid,
+    fontSize: 14,
+  },
+  sidebarProjectRow: {
+    gap: 7,
+    paddingVertical: 8,
+    paddingHorizontal: 2,
+  },
+  sidebarProjectChip: {
+    maxWidth: 170,
+    minHeight: 32,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 11,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+  },
+  sidebarProjectChipActive: {
+    backgroundColor: palette.accent,
+    borderColor: palette.accent,
+  },
+  sidebarProjectChipText: {
+    flexShrink: 1,
+    color: palette.textSecondary,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  sidebarProjectChipTextActive: {
+    color: palette.textOnAccent,
+  },
+  globalSearchResultRow: {
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    paddingHorizontal: 11,
+    paddingVertical: 10,
+    gap: 5,
+  },
+  globalSearchResultHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  globalSearchResultTitle: {
+    flex: 1,
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  globalSearchResultKind: {
+    color: palette.textSecondary,
+    fontSize: 10,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  globalSearchResultSnippet: {
+    color: palette.textSecondary,
+    fontSize: 11,
+    lineHeight: 17,
+  },
+  projectMoveList: {
+    maxHeight: 280,
+  },
+  projectMoveRow: {
+    minHeight: 42,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.border,
+  },
+  projectMoveRowText: {
+    flex: 1,
+    color: palette.text,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  costGuardTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  costGuardTodayRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    borderRadius: radii.md,
+    backgroundColor: palette.surface,
+    padding: 10,
+  },
+  usagePricingGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  usagePricingField: {
+    flexGrow: 1,
+    flexBasis: 150,
+    minWidth: 0,
+  },
+  deleteConfirmActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+  },
+  deleteConfirmCancelButton: {
+    minWidth: 100,
+    height: 38,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  deleteConfirmCancelText: {
+    color: palette.textSecondary,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  deleteConfirmDeleteButton: {
+    minWidth: 100,
+    height: 38,
+    borderRadius: radii.sm,
+    backgroundColor: palette.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
   },
 });

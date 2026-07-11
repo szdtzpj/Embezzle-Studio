@@ -138,6 +138,28 @@ describe('provider audio readiness and official routing', () => {
     ).toThrow(ProviderAudioProtocolError);
   });
 
+  it('accepts the official Bailian US legacy host and derives only its documented paths', () => {
+    const usProvider = provider(
+      'bailian-compatible',
+      'https://dashscope-us.aliyuncs.com/compatible-mode/v1/models'
+    );
+
+    expect(resolveProviderAudioProtocol(usProvider)).toBe('bailian-compatible');
+    expect(getProviderAudioEndpoints(usProvider)).toEqual({
+      transcription: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1/chat/completions',
+      speech:
+        'https://dashscope-us.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+    });
+    expect(() =>
+      resolveProviderAudioProtocol(
+        provider(
+          'bailian-compatible',
+          'https://dashscope-us.aliyuncs.com.evil.example/compatible-mode/v1'
+        )
+      )
+    ).toThrow(ProviderAudioProtocolError);
+  });
+
   it.each([
     provider('custom', 'https://api.openai.com.evil.example/v1'),
     provider('custom', 'http://api.openai.com/v1'),

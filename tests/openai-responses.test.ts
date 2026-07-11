@@ -195,6 +195,27 @@ describe('Responses input and request body', () => {
     expect(request.body).not.toHaveProperty('top_p');
   });
 
+  it('serializes the output limit only as max_output_tokens', () => {
+    const request = buildOpenAiResponsesRequest({
+      provider: provider(),
+      modelId: 'gpt-5.2-pro',
+      messages: [message('u1', 'user', 'Keep this bounded.')],
+      maxOutputTokens: 4096,
+    });
+
+    expect(request.body.max_output_tokens).toBe(4096);
+    expect(request.body).not.toHaveProperty('max_completion_tokens');
+    expect(request.body).not.toHaveProperty('max_tokens');
+    expect(() =>
+      buildOpenAiResponsesRequest({
+        provider: provider(),
+        modelId: 'gpt-5.2-pro',
+        messages: [message('u1', 'user', 'Invalid cap.')],
+        maxOutputTokens: 63,
+      })
+    ).toThrow(/64–131072/);
+  });
+
   it('enforces documented Pro effort matrices and rejects ordinary models', () => {
     const args = {
       provider: provider(),

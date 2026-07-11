@@ -1,4 +1,10 @@
-import type { AppWorkspace, Capability, ModelParameterSettings, ProviderProfile } from '../domain/types';
+import type {
+  AppWorkspace,
+  Capability,
+  CostGuardSettings,
+  ModelParameterSettings,
+  ProviderProfile,
+} from '../domain/types';
 
 const textOnly: Capability[] = ['text', 'streaming'];
 const vision: Capability[] = ['text', 'image-input', 'streaming'];
@@ -10,6 +16,18 @@ export const defaultParameterSettings: ModelParameterSettings = {
   topP: 1,
   presencePenalty: 0,
   frequencyPenalty: 0,
+};
+
+export const defaultCostGuardSettings: CostGuardSettings = {
+  enabled: false,
+  maxOutputTokens: 4096,
+  maxComparisonTargets: 4,
+  dailyRequestLimit: 0,
+  dailyCnyBudget: 0,
+  dailyUsdBudget: 0,
+  limitAction: 'block',
+  unknownCostAction: 'warn',
+  confirmPotentialMultipleCharges: true,
 };
 
 export const defaultProviders: ProviderProfile[] = [
@@ -53,6 +71,7 @@ export const defaultProviders: ProviderProfile[] = [
 export function createDefaultWorkspace(): AppWorkspace {
   const now = Date.now();
   const initialConversationId = 'conversation-default';
+  const initialProjectId = 'project-default';
   const welcomeMessage = {
     id: 'welcome',
     role: 'assistant' as const,
@@ -75,11 +94,21 @@ export function createDefaultWorkspace(): AppWorkspace {
     reasoningEffortByModel: {},
     parameterSettings: defaultParameterSettings,
     modelCandidatesByProvider: {},
+    activeProjectId: initialProjectId,
+    projects: [
+      {
+        id: initialProjectId,
+        name: '默认项目',
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
     activeConversationId: initialConversationId,
     conversations: [
       {
         id: initialConversationId,
         title: '新对话',
+        projectId: initialProjectId,
         createdAt: now,
         updatedAt: now,
         messages: [welcomeMessage],
@@ -91,6 +120,8 @@ export function createDefaultWorkspace(): AppWorkspace {
     comparisonEnabled: false,
     comparisonTargets: [],
     modelPricing: [],
+    costGuard: { ...defaultCostGuardSettings },
+    providerUsageEvents: [],
     webSearch: {
       enabled: false,
       searchContextSize: 'medium',

@@ -11,11 +11,11 @@ Embezzle Studio is a personal Android AI client for people who already own multi
 - OpenAI-compatible by default: Volcengine Ark, Bailian compatible mode, New API, One API, and self-hosted relays can share one adapter when they expose `/models` and `/chat/completions`.
 - Discovery is provider-specific: OpenAI-compatible providers may use `GET /models`; Volcengine Ark may best-effort probe the undocumented compatibility response only on an exact official data-plane host, then falls back to curated candidates maintained from the official public catalog. Ark account-specific Endpoint IDs remain manual unless a trusted backend later implements AK/HMAC control-plane discovery.
 - Provider-specific when needed: Doubao video input and other non-standard media flows should be adapter modules, not conditionals scattered across the UI.
-- Secrets stay local and platform-scoped: Android requires SecureStore and fails closed if it is unavailable; Web keeps API keys only in the current tab's `sessionStorage` (or memory as a fail-safe), removes legacy persistent values, and never includes keys in workspace snapshots.
+- Secrets stay local and platform-scoped: Android requires SecureStore and fails closed if it is unavailable; Web keeps structured API-key fields only in the current tab's `sessionStorage` (or memory as a fail-safe), removes legacy persistent values, and excludes those structured fields from workspace snapshots. Ordinary conversation, prompt, template, note, and error text is preserved as authored and is not secret-scanned, so credentials must not be pasted into those fields.
 - Mobile constraints are real: remote MCP transports are first-class; local stdio MCP is not part of the first mobile milestone because Android process and binary management would make the first version brittle.
 - Native runtime UX is part of correctness: the Android IME must resize/avoid the composer, media controls must remain reachable inside narrow message cards, and navigation must avoid repeatedly rebuilding expensive chat, player, animation, or model-list subtrees.
 - Web development needs a local proxy: Expo Web runs in a browser and would otherwise hit CORS on provider APIs. Android builds call providers directly.
-- Zero owned inference cost: Embezzle Studio does not supply a model/search/voice key or operate a production proxy, tool gateway, sync backend, or background worker. Provider-backed features activate only with a user-owned credential and an implemented exact protocol.
+- Zero owned service cost: Embezzle Studio does not supply or subsidize model/search/voice/media capacity and operates no production API, proxy, tool gateway, exchange-rate service, telemetry backend, sync backend, or background worker. Provider-backed features activate only with a user-owned credential and an implemented exact protocol; all provider charges stay with that user's account.
 
 ## MVP Scope
 
@@ -42,11 +42,22 @@ Embezzle Studio is a personal Android AI client for people who already own multi
    - Remote MCP connection shape for Streamable HTTP and SSE transports.
    - Tool permissions modeled before execution is implemented.
 
+4. Local workspace and cost safety
+   - Local projects with project instructions, default models, conversation membership, and explicit migration when a project is deleted.
+   - Conversation branching with regenerated message/comparison IDs and canonical origin IDs for analytics/task deduplication.
+   - Bounded literal global search across projects, templates, conversations, and messages; provider, key, plugin, and usage-ledger data are excluded.
+   - A provider setup wizard that treats kind/endpoint/key as one binding and clears old secrets/models before a changed destination is queried.
+   - A capability matrix that separates provider-declared metadata from client-tested serializer/parser support.
+   - A local cost guard with output-token/request/comparison limits, next-attempt gating after completed known CNY/USD subtotals reach configured thresholds, multi-charge confirmation, and an attempt ledger that preserves unknown costs.
+
 ## Architecture
 
 ```mermaid
 flowchart TD
     UI["React Native UI"] --> Workspace["Workspace State"]
+    Workspace --> Projects["Local Projects + Conversation Branches"]
+    Workspace --> LocalSearch["Bounded Local Search"]
+    Workspace --> CostGuard["Local Cost Guard + Attempt Ledger"]
     Workspace --> Snapshots["Versioned AsyncStorage Snapshots + Backup"]
     Workspace --> Secrets["Android SecureStore / Web Tab Session"]
     UI --> Media["Capability-gated Image/Video/File Pickers"]
@@ -56,6 +67,7 @@ flowchart TD
     Preview --> Export["Android SAF / Web Download / Native Share"]
     UI --> ChatEngine["Chat Orchestration"]
     ChatEngine --> ProviderAdapter["Provider Adapter Registry"]
+    ProviderAdapter --> Setup["Endpoint/Key Binding + Capability Evidence"]
     ProviderAdapter --> OpenAI["OpenAI-compatible Adapter"]
     ProviderAdapter --> OpenAIResponses["Official OpenAI Responses"]
     ProviderAdapter --> ProviderMedia["Bailian video_url / Ark Generation Tasks"]
@@ -98,16 +110,22 @@ Local stdio MCP is deferred. It requires packaging executables, sandboxing them,
 
 Model capability checks live behind module seams: `src/services/modelCapabilities.ts` resolves model tasks and capabilities, while `src/services/reasoningEfforts.ts` resolves provider/model-specific thinking levels. Callers should ask predicates such as `isVisionModel`, `isWebSearchModel`, `isToolCallingModel`, `inferModelTask`, and `getReasoningEffortOptions` instead of doing local string matching.
 
-Discovery enriches remote model IDs through local metadata/rules. Ark treats its observed `/models` response as a non-contractual compatibility hint, validates its task/modality/status metadata against adapters the app actually implements, and falls back to a versioned curated catalog snapshot. Provider-level capabilities describe transport support and are not copied onto each model. Explicit user overrides win over inferred capabilities and survive reloads. Health checks verify availability only; they do not claim that hosted tools such as web search are implemented by the current adapter.
+Discovery enriches remote model IDs through local metadata/rules. Ark treats its observed `/models` response as a non-contractual compatibility hint, validates its task/modality/status metadata against adapters the app actually implements, and falls back to a versioned curated catalog snapshot. Provider-level capabilities describe transport support and are not copied onto each model. Explicit user overrides win over inferred capabilities and survive reloads. Health checks verify availability only; they do not claim that hosted tools such as web search are implemented by the current adapter. The `1.2.0` capability matrix keeps provider/model declarations separate from client-supported routes, so UI evidence never creates protocol support by implication.
+
+Provider setup uses a separate draft and a canonical endpoint fingerprint. A saved kind or endpoint change clears the old key, models, and discovery candidates before any request can target the new destination. Known Bailian Coding Plan/Token Plan endpoints and `sk-sp-` subscription keys are rejected for this custom application instead of being treated as pay-as-you-go credentials.
 
 ## Data Model
 
 - `ProviderProfile`: provider identity, adapter kind, base URL, API key, transport capability hints, and model list.
 - `ModelInfo`: model ID plus resolved capability hints and optional supported reasoning effort hints.
-- `ChatMessage`: role, content, status, attachments, citations, comparison selection, request metrics, usage, and error information.
+- `WorkspaceProject`: local project identity, optional instruction and default model; conversations point to a project rather than requiring a sync service.
+- `ChatConversation`: conversation metadata plus optional parent/branch-point lineage.
+- `ChatMessage`: role, content, status, attachments, citations, comparison selection, request metrics, usage, error information, and optional canonical `originMessageId` for branch deduplication.
 - `MediaAttachment`: attachment kind, durable URI, MIME type, size/dimensions, and optional request-time Base64 payload.
 - `PluginManifest`: mobile-safe plugin or remote MCP entry.
 - `PromptTemplate`, `ModelPricing`, `ModelTargetRef`, `WebSearchSettings`, and `VoiceSettings`: local productivity configuration without copied provider secrets.
+- `CostGuardSettings`: local output-token, comparison, request, completed-known-cost, unknown-cost, and multi-charge confirmation policy.
+- `ProviderUsageEvent`: device-local request-attempt status and known/unknown cost components. It is not provider billing data and is excluded from exported backups.
 
 ## Attachment Lifecycle and Limits
 
@@ -127,10 +145,13 @@ Discovery enriches remote model IDs through local metadata/rules. Ark treats its
 ## BYOK Productivity and Tool Boundary
 
 - Multi-model comparison performs complete preflight before any of 2–4 independent calls, shares one group `AbortController`, records per-candidate timing/usage, and passes only the selected successful candidate into later context.
+- Projects, project instructions/default models, conversation membership, conversation branches, and global search are local-only. Branch cloning regenerates message/comparison IDs while preserving canonical origin IDs; usage analytics and the media task center deduplicate inherited history. Global search is bounded and excludes provider/key/plugin/ledger data.
+- Provider onboarding treats provider kind, canonical endpoint, and key as one security binding. A changed binding clears old credentials/models before discovery. Bailian subscription-plan endpoints that are not permitted for custom applications are blocked, and the capability matrix separates declared metadata from adapters actually implemented by the client.
 - Search uses exact official Responses endpoints for OpenAI, Ark, and Bailian. Capability inference, adapter support, user credential readiness, and response evidence are separate checks. Citations are structured, visible, clickable, and restricted to safe HTTPS URLs.
 - Android request-based audio supports official OpenAI and Bailian only. Recording is foreground-only and transcribed text is never auto-sent. Synthesized speech is cached before playback. Volcengine speech remains disabled until a separate speech credential profile exists; OpenAI Realtime remains disabled because safe ephemeral tokens require a broker.
-- The task center is a projection of durable conversation messages; it has no duplicate cloud job database and performs no background polling. The usage dashboard aggregates only locally retained conversations and treats user-entered prices as estimates, without a price or FX service.
-- External backups are authenticated encrypted files, but secrets and media are removed before encryption. Internal workspace schema v3 migrates v2, stores provider/MCP secrets separately, and strictly normalizes new productivity fields.
+- The task center is a projection of durable conversation messages; it has no duplicate cloud job database and performs no background polling. The usage dashboard aggregates only locally retained canonical events and treats user-entered prices as estimates, without a price or FX service.
+- The local cost guard can apply an output cap before text/search calls, cap comparison targets, warn/block on unknown cost, and require confirmation for potentially multiple charges. Daily CNY/USD thresholds inspect the already completed, locally known subtotal and only gate the next attempt once that subtotal has reached the threshold; they do not project the current request or promise that a provider bill cannot cross a budget. Currencies are never converted, unknown cost is never zero, and the attempt ledger is not a true provider bill.
+- External backups are authenticated encrypted files, but secrets, media, and `providerUsageEvents` are removed before encryption. Internal workspace schema v4 migrates v3/v2, stores provider/MCP secrets separately, preserves the current device's attempt ledger on import, and strictly normalizes projects, branches, and cost settings.
 - MCP configuration permits only remote HTTPS endpoints, rejects embedded credentials/query strings/private destinations, stores authorization separately, defaults disabled, and displays a permission confirmation. Actual provider-hosted MCP calls remain disabled until per-tool argument preview and approval-response handling are implemented and real-server tested.
 
 The full matrix and official contracts are recorded in [BYOK Productivity Suite](./byok-productivity-suite.md).
@@ -146,11 +167,14 @@ The full matrix and official contracts are recorded in [BYOK Productivity Suite]
 
 ## Current Verification Boundary
 
-- Local development is now version `1.1.0` / code 7. It is not a tagged or public release. Its new BYOK features have automated protocol, parsing, context, analytics, encryption, storage, and static UI coverage, while real provider-product activation and Android microphone/playback remain external acceptance boundaries.
+- Local development is now version `1.2.0` / code 8. It is not tagged or public, and stable Latest remains `v1.0.6`.
+- Current `1.2.0` evidence consists of passing TypeScript, zero-warning ESLint, 27 test files, and 528 automated tests. Focused coverage exercises local project CRUD/migration, branch ID remapping and canonical deduplication, bounded secret-free local search, endpoint/key rebinding, Bailian subscription-plan rejection, declared-versus-client capability evidence, cost-guard limit/unknown-cost behavior, atomic endpoint-bound secret persistence, backup-import replacement locking, storage/backup normalization, and exact output-token wire fields. This is local code/protocol evidence, not real provider activation or billing evidence.
+- Web export passes at 3,254 modules / 7.3 MB. A clean 390×844 browser session covers project creation/search/navigation, setup rebinding, capability/cost/backup surfaces, and v1.2.0 with 0 console errors / 0 warnings. `expo install --check`, Expo Doctor 20/20, all three workflow YAML files, all 35 Bash blocks, all 16 full-SHA official Actions, and `git diff --check` pass.
+- Clean Android prebuild and `NODE_ENV=production` `clean assembleRelease` pass. The production-signed local candidate is `D:\EmbezzleStudio-Releases\v1.2.0-candidate\Embezzle-Studio-v1.2.0-candidate-release.apk`, 97,313,239 bytes, SHA-256 `872f32a48320f2a20dadee6fc0f699668666d067a60e546a19467ed922082da0`. `aapt` reports `com.szdtzpj.embezzlestudio`, version `1.2.0`/code 8, minSdk 24, targetSdk 36, and intentional `RECORD_AUDIO`; camera and overlay are absent. The packaged Manifest has `android:allowBackup="false"`. `apksigner` reports one expected production signer, v2/v3 true, and zipalign passes. This candidate is not a public asset and was not pushed, tagged, uploaded, or published.
 
-- The `1.1.0` development source passes `npm.cmd run check` with 21 test files / 423 tests, zero TypeScript errors, and zero ESLint warnings. The final Web export passes at 3,249 modules / 7.2 MB; Expo Doctor is 20/20 and `expo install --check` passes. A clean 390×844 exported-Web session covered the new productivity settings, saved/applied a prompt template, and proved a production-style provider send fails before contacting the local proxy; browser console evidence is 0 errors / 0 warnings. All 3 workflow YAML files, 35 Bash blocks, and `git diff --check` pass.
+- Historical `1.1.0` evidence remains unchanged: that source passed `npm.cmd run check` with 21 test files / 423 tests, zero TypeScript errors, and zero ESLint warnings. Its final Web export passed at 3,249 modules / 7.2 MB; Expo Doctor was 20/20 and `expo install --check` passed. A clean 390×844 exported-Web session covered the productivity settings, saved/applied a prompt template, and proved a production-style provider send failed before contacting the local proxy; browser console evidence was 0 errors / 0 warnings. All 3 workflow YAML files, 35 Bash blocks, and `git diff --check` passed.
 
-- Clean Android prebuild and `NODE_ENV=production` unsigned Release assembly pass for `1.1.0`. The production-signed local candidate is `D:\EmbezzleStudio-Releases\v1.1.0-candidate\Embezzle-Studio-v1.1.0-candidate-release.apk`, 97,198,551 bytes, SHA-256 `f4a0062fc03d320bb5e3915b6b9a0cdb3a80ee16b4ad18cce78edfd79f92cd80`. `aapt` reports version `1.1.0`/code 7, minSdk 24, targetSdk 36, intentional `RECORD_AUDIO`, and no camera/overlay permission. It has one expected production signer, v2/v3, and valid zip alignment. This is not a public asset.
+- Historical `1.1.0` clean Android prebuild and `NODE_ENV=production` unsigned Release assembly passed. Its production-signed local candidate is `D:\EmbezzleStudio-Releases\v1.1.0-candidate\Embezzle-Studio-v1.1.0-candidate-release.apk`, 97,198,551 bytes, SHA-256 `f4a0062fc03d320bb5e3915b6b9a0cdb3a80ee16b4ad18cce78edfd79f92cd80`. `aapt` reports version `1.1.0`/code 7, minSdk 24, targetSdk 36, intentional `RECORD_AUDIO`, and no camera/overlay permission. It has one expected production signer, v2/v3, and valid zip alignment. This is not a public asset and does not validate `1.2.0`.
 
 - Local automation passes for the `1.0.6` release source: `npm.cmd run check` reports 15 test files / 252 tests with zero TypeScript or ESLint errors/warnings; Web export reports 3137 modules and a 6.9 MB main bundle; Expo Doctor is 20/20 and `expo install --check` passes. All 3 workflow YAML files and 35 embedded Bash blocks parse successfully, and `git diff --check` passes.
 - A clean 390×844 exported-Web session covered Chat, the model picker, Settings, and return navigation with zero console errors or warnings. A separate loopback proxy with a delayed fake response exercised the new folding glyph in a real browser and completed with the expected assistant text; this proves the Web animation path, not Android Reanimated rendering.
@@ -165,5 +189,6 @@ The full matrix and official contracts are recorded in [BYOK Productivity Suite]
 - Web API keys are scoped to the current tab session through `sessionStorage`/memory. Legacy Web keys are removed from AsyncStorage during migration, so closing the tab/session requires entering them again.
 - Workspace and chat snapshots remain in AsyncStorage, but provider `apiKey` fields are stripped before serialization.
 - Chat history in the live workspace is not encrypted at rest; encrypted export is available but is not equivalent to an encrypted live database.
-- API keys and MCP authorization are never included in export/sync, even inside an encrypted backup.
+- Structured provider API-key and MCP-authorization fields, media, and the device-local `providerUsageEvents` attempt ledger are excluded from export/sync, even inside an encrypted backup. Ordinary conversations, prompts, templates, notes, and error text are preserved as authored and are not secret-scanned, so users must not paste credentials into those fields. Import preserves the ledger already present on the receiving device.
+- Android sets `allowBackup: false` so workspace conversations and the local attempt ledger are not eligible for Android/Google automatic app backup; cross-device migration should use the explicit authenticated encrypted export. The clean `1.2.0` generated Manifest and packaged APK both verify `android:allowBackup="false"`.
 - Encrypted import reuses a local provider key only when provider ID, provider kind, and canonical Base URL all match. MCP authorization additionally requires matching plugin type, transport, and canonical endpoint; a same-ID backup entry at another endpoint never inherits a secret.

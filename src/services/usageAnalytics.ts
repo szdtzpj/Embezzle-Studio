@@ -5,6 +5,7 @@ import type {
   ModelPricing,
   PricingCurrency,
 } from '../domain/types';
+import { canonicalMessageId } from './conversationBranches';
 
 const currencies: readonly PricingCurrency[] = ['CNY', 'USD'];
 const includedStatuses = new Set<ChatMessage['status']>(['ready', 'error', 'cancelled']);
@@ -304,6 +305,77 @@ function isIncludedAssistantRequest(message: ChatMessage): boolean {
   );
 }
 
+function messageOccurrenceKey(conversationId: string, messageIndex: number): string {
+  return JSON.stringify([conversationId, messageIndex]);
+}
+
+function findBranchSourceOccurrence(
+  conversationsById: ReadonlyMap<string, ChatConversation>,
+  conversation: ChatConversation,
+  message: ChatMessage
+): string | undefined {
+  const canonicalId = canonicalMessageId(message);
+  const visited = new Set<string>([conversation.id]);
+  let parentId = conversation.parentConversationId;
+
+  while (parentId && !visited.has(parentId)) {
+    visited.add(parentId);
+    const parent = conversationsById.get(parentId);
+    if (!parent) {
+      return undefined;
+    }
+    const sourceIndex = parent.messages.findIndex(
+      (candidate) =>
+        !candidate.originMessageId &&
+        candidate.id === canonicalId &&
+        candidate.role === message.role
+    );
+    if (sourceIndex >= 0) {
+      return messageOccurrenceKey(parent.id, sourceIndex);
+    }
+    parentId = parent.parentConversationId;
+  }
+  return undefined;
+}
+
+/**
+ * Builds occurrence-aware keys for inherited branch messages. Raw message IDs
+ * are not globally unique in legacy data, so only an explicit origin link can
+ * join messages across conversations. A valid ancestor source is joined to its
+ * clones; unrelated messages that happen to reuse the same ID remain separate.
+ */
+function buildBranchDeduplicationKeys(
+  conversations: readonly ChatConversation[]
+): ReadonlyMap<string, string> {
+  const conversationsById = new Map(
+    conversations.map((conversation) => [conversation.id, conversation] as const)
+  );
+  const keys = new Map<string, string>();
+
+  for (const conversation of conversations) {
+    conversation.messages.forEach((message, messageIndex) => {
+      if (!message.originMessageId) {
+        return;
+      }
+      const occurrence = messageOccurrenceKey(conversation.id, messageIndex);
+      const sourceOccurrence = findBranchSourceOccurrence(
+        conversationsById,
+        conversation,
+        message
+      );
+      const groupKey = sourceOccurrence
+        ? `source:${sourceOccurrence}`
+        : `orphan:${message.role}:${canonicalMessageId(message)}`;
+      keys.set(occurrence, groupKey);
+      if (sourceOccurrence) {
+        keys.set(sourceOccurrence, groupKey);
+      }
+    });
+  }
+
+  return keys;
+}
+
 /** Aggregates retained assistant requests across every supplied conversation. */
 export function aggregateUsage(
   conversations: readonly ChatConversation[],
@@ -320,33 +392,52 @@ export function aggregateUsage(
       summary: MutableUsageSummary;
     }
   >();
+  const seenRequestKeys = new Set<string>();
+  const branchDeduplicationKeys = buildBranchDeduplicationKeys(conversations);
+  const messageOccurrences = conversations.flatMap((conversation) =>
+    conversation.messages.map((message, messageIndex) => ({
+      conversation,
+      message,
+      messageIndex,
+    }))
+  );
+  // Prefer the original source when both it and an inherited clone are present.
+  messageOccurrences.sort(
+    (left, right) =>
+      Number(Boolean(left.message.originMessageId)) -
+      Number(Boolean(right.message.originMessageId))
+  );
 
-  for (const conversation of conversations) {
-    for (const message of conversation.messages) {
-      if (!isIncludedAssistantRequest(message)) {
-        continue;
-      }
-
-      const providerId = message.providerId?.trim() || unknownProviderId;
-      const modelId = message.modelId?.trim() || unknownModelId;
-      const key = pricingKey(providerId, modelId);
-      const modelPricing = pricingIndex.get(key);
-      let group = groups.get(key);
-      if (!group) {
-        group = {
-          providerId,
-          ...(message.providerName?.trim() ? { providerName: message.providerName.trim() } : {}),
-          modelId,
-          summary: emptySummary(),
-        };
-        groups.set(key, group);
-      } else if (!group.providerName && message.providerName?.trim()) {
-        group.providerName = message.providerName.trim();
-      }
-
-      addMessage(totals, message, modelPricing);
-      addMessage(group.summary, message, modelPricing);
+  for (const { conversation, message, messageIndex } of messageOccurrences) {
+    if (!isIncludedAssistantRequest(message)) {
+      continue;
     }
+    const occurrence = messageOccurrenceKey(conversation.id, messageIndex);
+    const canonicalId = branchDeduplicationKeys.get(occurrence) ?? `message:${occurrence}`;
+    if (seenRequestKeys.has(canonicalId)) {
+      continue;
+    }
+    seenRequestKeys.add(canonicalId);
+
+    const providerId = message.providerId?.trim() || unknownProviderId;
+    const modelId = message.modelId?.trim() || unknownModelId;
+    const key = pricingKey(providerId, modelId);
+    const modelPricing = pricingIndex.get(key);
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        providerId,
+        ...(message.providerName?.trim() ? { providerName: message.providerName.trim() } : {}),
+        modelId,
+        summary: emptySummary(),
+      };
+      groups.set(key, group);
+    } else if (!group.providerName && message.providerName?.trim()) {
+      group.providerName = message.providerName.trim();
+    }
+
+    addMessage(totals, message, modelPricing);
+    addMessage(group.summary, message, modelPricing);
   }
 
   const byProviderModel = [...groups.values()]

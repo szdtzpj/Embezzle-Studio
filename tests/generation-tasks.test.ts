@@ -103,6 +103,77 @@ describe('generation task derivation and filtering', () => {
     });
   });
 
+  it('deduplicates inherited branch tasks while retaining an unrelated reused message ID', () => {
+    const rootMessage = message('shared-task-message', 10, task('running'));
+    const branchMessage = {
+      ...message('branch-task-message', 10, task('running')),
+      originMessageId: rootMessage.id,
+    };
+    const nestedMessage = {
+      ...message('nested-task-message', 10, task('running')),
+      originMessageId: rootMessage.id,
+    };
+    const root = conversation('root', 'Root', [rootMessage]);
+    const branch = {
+      ...conversation('branch', 'Branch', [branchMessage]),
+      parentConversationId: root.id,
+      branchPointMessageId: rootMessage.id,
+    };
+    const nested = {
+      ...conversation('nested', 'Nested', [nestedMessage]),
+      parentConversationId: branch.id,
+      branchPointMessageId: branchMessage.id,
+    };
+    const unrelated = conversation('unrelated', 'Unrelated', [
+      message('shared-task-message', 20, task('failed')),
+    ]);
+
+    const derived = deriveGenerationTasks([nested, branch, unrelated, root]);
+
+    expect(derived).toHaveLength(2);
+    expect(derived.map((item) => item.key)).toEqual([
+      'unrelated:shared-task-message',
+      'root:shared-task-message',
+    ]);
+  });
+
+  it('deduplicates orphaned branch copies by their explicit canonical origin', () => {
+    const first = message('copy-a', 10, task('running'));
+    first.originMessageId = 'deleted-source';
+    const second = message('copy-b', 10, task('running'));
+    second.originMessageId = 'deleted-source';
+
+    const derived = deriveGenerationTasks([
+      conversation('orphan-a', 'Orphan A', [first]),
+      conversation('orphan-b', 'Orphan B', [second]),
+    ]);
+
+    expect(derived).toHaveLength(1);
+    expect(derived[0].task.taskId).toBe('task-running');
+  });
+
+  it('keeps the most complete known state for canonical task copies', () => {
+    const rootMessage = message('video-task', 10, task('running'));
+    const completedCopy = message('video-task-copy', 10, task('running'));
+    completedCopy.originMessageId = rootMessage.id;
+    completedCopy.attachments = [video];
+    const root = conversation('root', 'Root', [rootMessage]);
+    const branch = {
+      ...conversation('branch', 'Branch', [completedCopy]),
+      parentConversationId: root.id,
+      branchPointMessageId: rootMessage.id,
+    };
+
+    const derived = deriveGenerationTasks([root, branch]);
+
+    expect(derived).toHaveLength(1);
+    expect(derived[0]).toMatchObject({
+      key: 'branch:video-task-copy',
+      state: 'completed',
+      attachment: video,
+    });
+  });
+
   it('filters all, active, completed, and failed without mutating the source', () => {
     const conversations = [conversation('conversation', '任务', [
       message('active', 1, task('submitted')),

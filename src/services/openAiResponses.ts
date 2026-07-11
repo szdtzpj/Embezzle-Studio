@@ -33,6 +33,7 @@ export interface OpenAiResponsesRequestBody {
   model: string;
   input: OpenAiResponsesInputMessage[];
   store: false;
+  max_output_tokens?: number;
   reasoning?: {
     effort: OpenAiResponsesWireEffort;
   };
@@ -48,6 +49,7 @@ export interface BuildOpenAiResponsesRequestArgs {
   modelId: string;
   messages: ChatMessage[];
   reasoningEffort?: ReasoningEffort;
+  maxOutputTokens?: number;
 }
 
 export const openAiResponsesLimits = Object.freeze({
@@ -89,7 +91,7 @@ function officialOpenAiUrl(baseUrl: string): URL | undefined {
     const url = new URL(baseUrl.trim());
     if (
       url.protocol !== 'https:' ||
-      url.hostname.toLowerCase() !== 'api.openai.com' ||
+      url.hostname.toLowerCase().replace(/\.+$/, '') !== 'api.openai.com' ||
       url.username ||
       url.password
     ) {
@@ -385,6 +387,7 @@ export function buildOpenAiResponsesRequest({
   modelId,
   messages,
   reasoningEffort = 'default',
+  maxOutputTokens,
 }: BuildOpenAiResponsesRequestArgs): OpenAiResponsesRequest {
   if (!isOpenAiResponsesOnlyModel(provider, modelId)) {
     return protocolError(`模型“${modelId}”不是 api.openai.com 上的 Responses-only Pro 模型。`);
@@ -401,6 +404,12 @@ export function buildOpenAiResponsesRequest({
   };
   if (effort) {
     body.reasoning = { effort };
+  }
+  if (maxOutputTokens !== undefined) {
+    if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 64 || maxOutputTokens > 131_072) {
+      return protocolError('Responses 最大输出 Token 必须是 64–131072 的整数。');
+    }
+    body.max_output_tokens = maxOutputTokens;
   }
 
   return {

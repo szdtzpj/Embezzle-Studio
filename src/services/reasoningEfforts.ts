@@ -52,7 +52,7 @@ function withDefault(efforts: ReasoningEffort[]): ReasoningEffort[] {
 
 function isOpenAiBaseUrl(provider: ProviderProfile): boolean {
   try {
-    return new URL(provider.baseUrl).hostname.toLowerCase() === 'api.openai.com';
+    return new URL(provider.baseUrl).hostname.toLowerCase().replace(/\.+$/, '') === 'api.openai.com';
   } catch {
     return false;
   }

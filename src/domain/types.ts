@@ -104,6 +104,65 @@ export interface ModelTargetRef {
   modelId: string;
 }
 
+export interface WorkspaceProject {
+  id: string;
+  name: string;
+  systemPrompt?: string;
+  defaultTarget?: ModelTargetRef;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type ProviderUsageKind =
+  | 'chat'
+  | 'web-search'
+  | 'image-generation'
+  | 'video-generation'
+  | 'audio-transcription'
+  | 'speech-generation';
+
+export type ProviderUsageStatus = 'started' | 'succeeded' | 'failed' | 'cancelled';
+
+export type UnknownCostComponent =
+  | 'input-tokens'
+  | 'output-tokens'
+  | 'web-search-tool'
+  | 'speech'
+  | 'transcription'
+  | 'image-output'
+  | 'video-output'
+  | 'provider-surcharge'
+  | 'failed-or-cancelled-request';
+
+export interface ProviderUsageEvent {
+  id: string;
+  kind: ProviderUsageKind;
+  status: ProviderUsageStatus;
+  providerId: string;
+  modelId: string;
+  createdAt: number;
+  localDateKey: string;
+  completedAt?: number;
+  messageId?: string;
+  comparisonGroupId?: string;
+  knownCostEstimate?: CostEstimate;
+  unknownCostComponents: UnknownCostComponent[];
+}
+
+export type CostGuardAction = 'warn' | 'block';
+
+export interface CostGuardSettings {
+  enabled: boolean;
+  maxOutputTokens: number;
+  maxComparisonTargets: 2 | 3 | 4;
+  dailyRequestLimit: number;
+  dailyCnyBudget: number;
+  dailyUsdBudget: number;
+  limitAction: CostGuardAction;
+  unknownCostAction: CostGuardAction;
+  confirmPotentialMultipleCharges: boolean;
+}
+
 export interface RequestMetrics {
   durationMs?: number;
   timeToFirstTokenMs?: number;
@@ -167,6 +226,7 @@ export interface GenerationTaskInfo {
 
 export interface ChatMessage {
   id: string;
+  originMessageId?: string;
   role: MessageRole;
   content: string;
   createdAt: number;
@@ -177,6 +237,7 @@ export interface ChatMessage {
   citations?: WebCitation[];
   webSearchTriggered?: boolean;
   promptTemplateId?: string;
+  projectInstructionId?: string;
   comparisonGroupId?: string;
   selectedForContext?: boolean;
   requestMetrics?: RequestMetrics;
@@ -193,6 +254,9 @@ export interface ChatConversation {
   title: string;
   customTitle?: boolean;
   pinnedAt?: number;
+  projectId?: string;
+  parentConversationId?: string;
+  branchPointMessageId?: string;
   createdAt: number;
   updatedAt: number;
   messages: ChatMessage[];
@@ -220,6 +284,8 @@ export interface AppWorkspace {
   reasoningEffortByModel: Record<string, ReasoningEffort>;
   parameterSettings: ModelParameterSettings;
   modelCandidatesByProvider: Record<string, ModelInfo[]>;
+  activeProjectId: string;
+  projects: WorkspaceProject[];
   activeConversationId: string;
   conversations: ChatConversation[];
   messages: ChatMessage[];
@@ -228,6 +294,8 @@ export interface AppWorkspace {
   comparisonEnabled: boolean;
   comparisonTargets: ModelTargetRef[];
   modelPricing: ModelPricing[];
+  costGuard: CostGuardSettings;
+  providerUsageEvents: ProviderUsageEvent[];
   webSearch: WebSearchSettings;
   voice: VoiceSettings;
 }

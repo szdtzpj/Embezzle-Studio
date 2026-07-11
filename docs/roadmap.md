@@ -37,15 +37,28 @@
 - 本地提示词/角色模板、媒体任务中心和 Token/延迟/用户价格估算。
 - 不含 API Key/MCP 授权/媒体的 XChaCha20-Poly1305 加密备份与严格导入。
 
-当前状态：以上本地与协议实现已进入 `1.1.0` / code 7 开发分支；Embezzle Studio 不提供付费 API、生产代理、汇率服务、同步服务器或任务 worker。真实账号产品开通、计费证据、Android 麦克风/播放和并发压力仍是外部验收边界，当前公开 Latest 仍为 `v1.0.6`。
+历史状态：以上本地与协议实现已在 `1.1.0` / code 7 开发阶段完成；Embezzle Studio 不提供付费 API、生产代理、汇率服务、同步服务器或任务 worker。真实账号产品开通、计费证据、Android 麦克风/播放和并发压力仍是外部验收边界，当前公开 Latest 仍为 `v1.0.6`。
 
-2026-07-11 `1.1.0` 本机验证：`npm.cmd run check` 通过 21 个测试文件/423 个测试，TypeScript 与 ESLint 零错误/警告；最终 Web export 通过（3249 modules、主 bundle 7.2 MB），Expo Doctor 20/20，`expo install --check` 通过。390×844 导出 Web 覆盖新增设置中心、模板保存/插入，并实际证明生产式 Web 请求在接触本机代理前 fail-closed，console 为 0 error / 0 warning。3 个 workflow YAML、35 个 Bash block 和 `git diff --check` 通过。
+2026-07-11 `1.1.0` 历史本机验证：`npm.cmd run check` 通过 21 个测试文件/423 个测试，TypeScript 与 ESLint 零错误/警告；最终 Web export 通过（3249 modules、主 bundle 7.2 MB），Expo Doctor 20/20，`expo install --check` 通过。390×844 导出 Web 覆盖新增设置中心、模板保存/插入，并实际证明生产式 Web 请求在接触本机代理前 fail-closed，console 为 0 error / 0 warning。3 个 workflow YAML、35 个 Bash block 和 `git diff --check` 通过。
 
-干净 Android prebuild 与 `NODE_ENV=production` 未签名 Release 构建通过。本地正式证书候选位于 `D:\EmbezzleStudio-Releases\v1.1.0-candidate\Embezzle-Studio-v1.1.0-candidate-release.apk`，大小 97,198,551 字节，SHA-256 `f4a0062fc03d320bb5e3915b6b9a0cdb3a80ee16b4ad18cce78edfd79f92cd80`；包名 `com.szdtzpj.embezzlestudio`、版本 `1.1.0`/code 7、minSdk 24/targetSdk 36。`RECORD_AUDIO` 为请求式语音的有意权限，overlay/camera 缺席；单一正式签名者、v2/v3 与 zipalign 通过。该候选未 tag、未上传、未发布，公开 Latest 仍为 `v1.0.6`。
+历史 `1.1.0` 干净 Android prebuild 与 `NODE_ENV=production` 未签名 Release 构建通过。本地正式证书候选位于 `D:\EmbezzleStudio-Releases\v1.1.0-candidate\Embezzle-Studio-v1.1.0-candidate-release.apk`，大小 97,198,551 字节，SHA-256 `f4a0062fc03d320bb5e3915b6b9a0cdb3a80ee16b4ad18cce78edfd79f92cd80`；包名 `com.szdtzpj.embezzlestudio`、版本 `1.1.0`/code 7、minSdk 24/targetSdk 36。`RECORD_AUDIO` 为请求式语音的有意权限，overlay/camera 缺席；单一正式签名者、v2/v3 与 zipalign 通过。该候选未 tag、未上传、未发布，只能作为上一阶段证据，不能证明 `1.2.0`。
 
 已发布的 `1.0.6` 包含并取代此前 `1.0.5` 的真机反馈修复：待发送图片使用 1:1 方形真实预览；对话视频改为 `expo-video` 原生内嵌播放器和全屏控件；视频文件名与“保存/分享”位于不会被卡片裁切的独立操作区；Android 保存使用系统 Storage Access Framework，不申请宽泛媒体库权限。原生图片选择不再额外请求整张 Base64，以降低高分辨率图片进入 JS 堆时的峰值。
 
 该版本还把 Android 键盘模式设为 `resize`，让聊天和改名对话框参与键盘避让；模型选择 `Modal` 使用真实 bottom inset 并让列表可收缩滚动；聊天页在设置页打开时保持挂载，设置页首次打开后复用，Android 使用较轻的按压/页面/消息呈现，并把候选模型按每批 60 条加载。Expo 模板图标/施工网格已被双带 S 品牌套件和显式原生启动页取代，三个思考圆点则被一个带清理逻辑的折叠变形标志取代。用户已在其真机确认此前四项主路径解决，并随后授权当前版本发布；发布授权不等同于最终 Actions APK 的连接设备测试，新安全区/品牌/动画、更多设备、异常路径和压力矩阵仍待独立覆盖。
+
+## M2.6 - Local Workspace and Cost Safety
+
+- 本地 projects：项目指令、默认模型和会话归属保存在本机，删除项目时明确迁移会话。
+- conversation branches：从消息克隆分支时重建消息/对比组 ID，并用 canonical `originMessageId` 在用量分析与任务中心去重。
+- bounded local global search：只对项目、模板、会话和消息做有查询长度、扫描文档数和结果数上限的本地字面量搜索，不索引服务商、Key、插件或费用账本。
+- provider setup wizard：服务商类型、规范化 Endpoint 与 Key 作为一个绑定；绑定改变先清除旧 Key/模型/候选，百炼 Coding Plan/Token Plan 端点及 `sk-sp-` 套餐凭据对自定义应用 fail-closed。
+- evidence-backed capability matrix：服务商/模型声明与客户端真正实现并测试的协议能力分栏，不因目录标签自动启用网络路由。
+- local cost guard：发送前执行 output token cap、未知费用策略、多模型目标数和潜在多次收费确认；本地 attempt ledger 记录状态及已知/未知费用。每日 CNY/USD 阈值只在当天“已完成请求的已知累计”达到阈值后提醒/阻断下一次请求，不预测当前请求是否跨线，也不是服务商真实账单。
+
+当前开发目标为 `1.2.0` / code 8，公开 stable Latest 仍是 `v1.0.6`。Embezzle Studio 不购买、补贴或转售任何 API/搜索/语音/媒体额度，不运行生产 API、代理、汇率、同步、遥测或任务 worker；所有服务商调用与费用由用户账号承担。CNY/USD 不做汇率换算，未知费用不按 0 处理，`providerUsageEvents` 不进入外部导出备份。
+
+2026-07-11/12 当前证据：`npm.cmd run check` 通过 27 个测试文件 / 528 个测试，TypeScript 与 ESLint 零错误/警告；项目/分支/搜索、Endpoint/Key 重绑与百炼套餐阻断、声明能力和客户端能力分离、费用护栏/未知费用、端点绑定密钥的原子持久化、备份导入临界区及精确 output token 字段均有定向覆盖。Web export 通过（3,254 modules / 7.3 MB），390×844 浏览器覆盖项目创建/搜索/导航、Endpoint 改动清 Key、费用草稿与 v1.2.0，console 0 error / 0 warning；`expo install --check`、Expo Doctor 20/20、3 份 workflow YAML、35 个 Bash 块、16 个 Action 完整 SHA 与 `git diff --check` 均通过。干净 prebuild/`clean assembleRelease` 和正式证书本机签名通过；候选 `D:\EmbezzleStudio-Releases\v1.2.0-candidate\Embezzle-Studio-v1.2.0-candidate-release.apk` 为 97,313,239 字节，SHA-256 `872f32a48320f2a20dadee6fc0f699668666d067a60e546a19467ed922082da0`，版本 1.2.0/code 8、min/target 24/36、`allowBackup=false`、有意 `RECORD_AUDIO`、无 CAMERA/overlay，单一正式签名者、v2/v3 与 zipalign 通过。它未 push、tag、上传或发布。
 
 ## M3 - Plugins and MCP
 

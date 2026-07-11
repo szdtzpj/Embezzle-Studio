@@ -44,6 +44,7 @@ interface ChatCompletionArgs {
   messages: ChatMessage[];
   reasoningEffort: ReasoningEffort;
   parameterSettings?: ModelParameterSettings;
+  maxOutputTokens?: number;
   onStreamUpdate?: (update: ChatStreamUpdate) => void;
   webSearch?: {
     enabled: boolean;
@@ -117,7 +118,7 @@ export function isAbortError(error: unknown): boolean {
 }
 
 function isLoopbackHostname(hostname: string): boolean {
-  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
   return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
 }
 
@@ -276,7 +277,7 @@ async function readJsonResponse<T>(response: Response, requestUrl: string, label
 
   if (looksLikeHtmlResponse(body, contentType)) {
     throw new Error(
-      `${label}返回的是 HTML 页面，不是 JSON。当前请求地址：${requestUrl}。请确认 Base URL 是 OpenAI/New API 兼容接口地址，例如 https://new-api.zxzt123.com/v1；如果只填主站域名，服务端通常会返回管理后台页面。`
+      `${label}返回的是 HTML 页面，不是 JSON。当前请求地址：${requestUrl}。请确认 Base URL 是 OpenAI/New API 兼容接口地址，例如 https://your-relay.example.com/v1；如果只填主站域名，服务端通常会返回管理后台页面。`
     );
   }
 
@@ -891,7 +892,7 @@ function modelText(modelId: string): string {
 
 function isOpenAiBaseUrl(provider: ProviderProfile): boolean {
   try {
-    return parseProviderBaseUrl(provider.baseUrl).hostname.toLowerCase() === 'api.openai.com';
+    return parseProviderBaseUrl(provider.baseUrl).hostname.toLowerCase().replace(/\.+$/, '') === 'api.openai.com';
   } catch {
     return false;
   }
@@ -1207,6 +1208,27 @@ function applyModelParameterOptions(
     if (presenceConstraint.supported && presencePenalty !== 0) body.presence_penalty = presencePenalty;
     if (frequencyConstraint.supported && frequencyPenalty !== 0) body.frequency_penalty = frequencyPenalty;
   }
+}
+
+function applyOutputTokenLimit(
+  body: Record<string, unknown>,
+  provider: ProviderProfile,
+  maxOutputTokens: number | undefined
+): void {
+  if (maxOutputTokens === undefined) {
+    return;
+  }
+  if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 64 || maxOutputTokens > 131_072) {
+    throw new Error('最大输出 Token 必须是 64–131072 的整数。');
+  }
+  if (isOpenAiBaseUrl(provider)) {
+    body.max_completion_tokens = maxOutputTokens;
+    return;
+  }
+  // Ark's ordinary ChatCompletions reference and Bailian's broadly compatible
+  // model families both document max_tokens. New API/custom relays receive the
+  // same best-effort OpenAI-compatible field and may choose to reject it.
+  body.max_tokens = maxOutputTokens;
 }
 
 function applyReasoningOptions(
@@ -1756,6 +1778,7 @@ export async function sendOpenAiCompatibleChat({
   messages,
   reasoningEffort,
   parameterSettings,
+  maxOutputTokens,
   onStreamUpdate,
   webSearch,
   signal,
@@ -1810,6 +1833,7 @@ export async function sendOpenAiCompatibleChat({
       ...(searchProtocol === 'openai-official'
         ? { searchContextSize: webSearch.searchContextSize }
         : {}),
+      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     });
     const response = await providerFetch(
       request.url,
@@ -1847,6 +1871,7 @@ export async function sendOpenAiCompatibleChat({
       modelId,
       messages: requestMessages,
       reasoningEffort: normalizeReasoningEffort(provider, requestModel, reasoningEffort),
+      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     });
     const response = await providerFetch(
       request.url,
@@ -1881,6 +1906,7 @@ export async function sendOpenAiCompatibleChat({
   };
   const normalizedEffort = normalizeReasoningEffort(provider, requestModel, reasoningEffort);
   applyModelParameterOptions(body, parameterSettings, provider, requestModel, normalizedEffort);
+  applyOutputTokenLimit(body, provider, maxOutputTokens);
   applyReasoningOptions(body, provider, modelId, normalizedEffort);
 
   const response = await providerFetch(`${baseUrl}/chat/completions`, {
