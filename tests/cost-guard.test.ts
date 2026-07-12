@@ -87,6 +87,7 @@ describe('provider usage event lifecycle', () => {
       id: 'search-1',
       kind: 'web-search',
       status: 'started',
+      providerRequestCount: 1,
       localDateKey: '2026-07-11',
       messageId: 'message-1',
       comparisonGroupId: 'compare-1',
@@ -98,13 +99,17 @@ describe('provider usage event lifecycle', () => {
   });
 
   it('completes known chat cost without inventing an unknown zero', () => {
-    const event = completeProviderUsageEvent(started('chat-1'), {
-      status: 'succeeded',
-      completedAt: localTime() + 200,
-      knownCostEstimate: cost(1.25),
-    });
+    const event = completeProviderUsageEvent(
+      started('chat-1', { providerRequestCount: 3 }),
+      {
+        status: 'succeeded',
+        completedAt: localTime() + 200,
+        knownCostEstimate: cost(1.25),
+      }
+    );
 
     expect(event.status).toBe('succeeded');
+    expect(event.providerRequestCount).toBe(3);
     expect(event.knownCostEstimate).toEqual(cost(1.25));
     expect(event.unknownCostComponents).toEqual([]);
   });
@@ -133,7 +138,7 @@ describe('provider usage event lifecycle', () => {
   });
 
   it('upserts a completed event without mutating the original ledger', () => {
-    const initial = started('same-id');
+    const initial = started('same-id', { providerRequestCount: 3 });
     const ledger = [initial];
     const completed = completeProviderUsageEvent(initial, {
       status: 'succeeded',
@@ -146,6 +151,7 @@ describe('provider usage event lifecycle', () => {
     expect(ledger[0].status).toBe('started');
     expect(next).toHaveLength(1);
     expect(next[0].status).toBe('succeeded');
+    expect(next[0].providerRequestCount).toBe(3);
   });
 
   it('rejects an attempt to complete the same event twice', () => {
@@ -216,6 +222,39 @@ describe('provider usage retention and daily summary', () => {
       unknownEventCount: 2,
     });
   });
+
+  it('counts one MCP-style ledger event as all three provider requests it represents', () => {
+    const mcpContinuation = succeeded('mcp-continuation', cost(1), {
+      providerRequestCount: 3,
+    });
+
+    const result = summarizeDailyProviderUsage([mcpContinuation], localTime());
+
+    expect(result.requestCount).toBe(3);
+  });
+
+  it.each([0, -1, 1.5])(
+    'fails closed for invalid providerRequestCount=%s',
+    (providerRequestCount) => {
+      expect(() => started('invalid-request-count', { providerRequestCount })).toThrow(
+        /positive safe integer/
+      );
+      const invalidEvent = {
+        ...started('invalid-ledger-event'),
+        providerRequestCount,
+      };
+      expect(() => summarizeDailyProviderUsage([invalidEvent], localTime())).toThrow(
+        /positive safe integer/
+      );
+      expect(() => upsertProviderUsageEvent([], invalidEvent)).toThrow(
+        /positive safe integer/
+      );
+      expect(() => completeProviderUsageEvent(invalidEvent, {
+        status: 'failed',
+        completedAt: localTime() + 1,
+      })).toThrow(/positive safe integer/);
+    }
+  );
 });
 
 describe('evaluateProviderRequestPlan', () => {

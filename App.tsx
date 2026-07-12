@@ -76,9 +76,11 @@ import type {
   ChatMessage,
   MessageRole,
   MediaAttachment,
+  McpActivitySummary,
   ModelInfo,
   ModelTargetRef,
   ModelTask,
+  PluginManifest,
   ProviderProfile,
   ReasoningEffort,
   ModelParameterSettings,
@@ -198,6 +200,29 @@ import { pickProjectKnowledgeTextFile } from './src/services/knowledgeFileIO';
 import { exportWorkspaceArtifact } from './src/services/artifactExport';
 import { WorkspaceWorkbench } from './src/components/WorkspaceWorkbench';
 import { ContextInspectorModal } from './src/components/ContextInspectorModal';
+import {
+  McpApprovalModal,
+  type McpApprovalViewModel,
+} from './src/components/McpApprovalModal';
+import {
+  getRemoteMcpExecutableReadiness,
+  normalizeMcpAllowedTools,
+  normalizeMcpAuthorization,
+  normalizeMcpDescription,
+  normalizeRemoteMcpEndpoint,
+} from './src/plugins/contracts';
+import type {
+  ProviderMcpApprovalDecision,
+  ProviderMcpApprovalRequest,
+} from './src/services/providerMcp';
+import {
+  assertMcpProviderSendAllowed,
+  isSameMcpApprovalToken,
+  restoreMessagesWithMcpAuditStub,
+  type McpApprovalToken,
+  type McpAuditCandidate,
+} from './src/services/mcpLifecycle';
+import { removeProviderFromWorkspace } from './src/services/providerLifecycle';
 import {
   canonicalMessageId,
   forkConversationAtMessage,
@@ -340,70 +365,22 @@ function confirmDestructiveAction(title: string, message: string): Promise<boole
   });
 }
 
-function isPrivateMcpHostname(hostname: string): boolean {
-  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
-  if (
-    !normalized ||
-    (!normalized.includes('.') && !normalized.includes(':')) ||
-    normalized === 'localhost' ||
-    normalized.endsWith('.localhost') ||
-    normalized.endsWith('.local') ||
-    normalized.endsWith('.internal') ||
-    normalized.endsWith('.lan') ||
-    normalized.endsWith('.home.arpa')
-  ) {
-    return true;
-  }
-
-  if (normalized.includes(':')) {
-    const segments = normalized.split(':');
-    const first = Number.parseInt(segments[0] || '0', 16);
-    const second = Number.parseInt(segments[1] || '0', 16);
-    const third = Number.parseInt(segments[2] || '0', 16);
-    return (
-      normalized.startsWith('::') ||
-      normalized.startsWith('64:ff9b:') ||
-      normalized.startsWith('100::') ||
-      normalized.startsWith('2002:') ||
-      first === 0x5f00 ||
-      (first >= 0xfc00 && first <= 0xfdff) ||
-      (first >= 0xfe80 && first <= 0xfeff) ||
-      (first >= 0xff00 && first <= 0xffff) ||
-      (first === 0x3fff && second <= 0x0fff) ||
-      (first === 0x2001 &&
-        (second === 0 ||
-          (second === 2 && third === 0) ||
-          second === 0x0db8 ||
-          (second >= 0x10 && second <= 0x2f)))
-    );
-  }
-
-  const octets = normalized.split('.').map(Number);
-  if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) {
-    return /^[0-9.]+$/.test(normalized);
-  }
-  const [a, b, c] = octets;
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 192 && b === 0 && (c === 0 || c === 2)) ||
-    (a === 192 && b === 88 && c === 99) ||
-    (a === 198 && (b === 18 || b === 19)) ||
-    (a === 198 && b === 51 && c === 100) ||
-    (a === 203 && b === 0 && c === 113) ||
-    a >= 224
-  );
-}
-
 type AssistantRequestOutcome =
   | { status: 'success' }
-  | { status: 'cancelled' }
-  | { status: 'error'; error: string };
+  | { status: 'cancelled'; mcpAudit?: McpAuditCandidate }
+  | { status: 'error'; error: string; mcpAudit?: McpAuditCandidate };
+
+function enabledRemoteMcpPluginsForProvider(
+  workspace: AppWorkspace,
+  providerId: string
+): PluginManifest[] {
+  return workspace.plugins.filter(
+    (plugin) =>
+      plugin.type === 'remote-mcp' &&
+      plugin.enabled === true &&
+      plugin.providerId === providerId
+  );
+}
 
 type AudioOperation = 'idle' | 'recording' | 'transcribing' | 'synthesizing';
 
@@ -1248,7 +1225,10 @@ export default function App() {
   const [backupBusy, setBackupBusy] = useState(false);
   const [mcpName, setMcpName] = useState('');
   const [mcpEndpoint, setMcpEndpoint] = useState('');
+  const [mcpDescription, setMcpDescription] = useState('');
+  const [mcpAllowedTools, setMcpAllowedTools] = useState('');
   const [mcpAuthorization, setMcpAuthorization] = useState('');
+  const [mcpApprovalView, setMcpApprovalView] = useState<McpApprovalViewModel | null>(null);
   const [audioOperation, setAudioOperation] = useState<AudioOperation>('idle');
   const audioBusy = audioOperation !== 'idle';
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
@@ -1293,13 +1273,23 @@ export default function App() {
   const messageLayoutYByIdRef = useRef(new Map<string, number>());
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const costConfirmationResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
+  const mcpApprovalResolverRef = useRef<{
+    token: McpApprovalToken;
+    settle: (decision: ProviderMcpApprovalDecision) => void;
+  } | null>(null);
+  const mcpApprovalNonceRef = useRef(0);
   const pendingAttachmentsRef = useRef(attachments);
   const persistenceReadyRef = useRef(false);
   const persistenceDirtyRef = useRef(false);
   const suppressNextSaveRef = useRef(false);
   const mountedRef = useRef(true);
   const workspaceReplacementInProgressRef = useRef(false);
-  const activeRequestRef = useRef<{ controller: AbortController; label: string } | null>(null);
+  const activeRequestRef = useRef<{
+    controller: AbortController;
+    label: string;
+    mcpActive: boolean;
+  } | null>(null);
+  const appStateRef = useRef(AppState.currentState);
   const audioOperationSequenceRef = useRef(0);
   const activeAudioOperationRef = useRef<ActiveAudioOperation | null>(null);
   const speechPlayerRef = useRef<ReturnType<typeof createAudioPlayer> | null>(null);
@@ -1331,6 +1321,8 @@ export default function App() {
       activeRequestRef.current?.controller.abort();
       costConfirmationResolverRef.current?.(false);
       costConfirmationResolverRef.current = null;
+      mcpApprovalResolverRef.current?.settle('cancel');
+      mcpApprovalResolverRef.current = null;
       activeAudioOperationRef.current?.controller.abort();
       speechPlayerRef.current?.release();
       speechPlayerRef.current = null;
@@ -1384,7 +1376,18 @@ export default function App() {
     return false;
   }
 
-  function beginActiveRequest(label: string): AbortController | null {
+  function ensureProviderConfigurationIdle(): boolean {
+    if (!activeRequestRef.current) {
+      return true;
+    }
+    setNotice('当前服务商请求仍在进行中；请先停止或等待完成，再切换模型或修改服务商/MCP 配置。');
+    return false;
+  }
+
+  function beginActiveRequest(
+    label: string,
+    options: { mcpActive?: boolean } = {}
+  ): AbortController | null {
     if (workspaceReplacementInProgressRef.current) {
       setNotice('正在验证并导入备份，暂时不能发起新请求。');
       return null;
@@ -1396,9 +1399,26 @@ export default function App() {
     }
 
     const controller = new AbortController();
-    activeRequestRef.current = { controller, label };
+    activeRequestRef.current = {
+      controller,
+      label,
+      mcpActive: options.mcpActive === true,
+    };
     setBusy(true);
     return controller;
+  }
+
+  function assertCurrentMcpProviderSendAllowed(
+    controller: AbortController,
+    signal?: AbortSignal
+  ): void {
+    const activeRequest = activeRequestRef.current;
+    assertMcpProviderSendAllowed({
+      requestIsCurrent: activeRequest?.controller === controller,
+      mcpActive: activeRequest?.mcpActive === true,
+      signalAborted: controller.signal.aborted || signal?.aborted === true,
+      appState: appStateRef.current,
+    });
   }
 
   function beginAudioOperation(kind: ActiveAudioOperation['kind']): ActiveAudioOperation | null {
@@ -1571,8 +1591,17 @@ export default function App() {
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
+      appStateRef.current = nextState;
       if (nextState !== 'active') {
         void flushWorkspace();
+        if (activeRequestRef.current?.mcpActive) {
+          mcpApprovalResolverRef.current?.settle('cancel');
+          resolveCostConfirmation(false);
+          activeRequestRef.current?.controller.abort();
+          if (mountedRef.current) {
+            setNotice('应用进入后台，本次 MCP 审批与回答已取消；不会自动重放批准。');
+          }
+        }
         const operation = activeAudioOperationRef.current;
         operation?.controller.abort();
         if (speechPlayerRef.current) {
@@ -2255,10 +2284,11 @@ export default function App() {
   }
 
   function saveProviderDraft(): ProviderProfile | null {
-    if (!ensureWorkspaceWritable() || !activeProvider) return null;
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle() || !activeProvider) return null;
     const nextProvider = providerFromDraft();
     if (!nextProvider) return null;
     const binding = compareProviderEndpointBinding(activeProvider, nextProvider);
+    const providerApiKeyChanged = (activeProvider.apiKey ?? '') !== (nextProvider.apiKey ?? '');
     setWorkspace((current) => {
       const comparisonTargets = binding.mustClearModelCandidates
         ? current.comparisonTargets.filter((target) => target.providerId !== activeProvider.id)
@@ -2276,6 +2306,17 @@ export default function App() {
         ...current,
         providers: current.providers.map((provider) =>
           provider.id === activeProvider.id ? nextProvider : provider
+        ),
+        plugins: current.plugins.map((plugin) =>
+          plugin.type === 'remote-mcp' &&
+          plugin.providerId === activeProvider.id &&
+          (binding.changed || providerApiKeyChanged)
+            ? {
+                ...plugin,
+                enabled: false,
+                ...(binding.changed ? { authorization: undefined } : {}),
+              }
+            : plugin
         ),
         ...(binding.mustClearModelCandidates
           ? {
@@ -2313,8 +2354,10 @@ export default function App() {
     );
     setNotice(
       binding.changed
-        ? '已保存新端点，并清除旧模型缓存；只有重新输入的 Key 会绑定到新地址。'
-        : '服务商配置已安全保存在本机。'
+        ? '已保存新端点，清除旧模型缓存与 MCP 授权；只有重新输入的凭据会绑定到新地址。'
+        : providerApiKeyChanged
+          ? '服务商 Key 已更新；绑定的 MCP 已关闭，请重新核对并授权后再启用。'
+          : '服务商配置已安全保存在本机。'
     );
     return nextProvider;
   }
@@ -2658,7 +2701,7 @@ export default function App() {
   }
 
   function selectProvider(providerId: string) {
-    if (!ensureWorkspaceWritable()) {
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
       return;
     }
 
@@ -2672,7 +2715,7 @@ export default function App() {
   }
 
   function selectModel(modelId: string) {
-    if (!ensureWorkspaceWritable() || !activeProvider) {
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle() || !activeProvider) {
       return;
     }
 
@@ -2687,7 +2730,7 @@ export default function App() {
   }
 
   function selectProviderModel(providerId: string, modelId: string) {
-    if (!ensureWorkspaceWritable()) {
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
       return;
     }
 
@@ -2737,11 +2780,23 @@ export default function App() {
   }
 
   function setComparisonEnabled(enabled: boolean) {
-    if (!ensureWorkspaceWritable()) {
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
       return;
     }
     if (enabled && comparisonRuntimes.length < 2) {
       setNotice('请先在设置中选择至少 2 个对话模型。');
+      return;
+    }
+    if (
+      enabled &&
+      workspace.plugins.some(
+        (plugin) =>
+          plugin.type === 'remote-mcp' &&
+          plugin.enabled === true &&
+          workspace.comparisonTargets.some((target) => target.providerId === plugin.providerId)
+      )
+    ) {
+      setNotice('请先关闭对比目标绑定的 MCP；v1.4 不在多模型分支中执行工具。');
       return;
     }
     setWorkspace((current) => ({ ...current, comparisonEnabled: enabled }));
@@ -2753,13 +2808,25 @@ export default function App() {
   }
 
   function setWebSearchEnabled(enabled: boolean) {
-    if (!ensureWorkspaceWritable()) {
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
       return;
     }
     if (enabled && !webSearchReady) {
       setNotice(
         '联网搜索未启用：当前每个目标都必须使用已适配的官方服务商地址、用户自己的 API Key，并明确标记 Web Search 能力。'
       );
+      return;
+    }
+    if (
+      enabled &&
+      workspace.plugins.some(
+        (plugin) =>
+          plugin.type === 'remote-mcp' &&
+          plugin.enabled === true &&
+          plugin.providerId === workspace.activeProviderId
+      )
+    ) {
+      setNotice('请先关闭当前服务商的 MCP；v1.4 不在同一轮混用联网搜索与 MCP。');
       return;
     }
     setWorkspace((current) => ({
@@ -2971,6 +3038,68 @@ export default function App() {
     });
   }
 
+  function resolveMcpApproval(
+    token: McpApprovalToken,
+    decision: ProviderMcpApprovalDecision
+  ) {
+    const pending = mcpApprovalResolverRef.current;
+    if (!pending || !isSameMcpApprovalToken(pending.token, token)) {
+      return;
+    }
+    pending.settle(decision);
+  }
+
+  function requestMcpApproval(
+    request: ProviderMcpApprovalRequest,
+    view: Omit<
+      McpApprovalViewModel,
+      | 'approvalRequestId'
+      | 'approvalNonce'
+      | 'serverLabel'
+      | 'toolName'
+      | 'argumentsText'
+      | 'argumentBytes'
+    >,
+    signal?: AbortSignal
+  ): Promise<ProviderMcpApprovalDecision> {
+    if (mcpApprovalResolverRef.current || signal?.aborted || !mountedRef.current) {
+      return Promise.resolve('cancel');
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const token: McpApprovalToken = {
+        approvalRequestId: request.id,
+        nonce: ++mcpApprovalNonceRef.current,
+      };
+      const onAbort = () => settle('cancel');
+      const settle = (decision: ProviderMcpApprovalDecision) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        if (mcpApprovalResolverRef.current?.settle === settle) {
+          mcpApprovalResolverRef.current = null;
+        }
+        if (mountedRef.current) {
+          setMcpApprovalView(null);
+        }
+        resolve(decision);
+      };
+      mcpApprovalResolverRef.current = { token, settle };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      setMcpApprovalView({
+        ...view,
+        approvalRequestId: token.approvalRequestId,
+        approvalNonce: token.nonce,
+        serverLabel: request.serverLabel,
+        toolName: request.toolName,
+        argumentsText: request.rawArguments,
+        argumentBytes: request.argumentBytes,
+      });
+    });
+  }
+
   async function authorizeProviderRequestPlan(plan: ProviderRequestPlan): Promise<boolean> {
     if (workspaceReplacementInProgressRef.current) {
       setNotice('正在验证并导入备份，暂时不能发起新请求。');
@@ -3052,6 +3181,28 @@ export default function App() {
     return 'chat';
   }
 
+  function runtimeHasEnabledMcp(providerId: string, model: ModelInfo): boolean {
+    return (
+      inferModelTask(model) === 'chat' &&
+      enabledRemoteMcpPluginsForProvider(workspaceRef.current, providerId).length > 0
+    );
+  }
+
+  function providerRequestOperation(
+    providerId: string,
+    modelId: string,
+    model: ModelInfo,
+    searchEnabled: boolean
+  ): ProviderRequestPlan['operations'][number] {
+    const mcpEnabled = runtimeHasEnabledMcp(providerId, model);
+    return {
+      kind: requestUsageKind(model, searchEnabled),
+      providerId,
+      modelId,
+      ...(mcpEnabled ? { unknownCostComponents: ['provider-surcharge'] as const } : {}),
+    };
+  }
+
   function startedUsageEvent(
     assistantMessage: ChatMessage,
     runtime: NonNullable<ReturnType<typeof resolveMessageRuntime>>
@@ -3064,6 +3215,9 @@ export default function App() {
       createdAt: Date.now(),
       messageId: assistantMessage.id,
       comparisonGroupId: assistantMessage.comparisonGroupId,
+      ...(runtimeHasEnabledMcp(runtime.provider.id, runtime.model)
+        ? { unknownCostComponents: ['provider-surcharge'] }
+        : {}),
     });
   }
 
@@ -3215,74 +3369,49 @@ export default function App() {
     setModelCapabilityFilter('all');
   }
 
-  function deleteProvider(providerId: string) {
-    if (!ensureWorkspaceWritable()) {
+  async function deleteProvider(providerId: string) {
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
       setDeleteConfirmProviderId(null);
       return;
     }
 
-    if (workspace.providers.length <= 1) {
+    const current = workspaceRef.current;
+    if (current.providers.length <= 1) {
       setNotice('至少需要保留一个服务商。');
       setDeleteConfirmProviderId(null);
       return;
     }
 
-    setWorkspace((current) => {
-      const providers = current.providers.filter((provider) => provider.id !== providerId);
-      if (!providers.length) {
-        return current;
-      }
-      const activeProviderId = current.activeProviderId === providerId
-        ? providers[0].id
-        : current.activeProviderId;
-      const activeModelIdByProvider = { ...current.activeModelIdByProvider };
-      const modelCandidatesByProvider = { ...current.modelCandidatesByProvider };
-      delete activeModelIdByProvider[providerId];
-      delete modelCandidatesByProvider[providerId];
-      const reasoningEffortByModel = Object.fromEntries(
-        Object.entries(current.reasoningEffortByModel).filter(([key]) => !key.startsWith(`${providerId}:`))
-      );
-      const comparisonTargets = current.comparisonTargets.filter(
-        (target) => target.providerId !== providerId
-      );
-      const voice = { ...current.voice };
-      if (voice.transcriptionTarget?.providerId === providerId) {
-        delete voice.transcriptionTarget;
-      }
-      if (voice.speechTarget?.providerId === providerId) {
-        delete voice.speechTarget;
-      }
-
-      return {
-        ...current,
-        providers,
-        activeProviderId,
-        activeModelIdByProvider,
-        modelCandidatesByProvider,
-        reasoningEffortByModel,
-        comparisonTargets,
-        comparisonEnabled: current.comparisonEnabled && comparisonTargets.length >= 2,
-        voice,
-        projects: current.projects.map((project) =>
-          project.defaultTarget?.providerId === providerId
-            ? { ...project, defaultTarget: undefined, updatedAt: Date.now() }
-            : project
-        ),
-        modelPricing: current.modelPricing.filter(
-          (pricing) => pricing.providerId !== providerId
-        ),
-      };
-    });
+    const removal = removeProviderFromWorkspace(current, providerId, Date.now());
+    if (!removal) {
+      setDeleteConfirmProviderId(null);
+      return;
+    }
+    const nextWorkspace = removal.workspace;
+    setWorkspace(nextWorkspace);
     setDeleteConfirmProviderId(null);
     setManualModelId('');
     setModelSearchQuery('');
     setModelCapabilityFilter('all');
     clearPendingAttachments();
-    setNotice('已删除服务商及其本地 API Key。');
+    try {
+      // saveWorkspace commits the reference-free workspace before its existing
+      // secret cleanup removes both the provider key and bound MCP authorization.
+      await saveWorkspace(nextWorkspace);
+      setNotice(
+        `已删除服务商、本地 API Key 及 ${removal.removedPluginIds.length} 个绑定 MCP 配置和授权。`
+      );
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : '服务商已从当前界面移除，但本机持久化失败；请保持应用打开后重试。'
+      );
+    }
   }
 
   function addManualModel() {
-    if (!ensureWorkspaceWritable() || !activeProvider) {
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle() || !activeProvider) {
       return;
     }
 
@@ -3316,7 +3445,7 @@ export default function App() {
   }
 
   function addCandidateModel(model: ModelInfo) {
-    if (!ensureWorkspaceWritable() || !activeProvider) {
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle() || !activeProvider) {
       return;
     }
 
@@ -3346,7 +3475,7 @@ export default function App() {
   }
 
   function removeModel(modelId: string) {
-    if (!ensureWorkspaceWritable() || !activeProvider) {
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle() || !activeProvider) {
       return;
     }
 
@@ -3394,7 +3523,7 @@ export default function App() {
   }
 
   function updateActiveModel(patch: Partial<ModelInfo>) {
-    if (!ensureWorkspaceWritable() || !activeProvider || !activeModel) {
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle() || !activeProvider || !activeModel) {
       return;
     }
     setWorkspace((current) => {
@@ -3557,16 +3686,28 @@ export default function App() {
     setMessageActionMenuId(null);
   }
 
-  function restoreConversationMessages(conversationId: string, messages: ChatMessage[]) {
+  function restoreConversationMessages(
+    conversationId: string,
+    messages: ChatMessage[],
+    attemptedAssistant: ChatMessage,
+    mcpAudit?: McpAuditCandidate
+  ) {
+    const restoredMessages = restoreMessagesWithMcpAuditStub({
+      originalMessages: messages,
+      attemptedAssistant,
+      audit: mcpAudit,
+      stubId: createId('msg'),
+      createdAt: Date.now(),
+    });
     setWorkspace((current) => {
       const conversations = upsertConversation(
         current.conversations,
         conversationId,
-        messages,
+        restoredMessages,
         Date.now()
       );
       return current.activeConversationId === conversationId
-        ? { ...current, messages, conversations }
+        ? { ...current, messages: restoredMessages, conversations }
         : { ...current, conversations };
     });
   }
@@ -4161,6 +4302,7 @@ export default function App() {
       webSearchTriggered: result.webSearchTriggered,
       attachments: result.attachments,
       generationTask: result.generationTask,
+      mcpActivity: result.mcpActivity,
       status: 'ready',
       error: undefined,
     }, conversationId);
@@ -4186,6 +4328,9 @@ export default function App() {
     announceCancellation?: boolean;
   }): Promise<AssistantRequestOutcome> {
     const startedAt = Date.now();
+    let trackedUsageEvent = usageEvent;
+    let pendingMcpActivity: McpActivitySummary | undefined;
+    let mcpProviderSendStarted = false;
     let firstTokenAt: number | undefined;
     let latestUpdate:
       | Pick<ChatCompletionResult, 'content' | 'reasoningContent' | 'usage'>
@@ -4205,6 +4350,22 @@ export default function App() {
     };
 
     try {
+      const enabledMcpPlugins = enabledRemoteMcpPluginsForProvider(
+        workspaceRef.current,
+        runtime.provider.id
+      );
+      if (enabledMcpPlugins.length > 1) {
+        throw new Error('同一服务商存在多个已启用 MCP，已按安全策略拒绝发起请求。');
+      }
+      const mcpPlugin = enabledMcpPlugins[0];
+      if (mcpPlugin?.serverLabel) {
+        pendingMcpActivity = {
+          serverLabel: mcpPlugin.serverLabel,
+          providerRequestCount: 1,
+          approvals: [],
+          calls: [],
+        };
+      }
       const result = await sendOpenAiCompatibleChat({
         provider: runtime.provider,
         modelId: runtime.modelId,
@@ -4216,6 +4377,74 @@ export default function App() {
           ? workspaceRef.current.costGuard.maxOutputTokens
           : undefined,
         webSearch: workspaceRef.current.webSearch,
+        ...(mcpPlugin
+          ? {
+              mcp: {
+                plugin: mcpPlugin,
+                beforeProviderRequest: (context) => {
+                  assertCurrentMcpProviderSendAllowed(controller, context.signal);
+                },
+                onProviderRequestStarted: (context) => {
+                  mcpProviderSendStarted = true;
+                  if (pendingMcpActivity) {
+                    pendingMcpActivity.providerRequestCount = context.requestNumber;
+                  }
+                },
+                requestApproval: async (request, context) => {
+                  const decision = await requestMcpApproval(
+                    request,
+                    {
+                      providerName: runtime.provider.name,
+                      modelId: runtime.modelId,
+                      serverName: mcpPlugin.name,
+                      endpoint: mcpPlugin.endpoint ?? '无效 Endpoint',
+                    },
+                    context.signal
+                  );
+                  if (pendingMcpActivity && (decision === 'approve' || decision === 'deny')) {
+                    pendingMcpActivity.approvals.push({
+                      toolName: request.toolName,
+                      decision,
+                    });
+                  }
+                  return decision;
+                },
+                beforeContinuation: async (context) => {
+                  const authorized = await authorizeProviderRequestPlan({
+                    operations: [providerRequestOperation(
+                      runtime.provider.id,
+                      runtime.modelId,
+                      runtime.model,
+                      false
+                    )],
+                  });
+                  if (!authorized || context.signal?.aborted) {
+                    const cancelled = new Error('MCP 续接请求已取消。');
+                    cancelled.name = 'AbortError';
+                    throw cancelled;
+                  }
+                  const nextUsageEvent: ProviderUsageEvent = {
+                    ...trackedUsageEvent,
+                    providerRequestCount: trackedUsageEvent.providerRequestCount + 1,
+                  };
+                  await persistProviderUsageEvents([nextUsageEvent]);
+                  trackedUsageEvent = nextUsageEvent;
+                  assertCurrentMcpProviderSendAllowed(controller, context.signal);
+                  if (pendingMcpActivity) {
+                    pendingMcpActivity.providerRequestCount = nextUsageEvent.providerRequestCount;
+                    for (const approval of context.approvals) {
+                      if (approval.decision === 'approve') {
+                        pendingMcpActivity.calls.push({
+                          toolName: approval.toolName,
+                          outcome: 'unknown',
+                        });
+                      }
+                    }
+                  }
+                },
+              },
+            }
+          : {}),
         onStreamUpdate: (update) => {
           if (update.content || update.reasoningContent) {
             firstTokenAt ??= Date.now();
@@ -4271,7 +4500,7 @@ export default function App() {
         requestMetrics,
         ...(costEstimate ? { costEstimate } : { costEstimate: undefined }),
       }, conversationId);
-      await finishUsageEvent(usageEvent, 'succeeded', costEstimate ?? undefined);
+      await finishUsageEvent(trackedUsageEvent, 'succeeded', costEstimate ?? undefined);
       return { status: 'success' };
     } catch (error) {
       if (streamTimer) {
@@ -4280,6 +4509,17 @@ export default function App() {
       }
 
       if (isAbortError(error) || controller.signal.aborted) {
+        const mcpAudit = pendingMcpActivity && (
+          mcpProviderSendStarted ||
+          pendingMcpActivity.approvals.length > 0 ||
+          pendingMcpActivity.calls.length > 0
+        )
+          ? {
+              status: 'cancelled' as const,
+              activity: pendingMcpActivity,
+              providerSendStarted: mcpProviderSendStarted,
+            }
+          : undefined;
         updateAssistantMessage(assistantMessage.id, {
           content: latestUpdate?.content || '生成已停止。',
           reasoningContent: latestUpdate?.reasoningContent,
@@ -4290,15 +4530,30 @@ export default function App() {
             durationMs: Date.now() - startedAt,
             ...(firstTokenAt !== undefined ? { timeToFirstTokenMs: firstTokenAt - startedAt } : {}),
           },
+          ...(mcpAudit
+            ? { mcpActivity: pendingMcpActivity }
+            : {}),
         }, conversationId);
         if (announceCancellation) {
           setNotice('已停止生成，已保留收到的内容。');
         }
-        await finishUsageEvent(usageEvent, 'cancelled');
-        return { status: 'cancelled' };
+        await finishUsageEvent(trackedUsageEvent, 'cancelled');
+        return { status: 'cancelled', ...(mcpAudit ? { mcpAudit } : {}) };
       }
 
       const message = error instanceof Error ? error.message : '对话请求失败。';
+      const mcpAudit = pendingMcpActivity && (
+        mcpProviderSendStarted ||
+        pendingMcpActivity.approvals.length > 0 ||
+        pendingMcpActivity.calls.length > 0
+      )
+        ? {
+            status: 'error' as const,
+            activity: pendingMcpActivity,
+            providerSendStarted: mcpProviderSendStarted,
+            error: message,
+          }
+        : undefined;
       updateAssistantMessage(assistantMessage.id, {
         content: latestUpdate?.content || message,
         reasoningContent: latestUpdate?.reasoningContent,
@@ -4309,9 +4564,12 @@ export default function App() {
           durationMs: Date.now() - startedAt,
           ...(firstTokenAt !== undefined ? { timeToFirstTokenMs: firstTokenAt - startedAt } : {}),
         },
+        ...(mcpAudit
+          ? { mcpActivity: pendingMcpActivity }
+          : {}),
       }, conversationId);
-      await finishUsageEvent(usageEvent, 'failed');
-      return { status: 'error', error: message };
+      await finishUsageEvent(trackedUsageEvent, 'failed');
+      return { status: 'error', error: message, ...(mcpAudit ? { mcpAudit } : {}) };
     } finally {
       if (finishRequest) {
         finishActiveRequest(controller);
@@ -4948,15 +5206,18 @@ export default function App() {
     ) {
       return;
     }
+    const mcpActive = runtimeHasEnabledMcp(runtime.provider.id, runtime.model);
     if (!(await authorizeProviderRequestPlan({
-      potentialMultipleCharges: workspace.webSearch.enabled,
-      operations: [{
-        kind: requestUsageKind(runtime.model, workspace.webSearch.enabled),
-        providerId: runtime.provider.id,
-        modelId: runtime.modelId,
-      }],
+      potentialMultipleCharges:
+        workspace.webSearch.enabled || mcpActive,
+      operations: [providerRequestOperation(
+        runtime.provider.id,
+        runtime.modelId,
+        runtime.model,
+        workspace.webSearch.enabled
+      )],
     }))) return;
-    const controller = beginActiveRequest('回答生成');
+    const controller = beginActiveRequest('回答生成', { mcpActive });
     if (!controller) {
       return;
     }
@@ -5015,7 +5276,7 @@ export default function App() {
       void deletePersistedAttachments(removedAttachments);
       return;
     }
-    restoreConversationMessages(conversationId, messages);
+    restoreConversationMessages(conversationId, messages, pendingMessage, outcome.mcpAudit);
     setNotice(
       outcome.status === 'error'
         ? `重新生成失败，已恢复原分支：${outcome.error}`
@@ -5111,15 +5372,18 @@ export default function App() {
       setNotice('要重跑的用户消息未能进入请求，请减少项目资料后重试。');
       return;
     }
+    const mcpActive = runtimeHasEnabledMcp(runtime.provider.id, runtime.model);
     if (!(await authorizeProviderRequestPlan({
-      potentialMultipleCharges: workspace.webSearch.enabled,
-      operations: [{
-        kind: requestUsageKind(runtime.model, workspace.webSearch.enabled),
-        providerId: runtime.provider.id,
-        modelId: runtime.modelId,
-      }],
+      potentialMultipleCharges:
+        workspace.webSearch.enabled || mcpActive,
+      operations: [providerRequestOperation(
+        runtime.provider.id,
+        runtime.modelId,
+        runtime.model,
+        workspace.webSearch.enabled
+      )],
     }))) return;
-    const controller = beginActiveRequest('回答生成');
+    const controller = beginActiveRequest('回答生成', { mcpActive });
     if (!controller) {
       return;
     }
@@ -5156,7 +5420,7 @@ export default function App() {
       void deletePersistedAttachments(removedAttachments);
       return;
     }
-    restoreConversationMessages(conversationId, messages);
+    restoreConversationMessages(conversationId, messages, assistantMessage, outcome.mcpAudit);
     setNotice(
       outcome.status === 'error'
         ? `重新运行失败，已恢复原分支：${outcome.error}`
@@ -5572,7 +5836,7 @@ export default function App() {
   }
 
   function addRemoteMcpServer() {
-    if (!ensureWorkspaceWritable()) {
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
       return;
     }
     const name = mcpName.trim();
@@ -5580,27 +5844,33 @@ export default function App() {
       setNotice('请填写 MCP 服务名称。');
       return;
     }
-    const endpointInput = mcpEndpoint.trim();
-    if (!endpointInput || endpointInput.length > 8_192 || /[\u0000-\u0020\u007f]/.test(endpointInput)) {
-      setNotice('MCP Endpoint 为空、过长或包含不安全字符。');
-      return;
-    }
-    let endpoint: URL;
-    try {
-      endpoint = new URL(endpointInput);
-    } catch {
-      setNotice('MCP Endpoint 不是有效网址。');
-      return;
-    }
-    if (
-      endpoint.protocol !== 'https:' ||
-      endpoint.username ||
-      endpoint.password ||
-      endpoint.search ||
-      endpoint.hash ||
-      isPrivateMcpHostname(endpoint.hostname)
-    ) {
+    const endpoint = normalizeRemoteMcpEndpoint(mcpEndpoint);
+    if (!endpoint) {
       setNotice('MCP Endpoint 必须是无凭据、查询参数、片段和私网地址的 HTTPS URL。');
+      return;
+    }
+    const allowedTools = normalizeMcpAllowedTools(
+      mcpAllowedTools
+        .split(/[\n,]/)
+        .map((tool) => tool.trim())
+        .filter(Boolean)
+    );
+    if (!allowedTools.length) {
+      setNotice('请填写至少一个精确工具名；使用逗号或换行分隔，不支持通配符。');
+      return;
+    }
+    const descriptionInput = mcpDescription.trim();
+    const description = descriptionInput ? normalizeMcpDescription(descriptionInput) : undefined;
+    if (descriptionInput && !description) {
+      setNotice('MCP 描述过长或无效，请缩短后重试。');
+      return;
+    }
+    const authorizationInput = mcpAuthorization.trim();
+    const authorization = authorizationInput
+      ? normalizeMcpAuthorization(authorizationInput)
+      : undefined;
+    if (authorizationInput && !authorization) {
+      setNotice('MCP Authorization 过长或包含不安全控制字符。');
       return;
     }
     const id = createId('mcp');
@@ -5615,10 +5885,12 @@ export default function App() {
           type: 'remote-mcp',
           permissions: ['network', 'tools'],
           transport: 'streamable-http',
-          endpoint: endpoint.toString(),
+          endpoint,
           serverLabel: `mcp_${id.replace(/[^A-Za-z0-9_-]/g, '_')}`,
           providerId: activeProvider.id,
-          authorization: mcpAuthorization.trim() || undefined,
+          allowedTools,
+          description,
+          authorization,
           approvalPolicy: 'always',
           enabled: false,
         },
@@ -5626,12 +5898,14 @@ export default function App() {
     }));
     setMcpName('');
     setMcpEndpoint('');
+    setMcpDescription('');
+    setMcpAllowedTools('');
     setMcpAuthorization('');
-    setNotice('MCP 服务已安全保存，默认关闭且不会自动调用。');
+    setNotice('MCP 服务与精确工具白名单已安全保存，默认关闭且不会自动调用。');
   }
 
   async function toggleRemoteMcpServer(pluginId: string, enabled: boolean) {
-    if (!ensureWorkspaceWritable()) {
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
       return;
     }
     const plugin = workspace.plugins.find((item) => item.id === pluginId);
@@ -5639,9 +5913,39 @@ export default function App() {
       return;
     }
     if (enabled) {
+      const provider = workspace.providers.find((item) => item.id === plugin.providerId);
+      const readiness = getRemoteMcpExecutableReadiness(
+        { ...plugin, enabled: true },
+        new Set(workspace.providers.map((item) => item.id))
+      );
+      if (!readiness.executable) {
+        setNotice('MCP 无法启用：请检查公网 HTTPS 地址、服务商绑定、工具白名单与逐次审批设置。');
+        return;
+      }
+      if (!provider || !isOfficialOpenAiProvider(provider)) {
+        const providerName = provider?.name ?? '已删除的服务商';
+        setNotice(
+          `MCP 无法启用：${providerName} 当前只保存配置。v1.4 仅对精确的 OpenAI 官方 api.openai.com Responses 路由开放逐次审批执行。`
+        );
+        return;
+      }
+      if (
+        workspace.webSearch.enabled &&
+        workspace.activeProviderId === plugin.providerId
+      ) {
+        setNotice('请先关闭联网搜索；v1.4 不在同一轮混用联网搜索与 MCP。');
+        return;
+      }
+      if (
+        workspace.comparisonEnabled &&
+        workspace.comparisonTargets.some((target) => target.providerId === plugin.providerId)
+      ) {
+        setNotice('请先关闭多模型对比；v1.4 不在对比分支中执行 MCP。');
+        return;
+      }
       const confirmed = await confirmDestructiveAction(
-        '授权这个 MCP 服务？',
-        `服务：${plugin.name}\n地址：${plugin.endpoint ?? '未配置'}\n权限：仅网络与工具。每次真实工具调用仍必须再次展示工具名、参数和发送数据并由你确认。当前版本只保存授权配置，不会自动执行工具。`
+        '授权并启用这个 MCP 服务？',
+        `服务：${plugin.name}\n地址：${readiness.endpoint}\n精确工具白名单：${readiness.allowedTools.join(', ')}\n\nMCP Authorization 会随每次请求发送给你选择的 OpenAI 账号；OpenAI 和远程 MCP 服务都会接触获批的工具参数，并可能分别计费。store: false 只关闭 Responses 对象存储，不会替代你的 OpenAI 组织数据控制、服务商安全日志或远程 MCP 自身的日志与保留政策。每次真实工具调用仍会展示完整参数并单独询问，不会记住批准。工具可能修改外部数据，批准后的副作用无法由本应用撤销。`
       );
       if (!confirmed) {
         return;
@@ -5649,15 +5953,29 @@ export default function App() {
     }
     setWorkspace((current) => ({
       ...current,
-      plugins: current.plugins.map((item) =>
-        item.id === pluginId ? { ...item, enabled } : item
-      ),
+      plugins: current.plugins.map((item) => {
+        if (item.id === pluginId) {
+          return { ...item, enabled };
+        }
+        if (
+          enabled &&
+          item.type === 'remote-mcp' &&
+          item.providerId === plugin.providerId
+        ) {
+          return { ...item, enabled: false };
+        }
+        return item;
+      }),
     }));
-    setNotice(enabled ? 'MCP 配置已授权，但工具执行仍保持关闭等待逐次审批适配。' : 'MCP 服务已关闭。');
+    setNotice(
+      enabled
+        ? 'OpenAI MCP 已启用；每次工具调用仍必须在完整参数预览页单独批准。'
+        : 'MCP 服务已关闭。'
+    );
   }
 
   function removeRemoteMcpServer(pluginId: string) {
-    if (!ensureWorkspaceWritable()) {
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
       return;
     }
     setWorkspace((current) => ({
@@ -6022,6 +6340,17 @@ export default function App() {
       setNotice('对比请求未发出：至少一个目标尚未满足可信联网搜索条件。');
       return;
     }
+    if (
+      workspace.plugins.some(
+        (plugin) =>
+          plugin.type === 'remote-mcp' &&
+          plugin.enabled === true &&
+          comparisonRuntimes.some((runtime) => runtime.provider.id === plugin.providerId)
+      )
+    ) {
+      setNotice('对比请求未发出：v1.4 的 MCP 与多模型对比互斥，请先关闭相关 MCP。');
+      return;
+    }
 
     let sharedComparisonTranscript: ChatMessage[];
     try {
@@ -6205,8 +6534,43 @@ export default function App() {
       setNotice('当前模型不是对话模型，请切换到聊天或生成模型。');
       return;
     }
+    const activeMcpPlugins = enabledRemoteMcpPluginsForProvider(workspace, activeProvider.id);
+    if (activeMcpPlugins.length > 1) {
+      setNotice('请求未发出：同一服务商只能启用一个 MCP，请先在设置中关闭多余配置。');
+      return;
+    }
+    if (activeMcpPlugins.length === 1) {
+      const readiness = getRemoteMcpExecutableReadiness(
+        activeMcpPlugins[0],
+        new Set(workspace.providers.map((provider) => provider.id))
+      );
+      if (!readiness.executable) {
+        setNotice('请求未发出：已启用的 MCP 配置未通过端点、白名单或服务商绑定检查。');
+        return;
+      }
+      if (
+        activeModelTask !== 'chat' ||
+        !activeModel.capabilities.includes('mcp') ||
+        !isOfficialOpenAiProvider(activeProvider)
+      ) {
+        setNotice('请求未发出：真实 MCP 仅适用于明确标记 MCP 能力的 OpenAI 官方对话模型。');
+        return;
+      }
+    }
     if (workspace.webSearch.enabled && !webSearchReady) {
       setNotice('请求未发出：当前模型尚未满足可信联网搜索条件。');
+      return;
+    }
+    if (
+      workspace.webSearch.enabled &&
+      workspace.plugins.some(
+        (plugin) =>
+          plugin.type === 'remote-mcp' &&
+          plugin.enabled === true &&
+          plugin.providerId === activeProvider.id
+      )
+    ) {
+      setNotice('请求未发出：v1.4 的 MCP 与联网搜索互斥，请关闭其中一项。');
       return;
     }
     if (activeModelTask === 'image-generation' && attachments.length) {
@@ -6271,18 +6635,21 @@ export default function App() {
       transcript = [userMessage];
     }
 
+    const mcpActive = runtimeHasEnabledMcp(activeProvider.id, activeModel);
     if (!(await authorizeProviderRequestPlan({
-      potentialMultipleCharges: workspace.webSearch.enabled,
-      operations: [{
-        kind: requestUsageKind(activeModel, workspace.webSearch.enabled),
-        providerId: activeProvider.id,
-        modelId: activeModelId,
-      }],
+      potentialMultipleCharges:
+        workspace.webSearch.enabled || mcpActive,
+      operations: [providerRequestOperation(
+        activeProvider.id,
+        activeModelId,
+        activeModel,
+        workspace.webSearch.enabled
+      )],
     }))) {
       return;
     }
 
-    const controller = beginActiveRequest('回答生成');
+    const controller = beginActiveRequest('回答生成', { mcpActive });
     if (!controller) {
       return;
     }
@@ -7272,7 +7639,7 @@ export default function App() {
               <View style={styles.settingsCard} testID="encrypted-backup-card">
                 <Text style={styles.settingsCardTitle}>本地加密备份</Text>
                 <Text style={styles.modelOverrideHint}>
-                  使用密码在本机完成认证加密。专用 API Key/MCP 授权字段、媒体文件和本机费用账本不会导出；普通对话、提示词和错误文字会原样备份，请勿在其中粘贴密钥。
+                  使用密码在本机完成认证加密。专用 API Key/MCP 授权字段、媒体文件、本机费用账本和 MCP 活动摘要不会导出；普通对话、提示词和错误文字会原样备份，请勿在其中粘贴密钥。
                 </Text>
                 <View style={styles.fieldGroup}>
                   <Text style={styles.fieldLabel}>备份密码（至少 8 个字符）</Text>
@@ -7434,7 +7801,7 @@ export default function App() {
                   <Text style={styles.modelOverrideHint}>默认关闭 · 逐次审批</Text>
                 </View>
                 <Text style={styles.modelOverrideHint}>
-                  这里只保存远程 MCP 配置和最小权限授权。当前版本不会自动执行工具；待服务商审批循环接通后，每次调用仍须展示工具、参数与发送数据并由你确认。
+                  v1.4 仅对官方 OpenAI Responses 开放真实执行，并强制非空工具白名单与逐次审批。火山方舟等待真实账号验证无存储续接，百炼 Responses 缺少执行前审批，因此两者仍只保存配置。
                 </Text>
                 <View style={styles.fieldGroup}>
                   <Text style={styles.fieldLabel}>服务名称</Text>
@@ -7456,6 +7823,32 @@ export default function App() {
                     placeholderTextColor={palette.placeholder}
                     style={styles.input}
                   />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>服务描述（可选）</Text>
+                  <TextInput
+                    value={mcpDescription}
+                    onChangeText={setMcpDescription}
+                    multiline
+                    placeholder="这台 MCP 服务的用途与信任来源"
+                    placeholderTextColor={palette.placeholder}
+                    style={[styles.input, styles.multilineInput]}
+                  />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>允许的精确工具名</Text>
+                  <TextInput
+                    testID="mcp-allowed-tools-input"
+                    value={mcpAllowedTools}
+                    onChangeText={setMcpAllowedTools}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    multiline
+                    placeholder={'例如：search_docs, get_page\n使用逗号或换行分隔'}
+                    placeholderTextColor={palette.placeholder}
+                    style={[styles.input, styles.multilineInput]}
+                  />
+                  <Text style={styles.modelOverrideHint}>必须至少填写一个工具名；不支持 *、自动导入全部工具或模糊匹配。</Text>
                 </View>
                 <View style={styles.fieldGroup}>
                   <Text style={styles.fieldLabel}>Authorization（可选）</Text>
@@ -7488,6 +7881,9 @@ export default function App() {
                     <View style={styles.mediaTaskInfo}>
                       <Text numberOfLines={1} style={styles.promptTemplateName}>{plugin.name}</Text>
                       <Text numberOfLines={1} style={styles.modelOverrideHint}>{plugin.endpoint}</Text>
+                      <Text numberOfLines={2} style={styles.modelOverrideHint}>
+                        工具：{plugin.allowedTools.length ? plugin.allowedTools.join(', ') : '未配置（不可执行）'}
+                      </Text>
                     </View>
                     <AnimatedPressable
                       accessibilityRole="switch"
@@ -7988,6 +8384,9 @@ export default function App() {
                           <WebCitationList citations={message.citations} />
                         ) : message.webSearchTriggered === false ? (
                           <Text style={styles.messageStatusText}>本次响应未提供已触发联网搜索的证据。</Text>
+                        ) : null}
+                        {message.mcpActivity ? (
+                          <McpActivityPanel activity={message.mcpActivity} />
                         ) : null}
                         {message.status === 'cancelled' ? (
                           <Text style={styles.messageStatusText}>已停止生成</Text>
@@ -8797,6 +9196,12 @@ export default function App() {
           </KeyboardAvoidingView>
         </Modal>
 
+        <McpApprovalModal
+          visible={mcpApprovalView !== null}
+          request={mcpApprovalView}
+          onDecision={resolveMcpApproval}
+        />
+
         <Modal
           visible={Boolean(costConfirmationReason)}
           transparent
@@ -8915,7 +9320,7 @@ export default function App() {
               </View>
               <Text style={styles.deleteConfirmTitle}>删除服务商</Text>
               <Text style={styles.deleteConfirmText}>
-                这会删除「{deleteConfirmProvider?.name ?? '该服务商'}」的配置、模型列表和本地 API Key；历史消息仍会保留。
+                这会删除「{deleteConfirmProvider?.name ?? '该服务商'}」的配置、模型列表、本地 API Key，以及所有绑定 MCP 配置与授权；历史消息仍会保留。
               </Text>
               <View style={styles.renameDialogActions}>
                 <AnimatedPressable
@@ -8929,7 +9334,7 @@ export default function App() {
                   accessibilityRole="button"
                   onPress={() => {
                     if (deleteConfirmProvider) {
-                      deleteProvider(deleteConfirmProvider.id);
+                      void deleteProvider(deleteConfirmProvider.id);
                     }
                   }}
                   haptic="warning"
@@ -9361,6 +9766,60 @@ function WebCitationList({ citations }: { citations: WebCitation[] }) {
           <ExternalLink size={13} color={palette.textSecondary} strokeWidth={2} />
         </AnimatedPressable>
       ))}
+    </View>
+  );
+}
+
+function McpActivityPanel({ activity }: { activity: McpActivitySummary }) {
+  const hasUnknownOutcome = activity.calls.some((call) => call.outcome === 'unknown');
+  return (
+    <View style={styles.mcpActivityPanel} testID="mcp-activity-panel">
+      <View style={styles.mcpActivityHeader}>
+        <View style={styles.mcpActivityTitleGroup}>
+          <Wrench size={14} color={palette.textSecondary} strokeWidth={2.2} />
+          <Text style={styles.mcpActivityTitle}>MCP 工具记录</Text>
+        </View>
+        <Text style={styles.mcpActivityRequestCount}>
+          {activity.providerRequestCount} 次发送前登记的请求尝试
+        </Text>
+      </View>
+      <Text selectable style={styles.mcpActivityServer}>服务标签：{activity.serverLabel}</Text>
+      {!activity.approvals.length && !activity.calls.length ? (
+        <Text style={styles.mcpActivityEmpty}>本轮没有请求执行工具。</Text>
+      ) : null}
+      {activity.approvals.map((approval, index) => (
+        <View key={`approval:${approval.toolName}:${index}`} style={styles.mcpActivityRow}>
+          <Text selectable style={styles.mcpActivityTool}>{approval.toolName}</Text>
+          <Text style={approval.decision === 'approve' ? styles.mcpActivityApproved : styles.mcpActivityDenied}>
+            {approval.decision === 'approve' ? '已批准一次' : '已拒绝'}
+          </Text>
+        </View>
+      ))}
+      {activity.calls.map((call, index) => (
+        <View key={`call:${call.toolName}:${index}`} style={styles.mcpActivityRow}>
+          <Text selectable style={styles.mcpActivityTool}>{call.toolName}</Text>
+          <Text
+            style={
+              call.outcome === 'completed'
+                ? styles.mcpActivityApproved
+                : call.outcome === 'failed'
+                  ? styles.mcpActivityDenied
+                  : styles.mcpActivityUnknown
+            }
+          >
+            {call.outcome === 'completed'
+              ? '执行完成'
+              : call.outcome === 'failed'
+                ? '执行失败'
+                : '结果不确定'}
+          </Text>
+        </View>
+      ))}
+      {hasUnknownOutcome ? (
+        <Text style={styles.mcpActivityWarning}>
+          请求在批准后中断；外部副作用可能已经发生，本应用无法确认或撤销。
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -10593,6 +11052,12 @@ const styles = StyleSheet.create({
     color: palette.text,
     fontSize: 15,
   },
+  multilineInput: {
+    minHeight: 84,
+    paddingTop: 12,
+    paddingBottom: 12,
+    textAlignVertical: 'top',
+  },
   capabilityRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -11382,6 +11847,78 @@ const styles = StyleSheet.create({
     color: palette.text,
     fontSize: 12,
     lineHeight: 17,
+  },
+  mcpActivityPanel: {
+    borderWidth: 1,
+    borderColor: palette.border,
+    borderRadius: radii.md,
+    backgroundColor: palette.surface,
+    padding: 10,
+    gap: 7,
+  },
+  mcpActivityHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  mcpActivityTitleGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  mcpActivityTitle: {
+    color: palette.textSecondary,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  mcpActivityRequestCount: {
+    color: palette.textSecondary,
+    fontSize: 10,
+  },
+  mcpActivityServer: {
+    color: palette.textSecondary,
+    fontSize: 10,
+    lineHeight: 15,
+  },
+  mcpActivityEmpty: {
+    color: palette.textSecondary,
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  mcpActivityRow: {
+    minHeight: 26,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  mcpActivityTool: {
+    flex: 1,
+    color: palette.text,
+    fontSize: 11,
+    lineHeight: 16,
+    fontWeight: '600',
+  },
+  mcpActivityApproved: {
+    color: '#39734C',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  mcpActivityDenied: {
+    color: palette.danger,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  mcpActivityUnknown: {
+    color: palette.warning,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  mcpActivityWarning: {
+    color: palette.warning,
+    fontSize: 10,
+    lineHeight: 15,
   },
   tokenUsageRow: {
     flexDirection: 'row',

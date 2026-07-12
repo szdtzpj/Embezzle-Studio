@@ -9,7 +9,7 @@ async function readJson(path: string): Promise<Record<string, unknown>> {
 }
 
 describe('release metadata', () => {
-  it('keeps every v1.3.0 version source synchronized with Android code 9', async () => {
+  it('keeps every v1.4.0 version source synchronized with Android code 10', async () => {
     const [appConfig, packageJson, packageLock] = await Promise.all([
       readJson('app.json'),
       readJson('package.json'),
@@ -21,11 +21,11 @@ describe('release metadata', () => {
     };
     const lockPackages = packageLock.packages as Record<string, { version?: string }>;
 
-    expect(expo.version).toBe('1.3.0');
-    expect(expo.android?.versionCode).toBe(9);
-    expect(packageJson.version).toBe('1.3.0');
-    expect(packageLock.version).toBe('1.3.0');
-    expect(lockPackages['']?.version).toBe('1.3.0');
-    expect(appInfo.version).toBe('1.3.0');
+    expect(expo.version).toBe('1.4.0');
+    expect(expo.android?.versionCode).toBe(10);
+    expect(packageJson.version).toBe('1.4.0');
+    expect(packageLock.version).toBe('1.4.0');
+    expect(lockPackages['']?.version).toBe('1.4.0');
+    expect(appInfo.version).toBe('1.4.0');
   });
 });

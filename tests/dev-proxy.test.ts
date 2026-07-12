@@ -144,6 +144,7 @@ describe('dev proxy request handling', () => {
     expect(init.method).toBe('GET');
     expect(init.body).toBeUndefined();
     expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.redirect).toBe('error');
     expect(init.headers).toEqual({
       accept: 'application/json',
       authorization: 'Bearer local-provider-key',

@@ -6,6 +6,7 @@ import type {
   MediaAttachment,
   ModelParameterSettings,
   ModelInfo,
+  PluginManifest,
   ProviderProfile,
   ReasoningEffort,
 } from '../domain/types';
@@ -25,9 +26,11 @@ import { normalizeReasoningEffort } from './reasoningEfforts';
 import { materializeAttachment, persistAttachment } from './mediaStorage';
 import {
   buildOpenAiResponsesRequest,
+  getOpenAiResponsesEndpoint,
   isOpenAiResponsesOnlyModel,
   openAiResponsesLimits,
   parseOpenAiResponsesResponse,
+  toOpenAiResponsesInput,
 } from './openAiResponses';
 import {
   assertProviderWebSearchMessagesSupported,
@@ -36,6 +39,32 @@ import {
   resolveProviderWebSearchProtocol,
   type OpenAiWebSearchContextSize,
 } from './providerWebSearch';
+import { getRemoteMcpExecutableReadiness } from '../plugins/contracts';
+import { isExactOfficialOpenAiProvider } from './providerSetup';
+import {
+  providerMcpLimits,
+  runOpenAiProviderMcp,
+  type ProviderMcpApprovalDecision,
+  type ProviderMcpApprovalRequest,
+  type ProviderMcpApprovalContext,
+  type ProviderMcpContinuationContext,
+  type ProviderMcpSendContext,
+} from './providerMcp';
+
+export interface ChatMcpOptions {
+  plugin: PluginManifest;
+  requestApproval: (
+    request: ProviderMcpApprovalRequest,
+    context: ProviderMcpApprovalContext
+  ) => Promise<ProviderMcpApprovalDecision> | ProviderMcpApprovalDecision;
+  beforeContinuation?: (
+    context: ProviderMcpContinuationContext
+  ) => Promise<void> | void;
+  beforeProviderRequest?: (
+    context: ProviderMcpSendContext
+  ) => Promise<void> | void;
+  onProviderRequestStarted?: (context: ProviderMcpSendContext) => void;
+}
 
 interface ChatCompletionArgs {
   provider: ProviderProfile;
@@ -50,6 +79,7 @@ interface ChatCompletionArgs {
     enabled: boolean;
     searchContextSize: OpenAiWebSearchContextSize;
   };
+  mcp?: ChatMcpOptions;
   signal?: AbortSignal;
 }
 
@@ -899,7 +929,7 @@ function isOpenAiBaseUrl(provider: ProviderProfile): boolean {
 }
 
 export function isOfficialOpenAiProvider(provider: ProviderProfile): boolean {
-  return isOpenAiBaseUrl(provider);
+  return isExactOfficialOpenAiProvider(provider);
 }
 
 function isDoubaoSeedModel(modelId: string): boolean {
@@ -1781,6 +1811,7 @@ export async function sendOpenAiCompatibleChat({
   maxOutputTokens,
   onStreamUpdate,
   webSearch,
+  mcp,
   signal,
 }: ChatCompletionArgs): Promise<ChatCompletionResult> {
   if (!modelId) {
@@ -1815,6 +1846,103 @@ export async function sendOpenAiCompatibleChat({
 
   const chatAttachments = messages.flatMap((message) => message.attachments ?? []);
   assertChatAttachmentsSupported(chatAttachments, requestModel, provider);
+
+  if (mcp) {
+    if (webSearch?.enabled) {
+      throw new Error('MCP 与联网搜索不能在同一轮启用，已拒绝发起请求。');
+    }
+    if (!provider.apiKey?.trim()) {
+      throw new Error('MCP 必须使用你在 OpenAI 官方服务商中配置的 API Key。');
+    }
+    if (!isOfficialOpenAiProvider(provider)) {
+      throw new Error('MCP 执行仅允许精确的 OpenAI 官方 api.openai.com Responses 路由。');
+    }
+    if (!requestModel.capabilities.includes('mcp')) {
+      throw new Error('当前模型未明确标记 MCP 能力，已拒绝发起工具请求。');
+    }
+    const readiness = getRemoteMcpExecutableReadiness(
+      mcp.plugin,
+      new Set([provider.id])
+    );
+    if (!readiness.executable || readiness.providerId !== provider.id) {
+      throw new Error('MCP 配置未通过端点、服务商绑定、白名单与逐次审批安全检查。');
+    }
+    const requestMessages = await materializeMessagesForRequest(messages, provider);
+    const input = toOpenAiResponsesInput(requestMessages);
+    const endpoint = getOpenAiResponsesEndpoint(provider);
+    const normalizedEffort = normalizeReasoningEffort(
+      provider,
+      requestModel,
+      reasoningEffort
+    );
+    const wireReasoningEffort = normalizedEffort === 'default' || normalizedEffort === 'off'
+      ? undefined
+      : normalizedEffort;
+    const run = await runOpenAiProviderMcp({
+      modelId,
+      input,
+      server: {
+        serverLabel: readiness.serverLabel,
+        serverUrl: readiness.endpoint,
+        allowedTools: readiness.allowedTools,
+        ...(readiness.authorization ? { authorization: readiness.authorization } : {}),
+      },
+      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+      requestApproval: mcp.requestApproval,
+      beforeContinuation: mcp.beforeContinuation,
+      signal,
+      sendRequest: async (body, context) => {
+        await mcp.beforeProviderRequest?.(context);
+        if (context.signal?.aborted || signal?.aborted) {
+          throw createAbortError('MCP 请求已取消；不会向服务商发送请求。');
+        }
+        const responsePromise = providerFetch(
+          endpoint,
+          {
+            method: 'POST',
+            headers: authHeaders(provider),
+            body: JSON.stringify({
+              ...body,
+              ...(wireReasoningEffort
+                ? { reasoning: { effort: wireReasoningEffort } }
+                : {}),
+            }),
+            signal,
+            redirect: 'error',
+          },
+          openAiProRequestTimeoutMs
+        );
+        mcp.onProviderRequestStarted?.(context);
+        const response = await responsePromise;
+        const responseBody = await readLimitedResponseText(
+          response,
+          response.ok ? providerMcpLimits.maxResponseJsonBytes : maxErrorResponseBytes,
+          'OpenAI MCP'
+        );
+        if (!response.ok) {
+          // A provider error page may reflect request fields. Do not include it
+          // in UI errors because the MCP authorization is part of the JSON body.
+          throw new Error(`OpenAI MCP 请求失败：HTTP ${response.status}。`);
+        }
+        return responseBody;
+      },
+    });
+    return {
+      ...run.result,
+      mcpActivity: {
+        serverLabel: run.receipt.serverLabel,
+        providerRequestCount: run.providerRequestCount,
+        approvals: run.receipt.approvals.map((approval) => ({
+          toolName: approval.toolName,
+          decision: approval.decision,
+        })),
+        calls: run.receipt.calls.map((call) => ({
+          toolName: call.toolName,
+          outcome: call.outcome,
+        })),
+      },
+    };
+  }
 
   if (webSearch?.enabled) {
     if (!provider.apiKey?.trim()) {

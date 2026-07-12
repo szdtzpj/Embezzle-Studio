@@ -44,6 +44,7 @@ export interface CreateStartedProviderUsageEventArgs {
   providerId: string;
   modelId: string;
   createdAt: number;
+  providerRequestCount?: number;
   messageId?: string;
   comparisonGroupId?: string;
   unknownCostComponents?: readonly UnknownCostComponent[];
@@ -99,6 +100,12 @@ function finiteNonNegative(value: unknown): value is number {
 function assertTimestamp(value: unknown, label: string): asserts value is number {
   if (!finiteNonNegative(value)) {
     throw new RangeError(`${label} must be a finite, non-negative timestamp.`);
+  }
+}
+
+function assertPositiveSafeInteger(value: unknown, label: string): asserts value is number {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new RangeError(`${label} must be a positive safe integer.`);
   }
 }
 
@@ -172,6 +179,7 @@ function assertUsageEvent(event: ProviderUsageEvent, label = 'event'): void {
   nonEmpty(event.providerId, `${label}.providerId`);
   nonEmpty(event.modelId, `${label}.modelId`);
   assertUsageKind(event.kind);
+  assertPositiveSafeInteger(event.providerRequestCount, `${label}.providerRequestCount`);
   assertTimestamp(event.createdAt, `${label}.createdAt`);
   assertLocalDateKey(event.localDateKey);
   if (event.completedAt !== undefined) {
@@ -256,16 +264,19 @@ export function createStartedProviderUsageEvent({
   providerId,
   modelId,
   createdAt,
+  providerRequestCount = 1,
   messageId,
   comparisonGroupId,
   unknownCostComponents: additionalUnknownComponents = [],
 }: CreateStartedProviderUsageEventArgs): ProviderUsageEvent {
   assertUsageKind(kind);
   assertTimestamp(createdAt, 'createdAt');
+  assertPositiveSafeInteger(providerRequestCount, 'providerRequestCount');
   return {
     id: nonEmpty(id, 'id'),
     kind,
     status: 'started',
+    providerRequestCount,
     providerId: nonEmpty(providerId, 'providerId'),
     modelId: nonEmpty(modelId, 'modelId'),
     createdAt,
@@ -335,6 +346,7 @@ export function upsertProviderUsageEvent(
   events: readonly ProviderUsageEvent[],
   event: ProviderUsageEvent
 ): ProviderUsageEvent[] {
+  events.forEach((candidate, index) => assertUsageEvent(candidate, `events[${index}]`));
   assertUsageEvent(event);
   const index = events.findIndex((candidate) => candidate.id === event.id);
   if (index < 0) {
@@ -382,7 +394,11 @@ export function summarizeDailyProviderUsage(
     if (event.localDateKey !== today) {
       return;
     }
-    requestCount += 1;
+    const nextRequestCount = requestCount + event.providerRequestCount;
+    if (!Number.isSafeInteger(nextRequestCount)) {
+      throw new RangeError('Daily provider request count exceeds the safe integer range.');
+    }
+    requestCount = nextRequestCount;
     if (event.knownCostEstimate) {
       knownCostByCurrency[event.knownCostEstimate.currency] +=
         event.knownCostEstimate.amount;

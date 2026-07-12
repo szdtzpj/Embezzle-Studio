@@ -39,8 +39,8 @@ Embezzle Studio is a personal Android AI client for people who already own multi
 
 3. Extension foundation
    - Plugin manifest contract for mobile-safe plugins.
-   - Remote MCP connection shape for Streamable HTTP and SSE transports.
-   - Tool permissions modeled before execution is implemented.
+   - Remote MCP connection shape for Streamable HTTP and SSE transports, with public-HTTPS endpoint validation and separately stored authorization.
+   - An official OpenAI provider-hosted Responses MCP runtime with an exact allowlist, per-call full-argument approval, bounded serial execution, and actual provider-request accounting.
 
 4. Local workspace and cost safety
    - Local projects with project instructions, default models, conversation membership, and explicit migration when a project is deleted.
@@ -71,7 +71,7 @@ flowchart TD
     ProviderAdapter --> OpenAI["OpenAI-compatible Adapter"]
     ProviderAdapter --> OpenAIResponses["Official OpenAI Responses"]
     ProviderAdapter --> ProviderMedia["Bailian video_url / Ark Generation Tasks"]
-    ProviderAdapter --> MCP["Future Remote MCP Tool Runtime"]
+    ProviderAdapter --> MCP["Safe OpenAI Responses MCP Runtime"]
 ```
 
 ## Provider Adapter Boundaries
@@ -87,6 +87,7 @@ The initial adapter supports common OpenAI-compatible APIs:
 Protocol-specific branches currently cover:
 
 - official OpenAI Responses-only Pro requests and official OpenAI `file`/`input_file` attachments
+- official `api.openai.com` provider-hosted Responses MCP with local per-call approval
 - Alibaba Bailian `video_url` chat content with bounded inline video materialization
 - Volcengine Ark image/video generation task submission and polling
 
@@ -99,12 +100,16 @@ Provider-specific adapters should be added when the protocol diverges:
 
 ## MCP Strategy
 
-Mobile MCP starts with remote MCP only:
+Mobile MCP is remote and BYOK only. Embezzle Studio does not run a production API, MCP gateway, approval server, or tool worker; the user's selected model provider connects to the user's public remote MCP server. Supported configuration transports are:
 
 - `streamable-http`
 - `sse`
 
-Local stdio MCP is deferred. It requires packaging executables, sandboxing them, managing background processes, and handling Android filesystem/runtime differences. That can be revisited after the core chat app is stable.
+The executable v1.4 path is limited to the dedicated `openai-compatible` kind inspected as the exact canonical `https://api.openai.com/v1` Responses adapter. It sends `require_approval: "always"`, a non-empty exact `allowed_tools` list, `store: false`, `parallel_tool_calls: false`, and `include: ["reasoning.encrypted_content"]`; provider requests and the local development proxy both reject redirects. Stateless continuations manually accumulate the original input, every prior output item, and every approval response, while rejecting missing encrypted reasoning state, ambiguous list-tools errors, and response/approval/call ID replay across rounds. Each tool call pauses on-device to show its full JSON arguments and accepts only approve, deny, or cancel; there is no remembered or blanket approval, and a turn stops after at most four approvals. Every initial and continuation Response is conservatively registered before send as a potentially billable request attempt; it is not proof of provider receipt or a provider bill. Provider-hosted web search and multi-model comparison are mutually exclusive with MCP in this first runtime.
+
+Ark documents approval request/response items, but its runtime remains disabled until a real account proves that a complete `store: false` local replay can continue without provider-side response storage. Bailian Responses does not expose an equivalent pre-execution approval pause and remains non-executing. Provider and MCP credentials stay in platform-scoped secret storage and are excluded from backups and diagnostic logs. The implementation does not claim real-account or Android acceptance until the external matrix is completed; see [v1.4 Safe MCP Tools](./safe-mcp-tools.md).
+
+Local stdio MCP remains deferred. It would require packaging executables, sandboxing them, managing background processes, and handling Android filesystem/runtime differences.
 
 ## Model Capability Resolution
 
@@ -153,8 +158,8 @@ Provider setup uses a separate draft and a canonical endpoint fingerprint. A sav
 - Android request-based audio supports official OpenAI and Bailian only. Recording is foreground-only and transcribed text is never auto-sent. Synthesized speech is cached before playback. Volcengine speech remains disabled until a separate speech credential profile exists; OpenAI Realtime remains disabled because safe ephemeral tokens require a broker.
 - The task center is a projection of durable conversation messages; it has no duplicate cloud job database and performs no background polling. The usage dashboard aggregates only locally retained canonical events and treats user-entered prices as estimates, without a price or FX service.
 - The local cost guard can apply an output cap before text/search calls, cap comparison targets, warn/block on unknown cost, and require confirmation for potentially multiple charges. Daily CNY/USD thresholds inspect the already completed, locally known subtotal and only gate the next attempt once that subtotal has reached the threshold; they do not project the current request or promise that a provider bill cannot cross a budget. Currencies are never converted, unknown cost is never zero, and the attempt ledger is not a true provider bill.
-- External backups are authenticated encrypted files, but secrets, media, and `providerUsageEvents` are removed before encryption. Internal workspace schema v5 migrates v4/v3/v2, stores provider/MCP secrets separately, preserves the current device's attempt ledger on import, and strictly normalizes projects, branches, artifacts, project reference sources, and cost settings.
-- MCP configuration permits only remote HTTPS endpoints, rejects embedded credentials/query strings/private destinations, stores authorization separately, defaults disabled, and displays a permission confirmation. Actual provider-hosted MCP calls remain disabled until per-tool argument preview and approval-response handling are implemented and real-server tested.
+- External backups are authenticated encrypted files, but secrets, media, `providerUsageEvents`, and local MCP activity summaries are removed before encryption. Internal workspace schema v6 migrates v5/v4/v3/v2, stores provider/MCP secrets separately, preserves the current device's attempt ledger on import, and strictly normalizes projects, branches, artifacts, project reference sources, MCP activity metadata, and cost settings. Backup import always restores every remote MCP entry as disabled; internal loading also disables any entry not bound to the exact official OpenAI provider kind and canonical endpoint.
+- MCP configuration permits only remote HTTPS endpoints, rejects embedded credentials/query strings/private destinations, stores authorization separately, defaults disabled, and displays a permission confirmation. The exact official OpenAI Responses adapter now implements non-empty allowlists, per-call full-argument approval, cumulative `store: false` continuation, serial tool calls, a four-approval cap, approve/deny/cancel, and conservative pre-send request-attempt counting. `store: false` does not override provider security logs, organization data controls, or the remote server's retention policy. Ark and Bailian execution remain disabled for the protocol reasons above, and real OpenAI/MCP-server Android acceptance remains an external release boundary.
 
 The full matrix and official contracts are recorded in [BYOK Productivity Suite](./byok-productivity-suite.md).
 
@@ -183,14 +188,16 @@ The full `1.3.0` contract and unsupported-format list are recorded in [Local Kno
 
 ## Current Verification Boundary
 
-- Release metadata is version `1.3.0` / code 9. PR #13 merged as `ea9409f1ea3540520eaf469a0c777fe1bc87e7f8`, and tag `v1.3.0` points exactly to that commit.
+- Local development metadata is `1.4.0` / code 10; it has not been pushed, tagged, uploaded, or released. Public stable metadata remains `1.3.0` / code 9: PR #13 merged as `ea9409f1ea3540520eaf469a0c777fe1bc87e7f8`, and tag `v1.3.0` points exactly to that commit.
+- The complete local `1.4.0` gate passes 41 test files / 749 tests with clean TypeScript and ESLint; Web export reports 3,264 modules / 7.4 MB, Expo Doctor is 20/20, and the workflow/YAML/Bash/Action-SHA/diff/secret gates pass. A 390×844 locally intercepted browser fixture exercises MCP approve, deny, and cancel, repeats approve after a clean final-code reload, verifies the exact stateless request controls, and records zero console errors plus only loopback proxy requests.
+- Clean prebuild, unsigned Release assembly, local production signing, aapt/apksigner, and zipalign pass for `D:\EmbezzleStudio-Releases\v1.4.0-candidate\Embezzle-Studio-v1.4.0-candidate-release.apk`, 97,518,039 bytes, SHA-256 `683eb6e98efec3e301594e59c627b3698b410c2a58f841b3c3c3642b1a2a20ed`. It identifies as `com.szdtzpj.embezzlestudio` 1.4.0/code 10, min/target 24/36, `allowBackup=false`, intentional `RECORD_AUDIO`, no CAMERA/overlay, one expected production signer, v2/v3, and valid alignment. See the [v1.4 checkpoint](./CONTINUATION_CHECKPOINT_2026-07-12_V1.4.md).
 - The complete `1.3.0` local gate passes: `npm.cmd run check` reports 38 test files / 634 tests with clean TypeScript and ESLint; Web export reports 3,259 modules / 7.4 MB. A fresh 390×844 exported-Web session verifies inert HTML `.html.txt` export/content, artifact version history, artifact-to-knowledge capture, bounded local search, explicit source selection changing the actual count from 0 to 1, and context compression producing a draft without sending. It records 0 console errors, 0 warnings, and no non-static requests.
 - `expo install --check`, Expo Doctor 20/20, all 3 workflow YAML files, all 35 Bash blocks under `bash -n`, all 16 official Actions at full SHAs, and diff/secret-boundary checks pass. Final audit regressions include conservative Unicode/emoji token gating, 200/201/256-character entity-ID and Unicode-code-point round trips, fail-closed aggregate storage budgets, bounded backup sizing, provider-endpoint secret rejection, and atomic backup import.
 - Clean prebuild and `clean assembleRelease` pass. The production-signed local candidate is `D:\EmbezzleStudio-Releases\v1.3.0-candidate\Embezzle-Studio-v1.3.0-candidate-release.apk`, 97,448,407 bytes, SHA-256 `c95dafe6e6eb77f3a1a4c7504c6ad05c27218b45972de2e247db264ec4c777d4`. It identifies as `com.szdtzpj.embezzlestudio` version `1.3.0`/code 9 with minSdk 24, targetSdk 36, `allowBackup=false`, intentional `RECORD_AUDIO`, and no CAMERA or `SYSTEM_ALERT_WINDOW`. Exactly one expected production signer is present with certificate SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`; v2/v3 and zipalign pass.
 - PR Quality run `29176034579`, `main` Quality run `29176125303`, initial Pages run `29176125307`, production Android run `29176245049`, and post-release Pages run `29176763721` all succeeded. The formal Release is Latest, immutable, non-prerelease, and contains exactly 3 assets; its Release attestation and all 3 asset attestations pass.
 - The formal `Embezzle-Studio-v1.3.0-release.apk` is 97,448,407 bytes with SHA-256 `b5e48387e62d99512ae18a2c4f4a80ddf482c3c1b489768e924845e0adceb7fe`. It is distinct from the same-size local candidate with SHA-256 `c95dafe6e6eb77f3a1a4c7504c6ad05c27218b45972de2e247db264ec4c777d4`. The formal APK independently identifies as `com.szdtzpj.embezzlestudio` version `1.3.0`/code 9, minSdk 24/targetSdk 36, `allowBackup=false`, intentional `RECORD_AUDIO`, and no CAMERA or `SYSTEM_ALERT_WINDOW`; it has one signer with certificate SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`, and v2/v3 plus zipalign pass.
 - Formal assets are stored under `D:\EmbezzleStudio-Releases\v1.3.0`. The post-release Pages manifest and `release.html` return anonymous HTTP 200 and match the Release exactly; a full public APK download under `D:\EmbezzleStudio-Releases\v1.3.0-pages-public-verify-20260712-103132` matches the formal size and hash.
-- `adb devices -l` is still empty. No connected-device test of the final Actions APK, additional-device matrix, real-provider-account behavior, or billing acceptance is claimed.
+- `adb devices -l` is still empty. No connected-device test of the local v1.4 candidate or final v1.3 Actions APK, additional-device matrix, real-provider-account behavior, or billing acceptance is claimed.
 - Historical `1.2.0` evidence remains unchanged: 27 test files / 528 automated tests, zero TypeScript/ESLint errors or warnings, Web export at 3,254 modules / 7.3 MB, a clean 390×844 browser session, `expo install --check`, Expo Doctor 20/20, workflow/Bash/Action-SHA/diff checks, clean prebuild/Release assembly, and production-certificate candidate signing passed for that source tree.
 - The historical `1.2.0` candidate is `D:\EmbezzleStudio-Releases\v1.2.0-candidate\Embezzle-Studio-v1.2.0-candidate-release.apk`, 97,313,239 bytes, SHA-256 `872f32a48320f2a20dadee6fc0f699668666d067a60e546a19467ed922082da0`. It identifies as version `1.2.0`/code 8 and therefore cannot validate or be relabeled as `1.3.0`.
 

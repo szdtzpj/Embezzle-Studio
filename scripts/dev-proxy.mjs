@@ -530,6 +530,9 @@ async function handleProxy(request, response, options) {
       headers: payload.headers,
       body: payload.body,
       signal: controller.signal,
+      // Never forward provider credentials across an upstream redirect. This
+      // is a proxy-owned invariant, not a client-selectable payload option.
+      redirect: 'error',
     });
 
     if (!canWrite(response)) {

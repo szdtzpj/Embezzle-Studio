@@ -22,6 +22,16 @@ import type {
   WorkspaceProject,
 } from '../domain/types';
 import {
+  MAX_MCP_ALLOWED_TOOLS,
+  MAX_PLUGIN_MANIFESTS,
+  getRemoteMcpExecutableReadiness,
+  normalizeMcpAllowedTools,
+  normalizeMcpDescription,
+  normalizeMcpServerLabel,
+  normalizeRemoteMcpEndpoint,
+  remoteMcpBindingFingerprint,
+} from '../plugins/contracts';
+import {
   MAX_PROMPT_TEMPLATE_CONTENT_LENGTH,
   MAX_PROMPT_TEMPLATE_NAME_LENGTH,
   MAX_PROMPT_TEMPLATES,
@@ -35,6 +45,7 @@ import {
   MAX_PROJECT_KNOWLEDGE_TITLE_CHARACTERS,
   MAX_PROJECT_KNOWLEDGE_TOTAL_BYTES,
 } from './projectKnowledge';
+import { providerEndpointFingerprint } from './providerSetup';
 import { unicodeCharacterLengthExceeds } from './textBounds';
 import {
   MAX_WORKSPACE_ARTIFACT_CONTENT_LENGTH,
@@ -118,7 +129,7 @@ const knowledgeKinds = new Set(['text', 'artifact', 'message', 'file']);
 
 type BackupProvider = Omit<ProviderProfile, 'apiKey'>;
 type BackupPlugin = Omit<PluginManifest, 'authorization'>;
-type BackupMessage = Omit<ChatMessage, 'attachments'>;
+type BackupMessage = Omit<ChatMessage, 'attachments' | 'mcpActivity'>;
 type BackupConversation = Omit<ChatConversation, 'messages'> & { messages: BackupMessage[] };
 
 export interface SanitizedWorkspaceBackup {
@@ -720,30 +731,52 @@ function safePublicHttpsUrl(value: string | undefined, allowQueryAndFragment: bo
   }
 }
 
-function safePluginEndpoint(value: string | undefined): string | undefined {
-  return safePublicHttpsUrl(value, false);
-}
-
 function validatePlugin(value: unknown, path: string): string {
   const plugin = requireRecord(value, path);
   requireExactKeysWithOptional(
     plugin,
     ['id', 'name', 'version', 'type', 'permissions'],
-    ['transport', 'endpoint', 'enabled', 'serverLabel', 'providerId', 'approvalPolicy'],
+    [
+      'description',
+      'allowedTools',
+      'transport',
+      'endpoint',
+      'enabled',
+      'serverLabel',
+      'providerId',
+      'approvalPolicy',
+    ],
     path
   );
   const id = requireId(plugin.id, `${path}.id`);
   requireString(plugin.name, `${path}.name`, { nonEmpty: true });
+  if (plugin.description !== undefined) {
+    const description = requireString(plugin.description, `${path}.description`, { nonEmpty: true });
+    if (!normalizeMcpDescription(description)) invalidFormat(`${path}.description 无效。`);
+  }
   requireString(plugin.version, `${path}.version`, { nonEmpty: true });
   if (!['mobile-js', 'remote-mcp'].includes(String(plugin.type))) invalidFormat(`${path}.type 无效。`);
   validateEnumArray(plugin.permissions, new Set(['network', 'files', 'clipboard', 'tools']), `${path}.permissions`);
+  if (plugin.allowedTools !== undefined) {
+    const rawAllowedTools = requireArray(
+      plugin.allowedTools,
+      `${path}.allowedTools`,
+      MAX_MCP_ALLOWED_TOOLS
+    );
+    if (rawAllowedTools.length > 0 && normalizeMcpAllowedTools(rawAllowedTools).length === 0) {
+      invalidFormat(`${path}.allowedTools 无效。`);
+    }
+  }
   if (plugin.transport !== undefined && !['streamable-http', 'sse'].includes(String(plugin.transport))) invalidFormat(`${path}.transport 无效。`);
   if (plugin.endpoint !== undefined) {
     const endpoint = requireString(plugin.endpoint, `${path}.endpoint`, { nonEmpty: true });
-    if (safePluginEndpoint(endpoint) !== endpoint) invalidFormat(`${path}.endpoint 不安全。`);
+    if (!normalizeRemoteMcpEndpoint(endpoint)) invalidFormat(`${path}.endpoint 不安全。`);
   }
   if (plugin.enabled !== undefined) requireBoolean(plugin.enabled, `${path}.enabled`);
-  requireOptionalString(plugin.serverLabel, `${path}.serverLabel`);
+  if (plugin.serverLabel !== undefined) {
+    const serverLabel = requireString(plugin.serverLabel, `${path}.serverLabel`, { nonEmpty: true });
+    if (!normalizeMcpServerLabel(serverLabel)) invalidFormat(`${path}.serverLabel 无效。`);
+  }
   if (plugin.providerId !== undefined) {
     requireLegacyId(plugin.providerId, `${path}.providerId`);
   }
@@ -1262,10 +1295,28 @@ function validateBackupWorkspace(value: unknown): asserts value is SanitizedWork
   });
 
   const pluginIds = new Set<string>();
-  requireArray(workspace.plugins, 'workspace.plugins', 500).forEach((plugin, index) => {
+  const pluginServerLabels = new Set<string>();
+  requireArray(workspace.plugins, 'workspace.plugins', MAX_PLUGIN_MANIFESTS).forEach((plugin, index) => {
     const id = validatePlugin(plugin, `workspace.plugins[${index}]`);
     if (pluginIds.has(id)) duplicateId('plugin', id);
     pluginIds.add(id);
+    const pluginRecord = requireRecord(plugin, `workspace.plugins[${index}]`);
+    if (pluginRecord.providerId !== undefined) {
+      const providerId = requireLegacyId(
+        pluginRecord.providerId,
+        `workspace.plugins[${index}].providerId`
+      );
+      if (!providerIds.has(providerId)) {
+        invalidFormat(`workspace.plugins[${index}].providerId 不存在。`);
+      }
+    }
+    if (pluginRecord.serverLabel !== undefined) {
+      const serverLabel = normalizeMcpServerLabel(pluginRecord.serverLabel)!;
+      if (pluginServerLabels.has(serverLabel)) {
+        invalidFormat(`workspace.plugins[${index}].serverLabel 与其他插件重复。`);
+      }
+      pluginServerLabels.add(serverLabel);
+    }
   });
 
   const templateIds = new Set<string>();
@@ -1370,21 +1421,36 @@ function sanitizeConversation(conversation: ChatConversation, messages = convers
   };
 }
 
-function sanitizePlugin(plugin: PluginManifest): BackupPlugin {
-  const endpoint = safePluginEndpoint(plugin.endpoint);
-  return {
+function sanitizePlugin(
+  plugin: PluginManifest,
+  providerIds: ReadonlySet<string>
+): BackupPlugin {
+  const endpoint = normalizeRemoteMcpEndpoint(plugin.endpoint);
+  const description = normalizeMcpDescription(plugin.description);
+  const serverLabel = normalizeMcpServerLabel(plugin.serverLabel);
+  const allowedTools = normalizeMcpAllowedTools(plugin.allowedTools);
+  const sanitized: BackupPlugin = {
     id: plugin.id,
     name: plugin.name,
+    ...(description ? { description } : {}),
     version: plugin.version,
     type: plugin.type,
     permissions: [...plugin.permissions],
+    allowedTools,
     ...(plugin.transport !== undefined ? { transport: plugin.transport } : {}),
     ...(endpoint ? { endpoint } : {}),
-    ...(plugin.enabled !== undefined ? { enabled: plugin.enabled } : {}),
-    ...(plugin.serverLabel !== undefined ? { serverLabel: plugin.serverLabel } : {}),
+    ...(plugin.type === 'remote-mcp' ? { enabled: plugin.enabled === true } : {}),
+    ...(serverLabel ? { serverLabel } : {}),
     ...(plugin.providerId !== undefined ? { providerId: plugin.providerId } : {}),
-    ...(plugin.approvalPolicy !== undefined ? { approvalPolicy: plugin.approvalPolicy } : {}),
+    ...(plugin.approvalPolicy === 'always' ? { approvalPolicy: 'always' as const } : {}),
   };
+  if (
+    sanitized.enabled === true &&
+    !getRemoteMcpExecutableReadiness(sanitized, providerIds).executable
+  ) {
+    sanitized.enabled = false;
+  }
+  return sanitized;
 }
 
 /** Produces a strict external-backup payload with no structured secrets or media references. */
@@ -1426,6 +1492,7 @@ export function sanitizeWorkspaceForBackup(workspace: AppWorkspace): SanitizedWo
       .filter((conversation) => conversation.id !== workspace.activeConversationId)
       .map((conversation) => sanitizeConversation(conversation)),
   ];
+  const providerIds = new Set(workspace.providers.map((provider) => provider.id));
   const sanitized: SanitizedWorkspaceBackup = {
     providers: workspace.providers.map(sanitizeProvider),
     activeProviderId: workspace.activeProviderId,
@@ -1450,7 +1517,7 @@ export function sanitizeWorkspaceForBackup(workspace: AppWorkspace): SanitizedWo
     knowledgeSources: workspace.knowledgeSources.map((source) => ({ ...source })),
     activeConversationId: workspace.activeConversationId,
     conversations,
-    plugins: workspace.plugins.map(sanitizePlugin),
+    plugins: workspace.plugins.map((plugin) => sanitizePlugin(plugin, providerIds)),
     promptTemplates: workspace.promptTemplates.map((template) => ({ ...template })),
     comparisonEnabled: workspace.comparisonEnabled,
     comparisonTargets: workspace.comparisonTargets.map((target) => ({ ...target })),
@@ -1740,20 +1807,57 @@ function mergeImportedWorkspace(
   const currentPlugins = new Map(
     currentWorkspace.plugins.map((plugin) => [plugin.id, plugin] as const)
   );
+  const importedProviderIds = new Set(providers.map((provider) => provider.id));
+  const endpointBindings = (providerList: readonly ProviderProfile[]) =>
+    new Map(
+      providerList.flatMap((provider) => {
+        const binding = providerEndpointFingerprint(provider);
+        return binding ? [[provider.id, binding] as const] : [];
+      })
+    );
+  const importedProviderBindings = endpointBindings(providers);
+  const currentProviderBindings = endpointBindings(currentWorkspace.providers);
   const plugins: PluginManifest[] = imported.plugins.map((plugin) => {
     const current = currentPlugins.get(plugin.id);
-    const importedEndpoint = canonicalBindingUrl(plugin.endpoint);
+    const endpoint = normalizeRemoteMcpEndpoint(plugin.endpoint);
+    const description = normalizeMcpDescription(plugin.description);
+    const serverLabel = normalizeMcpServerLabel(plugin.serverLabel);
+    const allowedTools = normalizeMcpAllowedTools(plugin.allowedTools);
+    const normalized: PluginManifest = {
+      id: plugin.id,
+      name: plugin.name,
+      ...(description ? { description } : {}),
+      version: plugin.version,
+      type: plugin.type,
+      permissions: [...plugin.permissions],
+      allowedTools,
+      ...(plugin.transport !== undefined ? { transport: plugin.transport } : {}),
+      ...(endpoint ? { endpoint } : {}),
+      // Import never re-arms a remote execution path. The user must review and
+      // enable every restored MCP configuration again on this device.
+      ...(plugin.type === 'remote-mcp' ? { enabled: false } : {}),
+      ...(serverLabel ? { serverLabel } : {}),
+      ...(plugin.providerId !== undefined ? { providerId: plugin.providerId } : {}),
+      ...(plugin.approvalPolicy === 'always' ? { approvalPolicy: 'always' } : {}),
+    };
+    if (
+      normalized.enabled === true &&
+      !getRemoteMcpExecutableReadiness(normalized, importedProviderIds).executable
+    ) {
+      normalized.enabled = false;
+    }
+    const importedBinding = remoteMcpBindingFingerprint(
+      normalized,
+      importedProviderBindings
+    );
     const authorization =
       current &&
-      current.type === plugin.type &&
-      current.transport === plugin.transport &&
-      importedEndpoint !== undefined &&
-      canonicalBindingUrl(current.endpoint) === importedEndpoint
+      importedBinding !== undefined &&
+      remoteMcpBindingFingerprint(current, currentProviderBindings) === importedBinding
         ? current.authorization
         : undefined;
     return {
-      ...plugin,
-      permissions: [...plugin.permissions],
+      ...normalized,
       ...(authorization !== undefined ? { authorization } : {}),
     };
   });

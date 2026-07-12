@@ -18,6 +18,7 @@ import type {
   CostEstimate,
   CostGuardSettings,
   MediaAttachment,
+  McpActivitySummary,
   ModelPricing,
   ModelInfo,
   ModelParameterSettings,
@@ -43,6 +44,18 @@ import type {
   WorkspaceArtifactFormat,
   WorkspaceArtifactRevision,
 } from '../domain/types';
+import {
+  MAX_MCP_ALLOWED_TOOLS,
+  MAX_PLUGIN_MANIFESTS,
+  getRemoteMcpExecutableReadiness,
+  normalizeMcpAllowedTools,
+  normalizeMcpAuthorization,
+  normalizeMcpDescription,
+  normalizeMcpServerLabel,
+  normalizeMcpToolName,
+  normalizeRemoteMcpEndpoint,
+  remoteMcpBindingFingerprint,
+} from '../plugins/contracts';
 import { createModelInfoFromId, inferModelTask } from './modelCapabilities';
 import { attachmentForPersistence, flushPendingAttachmentDeletions } from './mediaStorage';
 import {
@@ -60,7 +73,10 @@ import {
   MAX_PROJECT_KNOWLEDGE_TOTAL_BYTES,
   projectKnowledgeContentBytes,
 } from './projectKnowledge';
-import { providerEndpointFingerprint } from './providerSetup';
+import {
+  isExactOfficialOpenAiProvider,
+  providerEndpointFingerprint,
+} from './providerSetup';
 import { sliceUnicodeCharacters, unicodeCharacterLengthExceeds } from './textBounds';
 import {
   MAX_WORKSPACE_ARTIFACT_CONTENT_LENGTH,
@@ -91,23 +107,25 @@ export {
 } from './workspaceSaveError';
 
 const LEGACY_WORKSPACE_KEYS = [
+  '@embezzle-studio/workspace-v5',
   '@embezzle-studio/workspace-v4',
   '@embezzle-studio/workspace-v3',
   '@embezzle-studio/workspace-v2',
   '@embezzle-studio/workspace-v1',
 ] as const;
 const LEGACY_WORKSPACE_BACKUPS: Partial<Record<(typeof LEGACY_WORKSPACE_KEYS)[number], string>> = {
+  '@embezzle-studio/workspace-v5': '@embezzle-studio/workspace-v5.backup',
   '@embezzle-studio/workspace-v4': '@embezzle-studio/workspace-v4.backup',
   '@embezzle-studio/workspace-v3': '@embezzle-studio/workspace-v3.backup',
   '@embezzle-studio/workspace-v2': '@embezzle-studio/workspace-v2.backup',
 };
-const WORKSPACE_KEY = '@embezzle-studio/workspace-v5';
-const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v5.backup';
-const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v5';
+const WORKSPACE_KEY = '@embezzle-studio/workspace-v6';
+const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v6.backup';
+const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v6';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
 const PLUGIN_SECRET_PREFIX = 'embezzle-studio.plugin-authorization';
 const BOUND_SECRET_SCHEMA_VERSION = 1;
-const STORAGE_SCHEMA_VERSION = 5;
+const STORAGE_SCHEMA_VERSION = 6;
 const INTERRUPTED_MESSAGE = '上次请求在应用退出前未完成，已标记为中断。';
 
 const providerKinds = new Set<ProviderKind>([
@@ -601,6 +619,67 @@ function normalizeCostEstimate(value: unknown, label: string): CostEstimate | un
   return { amount, currency, source: 'user-configured', pricingUpdatedAt };
 }
 
+function normalizeMcpActivity(
+  value: unknown,
+  label: string
+): McpActivitySummary | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw shapeError(`${label} 必须是对象。`);
+  }
+  const serverLabel = normalizeMcpServerLabel(value.serverLabel);
+  if (!serverLabel) {
+    throw shapeError(`${label}.serverLabel 无效。`);
+  }
+  const providerRequestCount = value.providerRequestCount;
+  if (
+    !Number.isSafeInteger(providerRequestCount) ||
+    (providerRequestCount as number) <= 0 ||
+    (providerRequestCount as number) > 5
+  ) {
+    throw shapeError(`${label}.providerRequestCount 必须是 1 到 5 的整数。`);
+  }
+  const rawApprovals = arrayField(value.approvals, `${label}.approvals`);
+  const rawCalls = arrayField(value.calls, `${label}.calls`);
+  if (rawApprovals.length > 4) {
+    throw shapeError(`${label}.approvals 最多允许 4 项。`);
+  }
+  if (rawCalls.length > 4) {
+    throw shapeError(`${label}.calls 最多允许 4 项。`);
+  }
+  const approvals: McpActivitySummary['approvals'] = rawApprovals.map((entry, index) => {
+    if (!isRecord(entry)) {
+      throw shapeError(`${label}.approvals[${index}] 必须是对象。`);
+    }
+    const toolName = normalizeMcpToolName(entry.toolName);
+    if (!toolName || (entry.decision !== 'approve' && entry.decision !== 'deny')) {
+      throw shapeError(`${label}.approvals[${index}] 无效。`);
+    }
+    return { toolName, decision: entry.decision };
+  });
+  const calls: McpActivitySummary['calls'] = rawCalls.map((entry, index) => {
+    if (!isRecord(entry)) {
+      throw shapeError(`${label}.calls[${index}] 必须是对象。`);
+    }
+    const toolName = normalizeMcpToolName(entry.toolName);
+    if (
+      !toolName ||
+      (entry.outcome !== 'completed' &&
+        entry.outcome !== 'failed' &&
+        entry.outcome !== 'unknown')
+    ) {
+      throw shapeError(`${label}.calls[${index}] 无效。`);
+    }
+    return { toolName, outcome: entry.outcome };
+  });
+  return {
+    serverLabel,
+    providerRequestCount: providerRequestCount as number,
+    approvals,
+    calls,
+  };
+}
+
 function normalizeMessage(value: unknown, label: string, fallbackCreatedAt: number): ChatMessage {
   if (!isRecord(value)) {
     throw shapeError(`${label} 必须是对象。`);
@@ -623,6 +702,7 @@ function normalizeMessage(value: unknown, label: string, fallbackCreatedAt: numb
   const generationTask = normalizeGenerationTask(value.generationTask, `${label}.generationTask`);
   const requestMetrics = normalizeRequestMetrics(value.requestMetrics, `${label}.requestMetrics`);
   const costEstimate = normalizeCostEstimate(value.costEstimate, `${label}.costEstimate`);
+  const mcpActivity = normalizeMcpActivity(value.mcpActivity, `${label}.mcpActivity`);
 
   return {
     id: nonEmptyString(value.id) ?? label.replace(/[^A-Za-z0-9]+/g, '-'),
@@ -653,6 +733,7 @@ function normalizeMessage(value: unknown, label: string, fallbackCreatedAt: numb
       : {}),
     ...(requestMetrics ? { requestMetrics } : {}),
     ...(costEstimate ? { costEstimate } : {}),
+    ...(mcpActivity ? { mcpActivity } : {}),
     ...(typeof value.modelId === 'string' ? { modelId: value.modelId } : {}),
     ...(typeof value.providerId === 'string' ? { providerId: value.providerId } : {}),
     ...(typeof value.providerName === 'string' ? { providerName: value.providerName } : {}),
@@ -776,15 +857,31 @@ function normalizeParameterSettings(value: unknown): ModelParameterSettings {
   };
 }
 
-function normalizePlugins(value: unknown): PluginManifest[] {
-  return arrayField(value, 'plugins').map((plugin, index) => {
+function normalizePlugins(
+  value: unknown,
+  providers: ProviderProfile[],
+  includeAuthorization = false
+): PluginManifest[] {
+  const candidates = arrayField(value, 'plugins');
+  if (candidates.length > MAX_PLUGIN_MANIFESTS) {
+    throw shapeError(`plugins 最多允许 ${MAX_PLUGIN_MANIFESTS} 项。`);
+  }
+  const providerIds = new Set(providers.map((provider) => provider.id));
+  const providersById = new Map(providers.map((provider) => [provider.id, provider] as const));
+  const pluginIds = new Set<string>();
+  const serverLabels = new Set<string>();
+  return candidates.map((plugin, index) => {
     if (!isRecord(plugin)) {
       throw shapeError(`plugins[${index}] 必须是对象。`);
     }
     const id = nonEmptyString(plugin.id);
-    if (!id) {
-      throw shapeError(`plugins[${index}].id 不能为空。`);
+    if (!id || !isLegacyWorkspaceId(id)) {
+      throw shapeError(`plugins[${index}].id 无效。`);
     }
+    if (pluginIds.has(id)) {
+      throw shapeError(`plugins[${index}].id 与其他插件重复。`);
+    }
+    pluginIds.add(id);
     const type = plugin.type === 'remote-mcp' ? 'remote-mcp' : 'mobile-js';
     const permissions = Array.isArray(plugin.permissions)
       ? Array.from(
@@ -799,33 +896,80 @@ function normalizePlugins(value: unknown): PluginManifest[] {
     const transport = plugin.transport === 'streamable-http' || plugin.transport === 'sse'
       ? plugin.transport
       : undefined;
+    const allowedTools = normalizeMcpAllowedTools(plugin.allowedTools);
+    if (
+      plugin.allowedTools !== undefined &&
+      (!Array.isArray(plugin.allowedTools) ||
+        plugin.allowedTools.length > MAX_MCP_ALLOWED_TOOLS ||
+        (plugin.allowedTools.length > 0 && allowedTools.length === 0))
+    ) {
+      throw shapeError(`plugins[${index}].allowedTools 无效。`);
+    }
     let endpoint: string | undefined;
     if (typeof plugin.endpoint === 'string' && plugin.endpoint.trim()) {
-      try {
-        const parsed = parseSafePublicHttpsUrl(plugin.endpoint.trim(), false);
-        if (!parsed) {
-          throw new Error('MCP endpoint 必须是无内嵌凭据、查询参数和片段的远程公网 HTTPS URL。');
-        }
-        endpoint = parsed.toString();
-      } catch (error) {
+      endpoint = normalizeRemoteMcpEndpoint(plugin.endpoint);
+      if (!endpoint) {
         throw shapeError(
-          `plugins[${index}].endpoint 无效：${error instanceof Error ? error.message : String(error)}`
+          `plugins[${index}].endpoint 无效：MCP endpoint 必须是无内嵌凭据、查询参数和片段的远程公网 HTTPS URL。`
         );
       }
     }
-    return {
+    const serverLabel = plugin.serverLabel === undefined
+      ? undefined
+      : normalizeMcpServerLabel(plugin.serverLabel);
+    if (plugin.serverLabel !== undefined && !serverLabel) {
+      throw shapeError(`plugins[${index}].serverLabel 无效。`);
+    }
+    if (serverLabel && serverLabels.has(serverLabel)) {
+      throw shapeError(`plugins[${index}].serverLabel 与其他插件重复。`);
+    }
+    if (serverLabel) serverLabels.add(serverLabel);
+    const providerId = nonEmptyString(plugin.providerId);
+    if (
+      plugin.providerId !== undefined &&
+      (!providerId || !isLegacyWorkspaceId(providerId) || !providerIds.has(providerId))
+    ) {
+      throw shapeError(`plugins[${index}].providerId 不存在。`);
+    }
+    const description = plugin.description === undefined
+      ? undefined
+      : normalizeMcpDescription(plugin.description);
+    if (plugin.description !== undefined && !description) {
+      throw shapeError(`plugins[${index}].description 无效。`);
+    }
+    const authorization = !includeAuthorization || plugin.authorization === undefined
+      ? undefined
+      : normalizeMcpAuthorization(plugin.authorization);
+    if (includeAuthorization && plugin.authorization !== undefined && !authorization) {
+      throw shapeError(`plugins[${index}].authorization 无效。`);
+    }
+    const normalized: PluginManifest = {
       id,
       name: nonEmptyString(plugin.name) ?? id,
+      ...(description ? { description } : {}),
       version: nonEmptyString(plugin.version) ?? '0.0.0',
       type,
       permissions,
+      allowedTools,
       ...(transport ? { transport } : {}),
       ...(endpoint ? { endpoint } : {}),
-      ...(plugin.enabled === true && endpoint && type === 'remote-mcp' ? { enabled: true } : {}),
-      ...(nonEmptyString(plugin.serverLabel) ? { serverLabel: nonEmptyString(plugin.serverLabel) } : {}),
-      ...(nonEmptyString(plugin.providerId) ? { providerId: nonEmptyString(plugin.providerId) } : {}),
+      ...(type === 'remote-mcp' ? { enabled: plugin.enabled === true } : {}),
+      ...(serverLabel ? { serverLabel } : {}),
+      ...(providerId ? { providerId } : {}),
+      ...(authorization ? { authorization } : {}),
       ...(plugin.approvalPolicy === 'always' ? { approvalPolicy: 'always' as const } : {}),
     };
+    if (
+      normalized.enabled === true &&
+      (
+        !getRemoteMcpExecutableReadiness(normalized, providerIds).executable ||
+        !providerId ||
+        !isExactOfficialOpenAiProvider(providersById.get(providerId)!)
+      )
+    ) {
+      normalized.enabled = false;
+    }
+    return normalized;
   });
 }
 
@@ -1445,6 +1589,7 @@ function derivedProviderUsageEvents(conversations: ChatConversation[]): Provider
         : message.status === 'error'
           ? 'failed' as const
           : 'succeeded' as const,
+      providerRequestCount: 1,
       providerId: message.providerId,
       modelId: message.modelId,
       createdAt: message.createdAt,
@@ -1496,6 +1641,14 @@ function normalizeProviderUsageEvents(
       candidate.knownCostEstimate,
       `providerUsageEvents[${index}].knownCostEstimate`
     );
+    const providerRequestCount = candidate.providerRequestCount === undefined
+      ? 1
+      : candidate.providerRequestCount;
+    if (!Number.isSafeInteger(providerRequestCount) || (providerRequestCount as number) <= 0) {
+      throw shapeError(
+        `providerUsageEvents[${index}].providerRequestCount 必须是正安全整数。`
+      );
+    }
     const unknownCostComponents = candidate.unknownCostComponents === undefined
       ? []
       : Array.from(new Set(
@@ -1517,6 +1670,7 @@ function normalizeProviderUsageEvents(
       id,
       kind,
       status,
+      providerRequestCount: providerRequestCount as number,
       providerId,
       modelId,
       createdAt,
@@ -1591,7 +1745,7 @@ function normalizeWorkspace(snapshot: Record<string, unknown>, providers: Provid
     activeConversationId,
     conversations,
     messages: activeConversation.messages,
-    plugins: normalizePlugins(snapshot.plugins),
+    plugins: normalizePlugins(snapshot.plugins, normalizedProviders),
     promptTemplates: normalizePromptTemplates(snapshot.promptTemplates),
     comparisonEnabled: snapshot.comparisonEnabled === true && comparisonTargets.length >= 2,
     comparisonTargets,
@@ -1611,17 +1765,15 @@ function pluginSecretKey(pluginId: string): string {
   return `${PLUGIN_SECRET_PREFIX}.${pluginId}`;
 }
 
-function pluginBindingFingerprint(
-  plugin: Pick<PluginManifest, 'type' | 'transport' | 'endpoint'>
-): string | undefined {
-  if (plugin.type !== 'remote-mcp' || !plugin.endpoint) {
-    return undefined;
+function providerBindingsById(
+  providers: readonly ProviderProfile[]
+): ReadonlyMap<string, string> {
+  const bindings = new Map<string, string>();
+  for (const provider of providers) {
+    const binding = providerEndpointFingerprint(provider);
+    if (binding) bindings.set(provider.id, binding);
   }
-  const endpoint = parseSafePublicHttpsUrl(plugin.endpoint.trim(), false);
-  if (!endpoint) {
-    return undefined;
-  }
-  return `${plugin.type}::${plugin.transport ?? 'unspecified'}::${endpoint.toString()}`;
+  return bindings;
 }
 
 function decodeBoundSecret(value: string | null): BoundSecretEnvelope | undefined {
@@ -1780,9 +1932,10 @@ async function writeSecret(
 }
 
 async function readPluginSecret(
-  plugin: Pick<PluginManifest, 'id' | 'type' | 'transport' | 'endpoint'>
+  plugin: PluginManifest,
+  providerBindings: ReadonlyMap<string, string>
 ): Promise<string | undefined> {
-  const bindingFingerprint = pluginBindingFingerprint(plugin);
+  const bindingFingerprint = remoteMcpBindingFingerprint(plugin, providerBindings);
   if (pluginSecretValues.has(plugin.id)) {
     return secretForBinding(pluginSecretValues.get(plugin.id), bindingFingerprint);
   }
@@ -1859,7 +2012,7 @@ function decodeWorkspace(raw: string): DecodedWorkspace {
   }
 
   if (parsed.schemaVersion !== undefined) {
-    if (![2, 3, 4, STORAGE_SCHEMA_VERSION].includes(parsed.schemaVersion as number)) {
+    if (![2, 3, 4, 5, STORAGE_SCHEMA_VERSION].includes(parsed.schemaVersion as number)) {
       throw shapeError(`不支持 schemaVersion=${String(parsed.schemaVersion)}。`);
     }
     if (!isRecord(parsed.workspace)) {
@@ -1911,10 +2064,11 @@ async function hydrateWorkspace(decoded: DecodedWorkspace): Promise<AppWorkspace
     }))
   );
   const workspace = normalizeWorkspace(decoded.snapshot, providers);
+  const providerBindings = providerBindingsById(workspace.providers);
   workspace.plugins = await Promise.all(
     workspace.plugins.map(async (plugin) => ({
       ...plugin,
-      authorization: await readPluginSecret(plugin),
+      authorization: await readPluginSecret(plugin, providerBindings),
     }))
   );
   requestedRevision = Math.max(requestedRevision, decoded.revision);
@@ -2005,13 +2159,20 @@ function stripPluginSecret(plugin: PluginManifest): PersistedPlugin {
 }
 
 function messagesForPersistence(messages: ChatMessage[]): ChatMessage[] {
-  return messages.map((message) => {
+  return messages.map((message, index) => {
     const normalized = message.excludedFromContext === true && message.pinnedForContext === true
       ? { ...message, pinnedForContext: undefined }
       : message;
-    return normalized.attachments?.length
-      ? { ...normalized, attachments: normalized.attachments.map(attachmentForPersistence) }
-      : normalized;
+    const mcpActivity = normalizeMcpActivity(
+      normalized.mcpActivity,
+      `messages[${index}].mcpActivity`
+    );
+    const persisted: ChatMessage = { ...normalized };
+    delete persisted.mcpActivity;
+    if (mcpActivity) persisted.mcpActivity = mcpActivity;
+    return persisted.attachments?.length
+      ? { ...persisted, attachments: persisted.attachments.map(attachmentForPersistence) }
+      : persisted;
   });
 }
 
@@ -2048,7 +2209,11 @@ function persistedConversations(workspace: AppWorkspace): ChatConversation[] {
   ];
 }
 
-function createEnvelope(workspace: AppWorkspace, revision: number): PersistedWorkspaceEnvelope {
+function createEnvelope(
+  workspace: AppWorkspace,
+  revision: number,
+  plugins: PluginManifest[]
+): PersistedWorkspaceEnvelope {
   const providers = workspace.providers.length ? workspace.providers : createDefaultWorkspace().providers;
   const projects = workspace.projects.map((project) => ({
     ...project,
@@ -2088,13 +2253,16 @@ function createEnvelope(workspace: AppWorkspace, revision: number): PersistedWor
         ? workspace.activeConversationId
         : conversations[0].id,
       conversations,
-      plugins: workspace.plugins.map(stripPluginSecret),
+      plugins: plugins.map(stripPluginSecret),
       promptTemplates: [...workspace.promptTemplates],
       comparisonEnabled: workspace.comparisonEnabled,
       comparisonTargets: workspace.comparisonTargets.map((target) => ({ ...target })),
       modelPricing: workspace.modelPricing.map((pricing) => ({ ...pricing })),
       costGuard: { ...workspace.costGuard },
-      providerUsageEvents: workspace.providerUsageEvents.slice(-10_000).map((event) => ({
+      providerUsageEvents: normalizeProviderUsageEvents(
+        workspace.providerUsageEvents,
+        conversations
+      ).slice(-10_000).map((event) => ({
         ...event,
         ...(event.knownCostEstimate ? { knownCostEstimate: { ...event.knownCostEstimate } } : {}),
       })),
@@ -2112,6 +2280,7 @@ function createEnvelope(workspace: AppWorkspace, revision: number): PersistedWor
 
 async function persistSecrets(providers: ProviderProfile[], plugins: PluginManifest[]): Promise<void> {
   const providersById = new Map(providers.map((provider) => [provider.id, provider] as const));
+  const providerBindings = providerBindingsById(providers);
   for (const providerId of Array.from(secretValues.keys())) {
     if (!providersById.has(providerId)) {
       const cached = secretValues.get(providerId);
@@ -2144,9 +2313,16 @@ async function persistSecrets(providers: ProviderProfile[], plugins: PluginManif
     }
   }
   for (const plugin of plugins) {
-    const value = plugin.authorization?.trim() || undefined;
-    const bindingFingerprint = pluginBindingFingerprint(plugin);
+    const requestedValue = normalizeMcpAuthorization(plugin.authorization);
+    const bindingFingerprint = remoteMcpBindingFingerprint(plugin, providerBindings);
     const cached = pluginSecretValues.get(plugin.id);
+    const carriesStaleAuthorization = Boolean(
+      requestedValue &&
+      cached &&
+      cached.bindingFingerprint !== bindingFingerprint &&
+      cached.secret === requestedValue
+    );
+    const value = carriesStaleAuthorization ? undefined : requestedValue;
     if (
       !pluginSecretValues.has(plugin.id) ||
       cached?.bindingFingerprint !== bindingFingerprint ||
@@ -2177,9 +2353,11 @@ export function saveWorkspace(workspace: AppWorkspace): Promise<void> {
   const revision = requestedRevision + 1;
   requestedRevision = revision;
   const providers = workspace.providers.length ? workspace.providers : createDefaultWorkspace().providers;
+  let plugins: PluginManifest[];
   let serialized: string;
   try {
-    serialized = JSON.stringify(createEnvelope(workspace, revision));
+    plugins = normalizePlugins(workspace.plugins, providers, true);
+    serialized = JSON.stringify(createEnvelope(workspace, revision, plugins));
   } catch (error) {
     return Promise.reject(toWorkspaceSaveError(error, 'before-public-commit'));
   }
@@ -2202,7 +2380,7 @@ export function saveWorkspace(workspace: AppWorkspace): Promise<void> {
         // its credentials intact. If SecureStore fails afterward, this save
         // still rejects, while binding fingerprints prevent the newly committed
         // configuration from hydrating a stale credential on restart.
-        await persistSecrets(providers, workspace.plugins);
+        await persistSecrets(providers, plugins);
         const referencedAttachments = persistedConversations(workspace).flatMap((conversation) =>
           conversation.messages.flatMap((message) => message.attachments ?? [])
         );

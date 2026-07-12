@@ -419,6 +419,32 @@ export function providerEndpointFingerprint(
 }
 
 /**
+ * Returns true only for the exact official OpenAI Responses base route that
+ * has been reviewed for provider-hosted MCP execution. Hostname lookalikes,
+ * custom ports, compatible relays, and a mismatched provider kind all fail
+ * closed even when their URL would otherwise normalize.
+ */
+export function isExactOfficialOpenAiProvider(
+  provider: Pick<ProviderProfile, 'kind' | 'baseUrl'>
+): boolean {
+  // ProviderKind currently names the dedicated OpenAI protocol choice
+  // `openai-compatible`; `custom` is intentionally not accepted here even
+  // when it points at api.openai.com.
+  if (provider.kind !== 'openai-compatible') {
+    return false;
+  }
+  const inspection = inspectProviderEndpoint(provider.baseUrl, { kind: provider.kind });
+  return Boolean(
+    inspection.valid &&
+    inspection.official &&
+    inspection.kindCompatible &&
+    inspection.family === 'openai-official' &&
+    inspection.hostname === openAiHost &&
+    inspection.normalizedBaseUrl === 'https://api.openai.com/v1'
+  );
+}
+
+/**
  * Compares the exact protocol/endpoint binding used for secrets and cached
  * models. Display-name-only edits intentionally do not participate.
  */
@@ -562,7 +588,33 @@ function clientAdapterSupport(
     return { supported: false, reason: '模型可能支持工具调用，但当前客户端未开放通用工具执行循环。' };
   }
   if (capability === 'mcp') {
-    return { supported: false, reason: 'MCP 当前仅保存配置，工具执行保持关闭。' };
+    const isOfficialOpenAi =
+      inspection.official &&
+      inspection.family === 'openai-official' &&
+      inspection.hostname === openAiHost &&
+      inspection.normalizedBaseUrl === 'https://api.openai.com/v1';
+    if (isOfficialOpenAi) {
+      return {
+        supported: true,
+        reason: '仅 api.openai.com 官方 Responses 具备逐次审批、store:false 手动上下文续接适配。',
+      };
+    }
+    if (family === 'volcengine-ark') {
+      return {
+        supported: false,
+        reason: '火山方舟官方虽有工具审批协议，但在真实账号验证 store:false 手动续接前，MCP 执行保持关闭。',
+      };
+    }
+    if (family === 'bailian-payg') {
+      return {
+        supported: false,
+        reason: '阿里百炼 Responses 缺少执行前审批协议，MCP 执行保持关闭。',
+      };
+    }
+    return {
+      supported: false,
+      reason: 'MCP 仅对精确的 api.openai.com 官方端点开放；兼容端点、中转和其他服务商保持关闭。',
+    };
   }
   if (capability === 'embedding' || capability === 'rerank') {
     return { supported: false, reason: '模型能力可记录，但当前聊天界面没有对应的专用调用入口。' };
