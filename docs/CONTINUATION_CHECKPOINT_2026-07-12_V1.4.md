@@ -2,10 +2,11 @@
 
 ## Identity and publication state
 
-- Local development branch: `codex/safe-mcp-tools-v1.4`, based on public `main` commit `bcca38af2ce195f2293bbdc16fc2a74816f21fec`.
-- Development metadata: `1.4.0`, Android versionCode `10`.
-- This checkpoint records a local acceptance candidate only. No v1.4 commit has been pushed, no tag or GitHub Release has been created, and public Latest remains `v1.3.0`.
+- Release PR [#15](https://github.com/szdtzpj/Embezzle-Studio/pull/15) used head commit `1176df7964712078d58c5eade50d781a8245d52e` and merged into public `main` as `f83cea7fae36fcbaa0bff361fac2113c3edfb3d7`.
+- Tag `v1.4.0` points exactly to `f83cea7fae36fcbaa0bff361fac2113c3edfb3d7`; application metadata is `1.4.0`, Android versionCode `10`.
+- Public [`v1.4.0`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.4.0) is the stable, non-prerelease, immutable Latest Release. It was rebuilt and signed by the protected GitHub Actions workflow rather than uploading the local acceptance candidate.
 - Embezzle Studio still operates no production API, proxy, MCP gateway, approval server, task worker, telemetry backend, or app-funded quota. Every provider and remote-tool call uses the user's configured account, entitlement, quota, and billing.
+- GitHub's personal-repository model cannot make a collaborator a second owner. `BlueOcean223` has the platform's maximum collaborator permission (`write`) and a `pull_request` bypass on the owner-gated main-update ruleset, so they can merge PRs after the required Quality check passes; they are not the owner, and owner-only release-tag creation, signing secrets, and production workflow gates remain unchanged.
 
 ## Implemented v1.4 boundary
 
@@ -33,10 +34,18 @@
 - `apksigner` reports exactly one signer with production certificate SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`; APK Signature Schemes v2/v3 and zip alignment pass.
 - `adb devices -l` is empty. No physical-device or real-provider-account result is claimed.
 
+## Formal GitHub release evidence
+
+- PR Quality run [`29182946741`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29182946741), post-merge `main` Quality run [`29183001171`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183001171), pre-tag Pages run [`29183001176`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183001176), production Android run [`29183097617`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183097617), and post-release Pages run [`29183525831`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183525831) all succeeded.
+- The immutable Release contains exactly 3 `github-actions[bot]`-uploaded assets. Release attestation and all 3 asset attestations verify, and the tag, `main`, Release target, and workflow source all resolve to `f83cea7fae36fcbaa0bff361fac2113c3edfb3d7`.
+- The formal `Embezzle-Studio-v1.4.0-release.apk` is 97,518,039 bytes with SHA-256 `c650e142e221821f8da91e37fefd76dad0e7ad94c0348a3d7749b69f14fc67eb`. It is intentionally distinguished from the same-size local candidate whose SHA-256 is `683eb6e98efec3e301594e59c627b3698b410c2a58f841b3c3c3642b1a2a20ed`.
+- Independent `aapt` inspection identifies package `com.szdtzpj.embezzlestudio`, version `1.4.0` / code `10`, minSdk `24`, targetSdk `36`, `allowBackup=false`, and `adjustResize`. Intentional `RECORD_AUDIO` is present; CAMERA and `SYSTEM_ALERT_WINDOW` are absent.
+- Independent `apksigner` inspection reports exactly one signer with production certificate SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`; APK Signature Schemes v2/v3 and zip alignment pass.
+- Formal assets are stored under `D:\EmbezzleStudio-Releases\v1.4.0`. The Pages manifest, `release.html`, APK `HEAD`, and full APK download all return anonymous HTTP 200 and match the Release metadata and bytes; the public verification copy under `D:\EmbezzleStudio-Releases\v1.4.0-pages-public-verify-20260712-150424` has the same size and SHA-256.
+
 ## Remaining external/manual boundary
 
-- Android devices: install or upgrade to this candidate on representative gesture-navigation and three-button phones; verify the approval page, 32 KiB argument rejection/performance, background cancellation, process death, branch audit retention, provider deletion/restart persistence, and sustained Chat/Settings switching.
+- Android devices: install or upgrade to the formal Actions APK on representative gesture-navigation and three-button phones; verify the approval page, 32 KiB argument rejection/performance, background cancellation, process death, branch audit retention, provider deletion/restart persistence, and sustained Chat/Settings switching.
 - User-owned OpenAI account and trusted test MCP server: with strict account limits, complete one read-only call, one explicit denial, one cancel, and one observable reversible write; then compare provider/MCP logs and billing with the local conservative request-attempt ledger. Review both parties' data-retention policies before sending sensitive data.
 - Ark: prove with a real account that a complete `store:false` approval continuation works from locally replayed context before enabling runtime execution.
 - Bailian: keep execution disabled unless its official Responses contract exposes an equivalent pre-execution approval pause and response mechanism.
-- GitHub publication: only after explicit authorization, merge through the protected workflow, freeze exact `main`, create the matching `v1.4.0` tag and owner-authored empty draft, let Actions rebuild/sign, then verify the immutable Release, attestations, Pages manifest/download page, and anonymous APK bytes. The local candidate must not be uploaded as a substitute for that rebuild.

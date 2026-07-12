@@ -65,7 +65,7 @@
 
 ## 仍在完善
 
-当前稳定 Latest 已是 [`v1.3.0`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.3.0) / Android versionCode 9；它是 immutable、非 prerelease 且包含 3 个正式资产。现有 `1.2.0` 本机候选只属于上一开发阶段的历史证据，不能当作 `1.3.0` APK；`1.3.0` 本机候选也必须与 Actions 正式 APK 分开核对。
+当前稳定 Latest 已是 [`v1.4.0`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.4.0) / Android versionCode 10；它是 immutable、非 prerelease 且包含精确 3 个正式资产。现有 `1.2.0`、`1.3.0` 本机候选只属于各自开发阶段的历史证据；`1.4.0` 本机候选也必须与 Actions 正式 APK 分开核对。
 
 Embezzle Studio 不购买、转售、补贴或代理模型、搜索、语音、媒体或 MCP 能力，也不运行生产 API、MCP 网关、审批服务器、汇率服务、云同步、遥测后端或任务 worker。所有服务商与工具调用及费用都由用户配置的账号承担；本地费用护栏不做汇率换算，且其估算/尝试账本不能替代服务商账单。
 
@@ -142,9 +142,15 @@ Actions 正式 `Embezzle-Studio-v1.3.0-release.apk` 为 97,448,407 字节，SHA-
 
 发布后 Pages manifest 与 `release.html` 匿名返回 200 且精确匹配 `v1.3.0`；完整公网 APK 已下载到 `D:\EmbezzleStudio-Releases\v1.3.0-pages-public-verify-20260712-103132`，大小与正式 SHA-256 完全一致。`adb devices -l` 仍为空，因此没有最终 Actions APK 的连接真机/额外机型或真实服务商账号计费验收。详细能力与安全边界见[本地知识与成果工作台](./docs/local-knowledge-workbench.md)，完整证据见[`1.3.0` 续作断点](./docs/CONTINUATION_CHECKPOINT_2026-07-12_V1.3.md)。
 
-`1.4.0` / code 10 的本机候选门已通过：41 个测试文件 / 749 个测试、TypeScript/ESLint、3,264-module Web export（7.4 MB）、Expo Doctor 20/20、390×844 本地拦截浏览器 MCP 批准/拒绝/取消、YAML/Bash/Action-SHA/diff/敏感边界、干净 Android prebuild/未签名 Release、正式证书本机签名及 aapt/apksigner/zipalign 均通过。候选 `D:\EmbezzleStudio-Releases\v1.4.0-candidate\Embezzle-Studio-v1.4.0-candidate-release.apk` 为 97,518,039 字节，SHA-256 `683eb6e98efec3e301594e59c627b3698b410c2a58f841b3c3c3642b1a2a20ed`；包名/版本/code 为 `com.szdtzpj.embezzlestudio` / 1.4.0 / 10，min/target 24/36，`allowBackup=false`，无 CAMERA/悬浮窗，单一预期正式 signer、v2/v3 与 zipalign 通过。它尚未 push、tag、上传或发布，也没有连接真机或真实 OpenAI/MCP 账号验收；完整证据与外部边界见 [`1.4.0` 续作断点](./docs/CONTINUATION_CHECKPOINT_2026-07-12_V1.4.md)。
+`1.4.0` / code 10 的本机候选门已通过：41 个测试文件 / 749 个测试、TypeScript/ESLint、3,264-module Web export（7.4 MB）、Expo Doctor 20/20、390×844 本地拦截浏览器 MCP 批准/拒绝/取消、YAML/Bash/Action-SHA/diff/敏感边界、干净 Android prebuild/未签名 Release、正式证书本机签名及 aapt/apksigner/zipalign 均通过。本机候选 `D:\EmbezzleStudio-Releases\v1.4.0-candidate\Embezzle-Studio-v1.4.0-candidate-release.apk` 为 97,518,039 字节，SHA-256 `683eb6e98efec3e301594e59c627b3698b410c2a58f841b3c3c3642b1a2a20ed`；它是发布前证据，不是 GitHub 正式资产。
 
-当前仓库已经创建 `Settings -> Environments -> android-release`、把 deployment branch policy 限制为 `main`，并配置了下列五个 Environment secrets；以下表格和命令同时作为环境重建或密钥轮换手册。若仓库/组织方案支持 deployment protection rules，还应启用 required reviewers 和 `Prevent self-review`。[GitHub Environments 官方限制](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)说明：Free、Pro 或 Team 方案的 required reviewers 只可用于公开仓库；私有仓库的 Environment secrets 和 deployment branches/tags 至少需要 Pro/Team，保持私有并获得 required reviewers 则需要 Enterprise。个人私有仓库的直接 collaborator 也没有可降级的 read 角色；当前按维护者决定，`BlueOcean223` 保留为明确受信任的 write collaborator，并接受没有双人审批的剩余风险。不要把“仅允许 `main` + owner workflow gate”描述成等价的双人审批。
+PR [#15](https://github.com/szdtzpj/Embezzle-Studio/pull/15) 的精确 head 为 `1176df7964712078d58c5eade50d781a8245d52e`，合并提交、远端 `main` 与 annotated tag `v1.4.0` 的 peeled commit 均为 `f83cea7fae36fcbaa0bff361fac2113c3edfb3d7`。PR Quality [`29182946741`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29182946741)、`main` Quality [`29183001171`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183001171)、发布前 Pages [`29183001176`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183001176)、production Android [`29183097617`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183097617) 和发布后 Pages [`29183525831`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183525831) 均成功。正式 Release 是 stable Latest、immutable、非 prerelease，包含精确 3 个资产；Release attestation 与全部 3 个 asset attestation 均通过。
+
+Actions 正式 `Embezzle-Studio-v1.4.0-release.apk` 为 97,518,039 字节，SHA-256 `c650e142e221821f8da91e37fefd76dad0e7ad94c0348a3d7749b69f14fc67eb`，与同尺寸但 SHA-256 为 `683eb6e98efec3e301594e59c627b3698b410c2a58f841b3c3c3642b1a2a20ed` 的本机候选不是同一字节。正式 APK 的包名/版本/code 为 `com.szdtzpj.embezzlestudio` / 1.4.0 / 10，min/target 24/36，`allowBackup=false`，有意包含 `RECORD_AUDIO`，无 CAMERA/`SYSTEM_ALERT_WINDOW`；它只有一个 signer，证书 SHA-256 为 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`，v2/v3 与 zipalign 均通过。正式三项资产保存在 `D:\EmbezzleStudio-Releases\v1.4.0`。
+
+发布后 Pages manifest、`release.html`、APK HEAD 与完整 APK 下载均匿名返回 HTTP 200，清单、页面和公开 APK 与正式 Release 精确一致；完整公网验证保存在 `D:\EmbezzleStudio-Releases\v1.4.0-pages-public-verify-20260712-150424`。`adb devices -l` 仍为空，因此没有本次正式 Actions APK 的连接真机验收；真实 OpenAI/MCP、火山方舟和阿里百炼账号也仍待验收。完整证据与边界见 [`1.4.0` 续作断点](./docs/CONTINUATION_CHECKPOINT_2026-07-12_V1.4.md)。
+
+当前仓库是公开的个人账户仓库，已经创建 `Settings -> Environments -> android-release`、把 deployment branch policy 限制为 `main`，并配置了下列五个 Environment secrets；以下表格和命令同时作为环境重建或密钥轮换手册。个人账户仓库不能把 collaborator 提升为另一个 owner；`BlueOcean223` 已取得平台可提供的最高 collaborator 权限 `write`，并加入 main update ruleset 的 `pull_request` bypass，因此可在必需 Quality 检查通过后合并 PR。独立的 `Protect main` ruleset 仍无 bypass，并继续阻止直接更新、删除与 force-push；正式 tag 创建和生产签名仍只允许 owner。不要把 `BlueOcean223` 描述为 owner，也不要把这些规则描述成等价的双人审批。
 
 | Secret | 内容 |
 | --- | --- |
