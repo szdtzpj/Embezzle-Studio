@@ -15,6 +15,7 @@ import type {
   ChatConversation,
   ChatMessage,
   ChatTokenUsage,
+  ColorMode,
   CostEstimate,
   CostGuardSettings,
   MediaAttachment,
@@ -122,6 +123,7 @@ const LEGACY_WORKSPACE_BACKUPS: Partial<Record<(typeof LEGACY_WORKSPACE_KEYS)[nu
 const WORKSPACE_KEY = '@embezzle-studio/workspace-v6';
 const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v6.backup';
 const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v6';
+const COLOR_MODE_KEY = '@embezzle-studio/color-mode-v1';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
 const PLUGIN_SECRET_PREFIX = 'embezzle-studio.plugin-authorization';
 const BOUND_SECRET_SCHEMA_VERSION = 1;
@@ -375,6 +377,7 @@ function normalizeProvider(value: unknown, index: number): PersistedProvider {
     capabilities: normalizeCapabilities(value.capabilities, ['text', 'streaming']),
     models: [],
     ...(typeof value.notes === 'string' ? { notes: value.notes } : {}),
+    ...(typeof value.enabled === 'boolean' ? { enabled: value.enabled } : {}),
   };
   provider.models = arrayField(value.models, `providers[${index}].models`).map((model, modelIndex) =>
     normalizeModel(model, provider, `providers[${index}].models[${modelIndex}]`)
@@ -971,6 +974,15 @@ function normalizePlugins(
     }
     return normalized;
   });
+}
+
+export async function loadColorMode(): Promise<ColorMode> {
+  const value = await AsyncStorage.getItem(COLOR_MODE_KEY);
+  return value === 'light' || value === 'dark' || value === 'system' ? value : 'system';
+}
+
+export async function saveColorMode(colorMode: ColorMode): Promise<void> {
+  await AsyncStorage.setItem(COLOR_MODE_KEY, colorMode);
 }
 
 function normalizeModelCapabilities(provider: ProviderProfile, model: ModelInfo): ModelInfo {

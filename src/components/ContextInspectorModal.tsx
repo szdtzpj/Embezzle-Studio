@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useKelivoTheme, type KelivoTheme } from '../ui/theme';
+
 import type { ChatMessage, ProjectKnowledgeSource } from '../domain/types';
 import type { RequestContextInspection } from '../services/contextInspector';
 
@@ -21,18 +23,6 @@ interface ContextInspectorModalProps {
   onToggleMessagePinned: (messageId: string) => void;
   onToggleKnowledgeSource: (sourceId: string) => void;
 }
-
-const colors = {
-  background: '#F4F4F4',
-  surface: '#FFFFFF',
-  surfaceAlt: '#EAEAEA',
-  text: '#0D0D0D',
-  secondary: '#6E6E6E',
-  border: '#D9D9D9',
-  accent: '#0D0D0D',
-  warning: '#B45309',
-  warningBackground: '#FFF7ED',
-} as const;
 
 const pendingComposerMessageId = 'context-inspector-pending-user';
 const initialMessageRenderLimit = 200;
@@ -61,6 +51,10 @@ export function ContextInspectorModal({
   onToggleKnowledgeSource,
 }: ContextInspectorModalProps) {
   const insets = useSafeAreaInsets();
+  const theme = useKelivoTheme();
+  const styles = getStyles(theme);
+  const colors = themeColors(theme);
+
   const [messageRenderLimit, setMessageRenderLimit] = useState(initialMessageRenderLimit);
   const [knowledgeQuery, setKnowledgeQuery] = useState('');
   const included = new Set(inspection.includedMessageIds);
@@ -245,7 +239,7 @@ export function ContextInspectorModal({
                       (readOnly || isPendingComposerMessage) && styles.disabled,
                     ]}
                   >
-                    <Pin size={14} color={isPinned ? '#FFFFFF' : colors.secondary} strokeWidth={2.2} />
+                    <Pin size={14} color={isPinned ? colors.onAccent : colors.secondary} strokeWidth={2.2} />
                     <Text style={[styles.smallButtonText, isPinned && styles.smallButtonTextActive]}>置顶</Text>
                   </Pressable>
                   <Pressable
@@ -258,7 +252,7 @@ export function ContextInspectorModal({
                       (readOnly || isPendingComposerMessage) && styles.disabled,
                     ]}
                   >
-                    <EyeOff size={14} color={isExcluded ? '#FFFFFF' : colors.secondary} strokeWidth={2.2} />
+                    <EyeOff size={14} color={isExcluded ? colors.onAccent : colors.secondary} strokeWidth={2.2} />
                     <Text style={[styles.smallButtonText, isExcluded && styles.smallButtonTextActive]}>
                       {isExcluded ? '恢复' : '排除'}
                     </Text>
@@ -310,7 +304,7 @@ export function ContextInspectorModal({
                 style={[styles.knowledgeRow, selected && styles.knowledgeRowSelected, readOnly && styles.disabled]}
               >
                 <View style={[styles.checkBox, selected && styles.checkBoxSelected]}>
-                  {selected ? <Check size={13} color="#FFFFFF" strokeWidth={2.8} /> : null}
+                  {selected ? <Check size={13} color={colors.onAccent} strokeWidth={2.8} /> : null}
                 </View>
                 <BookOpen size={16} color={colors.secondary} strokeWidth={2} />
                 <View style={styles.knowledgeText}>
@@ -339,7 +333,7 @@ export function ContextInspectorModal({
               onPress={onSend}
               style={[styles.primaryButton, (!canSend || readOnly) && styles.disabled]}
             >
-              <Send size={16} color="#FFFFFF" strokeWidth={2.2} />
+              <Send size={16} color={colors.onAccent} strokeWidth={2.2} />
               <Text style={styles.primaryButtonText}>按此上下文发送</Text>
             </Pressable>
           ) : null}
@@ -349,7 +343,9 @@ export function ContextInspectorModal({
   );
 }
 
-const styles = StyleSheet.create({
+function createStyles(theme: KelivoTheme) {
+  const colors = themeColors(theme);
+  return StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.background },
   header: { minHeight: 64, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   headerText: { flex: 1, gap: 2 },
@@ -385,7 +381,7 @@ const styles = StyleSheet.create({
   smallButton: { minHeight: 32, paddingHorizontal: 10, borderRadius: 10, backgroundColor: colors.surfaceAlt, flexDirection: 'row', alignItems: 'center', gap: 5 },
   smallButtonActive: { backgroundColor: colors.accent },
   smallButtonText: { color: colors.secondary, fontSize: 12, fontWeight: '600' },
-  smallButtonTextActive: { color: '#FFFFFF' },
+  smallButtonTextActive: { color: colors.onAccent },
   knowledgeRow: { minHeight: 56, padding: 12, borderRadius: 14, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center', gap: 9 },
   knowledgeRowSelected: { borderColor: colors.accent },
   checkBox: { width: 20, height: 20, borderRadius: 6, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
@@ -402,6 +398,38 @@ const styles = StyleSheet.create({
   secondaryButton: { flex: 1, minHeight: 46, borderRadius: 14, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
   secondaryButtonText: { color: colors.text, fontWeight: '700' },
   primaryButton: { flex: 1.4, minHeight: 46, borderRadius: 14, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 },
-  primaryButtonText: { color: '#FFFFFF', fontWeight: '700' },
+  primaryButtonText: { color: colors.onAccent, fontWeight: '700' },
   disabled: { opacity: 0.45 },
-});
+  });
+}
+
+const styleCache = new WeakMap<KelivoTheme, ReturnType<typeof createStyles>>();
+
+function getStyles(theme: KelivoTheme) {
+  let styles = styleCache.get(theme);
+  if (!styles) {
+    styles = createStyles(theme);
+    styleCache.set(theme, styles);
+  }
+  return styles;
+}
+
+function themeColors(theme: KelivoTheme) {
+  return {
+    background: theme.colors.surface,
+    surface: theme.colors.card,
+    surfaceAlt: theme.colors.surfaceAlt,
+    surfaceStrong: theme.colors.surfaceSunken,
+    text: theme.colors.text,
+    secondary: theme.colors.textSecondary,
+    border: theme.colors.outline,
+    accent: theme.colors.primary,
+    danger: theme.colors.error,
+    dangerBackground: theme.colors.errorContainer,
+    warning: theme.colors.warning,
+    warningBackground: theme.colors.warningContainer,
+    onAccent: theme.colors.onPrimary,
+    codeBg: theme.dark ? '#0E1015' : '#161616',
+    codeText: theme.dark ? '#E5E7EF' : '#F2F2F2',
+  } as const;
+}

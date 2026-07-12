@@ -36,7 +36,8 @@ describe('Android mobile UI regressions', () => {
 
     expect(appSource).toContain('const candidateModelPageSize = 60;');
     expect(appSource).toContain('filteredModelCandidates.slice(0, candidateModelRenderLimit)');
-    expect(appSource).toContain('{settingsMounted ? (');
+    expect(appSource).toContain('{settingsMounted && activeProvider ? (');
+    expect(appSource).toContain('<SettingsScreen');
     expect(appSource).toContain('style={[styles.screenPane, settingsOpen && styles.screenPaneHidden]}');
     expect(appSource).toContain('Keyboard.dismiss();');
     expect(appSource).toMatch(
@@ -199,7 +200,10 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('keeps provider setup and cost limits user-funded, local, and confirmed before requests', async () => {
-    const appSource = await source('App.tsx');
+    const [appSource, providerDetailSource] = await Promise.all([
+      source('App.tsx'),
+      source('src/ui/screens/settings/ProviderDetailScreen.tsx'),
+    ]);
     const sendSource = appSource.slice(
       appSource.indexOf('async function sendMessage'),
       appSource.indexOf('function toggleSettingsScreen')
@@ -209,11 +213,14 @@ describe('Android mobile UI regressions', () => {
       appSource.indexOf('function toggleReasoning')
     );
 
-    expect(appSource).toContain('testID="provider-setup-wizard-card"');
-    expect(appSource).toContain('testID="model-capability-matrix-card"');
+    expect(providerDetailSource).toContain('testID="provider-setup-wizard-card"');
+    expect(providerDetailSource).toContain('testID="model-capability-tags-card"');
+    expect(providerDetailSource).toContain('不会使用 Embezzle Studio 的额度或服务器');
+    const tagSource = await source('src/ui/utils/modelDisplay.ts');
+    expect(tagSource).toContain('export function modelCapabilityTags');
+    expect(tagSource).toContain("'image-input': '视觉'");
     expect(appSource).toContain('testID="cost-guard-settings-card"');
     expect(appSource).toContain('Free / Trial 字样 ≠ 免费额度');
-    expect(appSource).toContain('不会使用 Embezzle Studio 的额度或服务器');
     expect(appSource).toContain('providerKeyBindingFingerprint !== finalFingerprint');
     expect(sendSource.indexOf('authorizeProviderRequestPlan')).toBeGreaterThan(-1);
     expect(sendSource.indexOf('authorizeProviderRequestPlan')).toBeLessThan(
@@ -311,27 +318,29 @@ describe('Android mobile UI regressions', () => {
     expect(overflowActionsSource).toContain('onPress={onEdit}');
   });
 
-  it('clears task-incompatible model references without invalidating project media defaults', async () => {
+  it('clears removed model references from comparison, voice, and reasoning prefs', async () => {
+    // Settings redesign no longer exposes in-place model task/capability overrides.
+    // Reference cleanup still happens when a model is removed from a provider.
     const appSource = await source('App.tsx');
-    const updateModelSource = appSource.slice(
-      appSource.indexOf('function updateActiveModel('),
-      appSource.indexOf('function setActiveModelTask(')
+    const removeModelSource = appSource.slice(
+      appSource.indexOf('function removeModel('),
+      appSource.indexOf('async function refreshModels(')
     );
 
-    expect(updateModelSource).toContain("const comparisonTargets = nextTask === 'chat'");
-    expect(updateModelSource).toContain(
-      'current.comparisonTargets.filter((target) => !matchesTarget(target))'
+    expect(removeModelSource).toContain(
+      'const comparisonTargets = current.comparisonTargets.filter('
     );
-    expect(updateModelSource).toContain('delete voice.transcriptionTarget');
-    expect(updateModelSource).toContain('delete voice.speechTarget');
-    expect(updateModelSource).toContain(
-      'delete reasoningEffortByModel[`${provider.id}:${model.id}`]'
+    expect(removeModelSource).toContain('delete voice.transcriptionTarget');
+    expect(removeModelSource).toContain('delete voice.speechTarget');
+    expect(removeModelSource).toContain(
+      'delete reasoningEffortByModel[`${activeProvider.id}:${modelId}`]'
     );
-    expect(updateModelSource).toContain(
+    expect(removeModelSource).toContain(
       'comparisonEnabled: current.comparisonEnabled && comparisonTargets.length >= 2'
     );
-    expect(updateModelSource).not.toContain('defaultTarget');
-    expect(updateModelSource).not.toContain('projects:');
+    // Removing a model may clear a project default that pointed at it.
+    expect(removeModelSource).toContain('defaultTarget');
+    expect(removeModelSource).toContain('projects:');
   });
 
   it('keeps request-based voice Android-only and disables background audio services', async () => {
