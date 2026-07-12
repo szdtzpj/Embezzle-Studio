@@ -25,35 +25,67 @@ export type DialogRequest = ConfirmDialogRequest | NoticeDialogRequest;
 type DialogListener = (request: DialogRequest | null) => void;
 
 let listener: DialogListener | null = null;
-let pending: DialogRequest | null = null;
+let active: DialogRequest | null = null;
+const queue: DialogRequest[] = [];
+
+function settleWithoutHost(request: DialogRequest): void {
+  if (request.kind === 'confirm') {
+    request.resolve(false);
+  } else {
+    request.resolve();
+  }
+}
+
+function presentNext(): void {
+  if (!listener || active) {
+    return;
+  }
+  active = queue.shift() ?? null;
+  if (active) {
+    listener(active);
+  }
+}
+
+function finish(request: DialogRequest): void {
+  if (active === request) {
+    active = null;
+    listener?.(null);
+    presentNext();
+    return;
+  }
+
+  const queuedIndex = queue.indexOf(request);
+  if (queuedIndex >= 0) {
+    queue.splice(queuedIndex, 1);
+  }
+}
 
 export function bindAppDialogHost(next: DialogListener | null): void {
   listener = next;
-  if (listener && pending) {
-    listener(pending);
-  }
-}
-
-function present(request: DialogRequest): void {
-  pending = request;
-  if (!listener) {
-    // Host not mounted yet — fail closed for confirms, no-op for notices.
-    if (request.kind === 'confirm') {
-      request.resolve(false);
+  if (listener) {
+    if (active) {
+      listener(active);
     } else {
-      request.resolve();
+      presentNext();
     }
-    pending = null;
     return;
   }
-  listener(request);
+
+  // A disappearing host must never leave a destructive confirmation or a
+  // queued notice unresolved. Confirmations fail closed; notices complete.
+  const abandoned = [...(active ? [active] : []), ...queue];
+  active = null;
+  queue.length = 0;
+  abandoned.forEach(settleWithoutHost);
 }
 
-function clear(request: DialogRequest): void {
-  if (pending === request) {
-    pending = null;
-    listener?.(null);
+function enqueue(request: DialogRequest): void {
+  if (!listener) {
+    settleWithoutHost(request);
+    return;
   }
+  queue.push(request);
+  presentNext();
 }
 
 export function requestConfirm(options: {
@@ -65,6 +97,7 @@ export function requestConfirm(options: {
   tone?: DialogTone;
 }): Promise<boolean> {
   return new Promise((resolve) => {
+    let settled = false;
     const request: ConfirmDialogRequest = {
       kind: 'confirm',
       title: options.title,
@@ -74,11 +107,15 @@ export function requestConfirm(options: {
       cancelLabel: options.cancelLabel,
       tone: options.tone ?? 'danger',
       resolve: (confirmed) => {
-        clear(request);
+        if (settled) {
+          return;
+        }
+        settled = true;
+        finish(request);
         resolve(confirmed);
       },
     };
-    present(request);
+    enqueue(request);
   });
 }
 
@@ -89,6 +126,7 @@ export function requestNotice(options: {
   tone?: DialogTone;
 }): Promise<void> {
   return new Promise((resolve) => {
+    let settled = false;
     const request: NoticeDialogRequest = {
       kind: 'notice',
       title: options.title,
@@ -96,10 +134,14 @@ export function requestNotice(options: {
       buttonLabel: options.buttonLabel,
       tone: options.tone ?? 'primary',
       resolve: () => {
-        clear(request);
+        if (settled) {
+          return;
+        }
+        settled = true;
+        finish(request);
         resolve();
       },
     };
-    present(request);
+    enqueue(request);
   });
 }

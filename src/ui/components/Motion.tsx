@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import type { StyleProp, ViewStyle } from 'react-native';
-import { StyleSheet, View } from 'react-native';
+import { Platform, StyleSheet, View } from 'react-native';
 import { MotiView } from 'moti';
 import Reanimated, {
   Easing,
@@ -44,6 +44,24 @@ export interface MotionSwitchProps {
 
 /** Replaces full-page or full-panel content and glides the new view into place. */
 export function MotionSwitch({
+  ...props
+}: MotionSwitchProps) {
+  if (Platform.OS === 'android') {
+    return <StaticMotionSwitch {...props} />;
+  }
+
+  return <AnimatedMotionSwitch {...props} />;
+}
+
+function StaticMotionSwitch({ children, style, contentStyle }: MotionSwitchProps) {
+  return (
+    <View style={[styles.switchRoot, style]}>
+      <View style={[styles.switchContent, contentStyle]}>{children}</View>
+    </View>
+  );
+}
+
+function AnimatedMotionSwitch({
   motionKey,
   children,
   direction = 'forward',
@@ -89,6 +107,16 @@ export interface MotionItemProps {
 
 /** Mount animation with a capped stagger, suitable for cards and list rows. */
 export function MotionItem({
+  ...props
+}: MotionItemProps) {
+  if (Platform.OS === 'android') {
+    return <View style={props.style}>{props.children}</View>;
+  }
+
+  return <AnimatedMotionItem {...props} />;
+}
+
+function AnimatedMotionItem({
   children,
   index = 0,
   delay = 0,
@@ -132,6 +160,16 @@ export interface MotionPresenceProps {
 
 /** Keeps conditional content mounted until its exit animation has completed. */
 export function MotionPresence({
+  ...props
+}: MotionPresenceProps) {
+  if (Platform.OS === 'android') {
+    return props.visible ? <View style={props.style}>{props.children}</View> : null;
+  }
+
+  return <AnimatedMotionPresence {...props} />;
+}
+
+function AnimatedMotionPresence({
   visible,
   children,
   direction = 'up',
@@ -217,6 +255,20 @@ export interface MotionSwapProps {
 
 /** Animates compact state changes such as checks, icons, and trailing actions. */
 export function MotionSwap({
+  ...props
+}: MotionSwapProps) {
+  if (Platform.OS === 'android') {
+    return (
+      <View style={[styles.swapRoot, props.style]}>
+        <View style={props.contentStyle}>{props.children}</View>
+      </View>
+    );
+  }
+
+  return <AnimatedMotionSwap {...props} />;
+}
+
+function AnimatedMotionSwap({
   motionKey,
   children,
   style,

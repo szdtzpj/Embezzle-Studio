@@ -70,8 +70,8 @@ export const defaultProviders: ProviderProfile[] = [
 
 const defaultProviderIds = new Set(defaultProviders.map((provider) => provider.id));
 
-export function isUserCreatedProvider(provider: Pick<ProviderProfile, 'id' | 'kind'>): boolean {
-  return provider.kind === 'custom' && !defaultProviderIds.has(provider.id);
+export function isUserCreatedProvider(provider: Pick<ProviderProfile, 'id'>): boolean {
+  return !defaultProviderIds.has(provider.id);
 }
 
 export function createDefaultWorkspace(): AppWorkspace {

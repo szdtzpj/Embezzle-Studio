@@ -136,7 +136,7 @@ export function ProviderListScreen({
             const enabled = provider.enabled ?? true;
             const isLast = index === filtered.length - 1;
             const canDelete = isUserCreatedProvider(provider);
-            const navigationDisabled = readOnly && provider.id !== activeProviderId;
+            const navigationDisabled = !enabled || (readOnly && provider.id !== activeProviderId);
             const providerIdentity = (
               <View style={styles.rowMainInner}>
                 <View style={styles.avatarSlot}>

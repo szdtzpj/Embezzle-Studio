@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   Boxes,
@@ -26,12 +26,22 @@ import { MotionItem, MotionPresence, MotionSwap, MotionSwitch } from '../../comp
 import { SettingsSelect } from '../../components/settings/SettingsSelect';
 import { useKelivoTheme, type KelivoTheme } from '../../theme';
 import type {
+  Capability,
   ModelInfo,
+  ModelTask,
   ProviderKind,
   ProviderProfile,
 } from '../../../domain/types';
-import type { ModelCapabilityFilter } from '../../../services/modelCapabilities';
+import {
+  inferModelTask,
+  type ModelCapabilityFilter,
+} from '../../../services/modelCapabilities';
 import type { ProviderEndpointInspection } from '../../../services/providerSetup';
+import {
+  configurableModelCapabilities,
+  configurableModelTasks,
+  modelTaskLabel,
+} from '../../utils/modelDisplay';
 
 const providerKindOptions: Array<{ key: ProviderKind; label: string }> = [
   { key: 'volcengine-ark', label: '火山方舟' },
@@ -44,6 +54,7 @@ export interface ProviderDetailScreenProps {
   readOnly: boolean;
   provider: ProviderProfile;
   activeModelId: string;
+  activeModel: ModelInfo | undefined;
   addedModels: ModelInfo[];
   addedModelIds: Set<string>;
   modelCandidates: ModelInfo[];
@@ -76,6 +87,8 @@ export interface ProviderDetailScreenProps {
   onAddManualModel: () => void;
   onSelectModel: (modelId: string) => void;
   onRemoveModel: (modelId: string) => void;
+  onSetActiveModelTask: (task: ModelTask) => void;
+  onToggleActiveModelCapability: (capability: Capability) => void;
   onLoadMoreCandidates?: () => void;
   onDeleteProvider?: () => void;
 }
@@ -84,6 +97,7 @@ export function ProviderDetailScreen({
   readOnly,
   provider,
   activeModelId,
+  activeModel,
   addedModels,
   addedModelIds,
   modelCandidates,
@@ -115,6 +129,8 @@ export function ProviderDetailScreen({
   onAddManualModel,
   onSelectModel,
   onRemoveModel,
+  onSetActiveModelTask,
+  onToggleActiveModelCapability,
   onLoadMoreCandidates,
   onDeleteProvider,
 }: ProviderDetailScreenProps) {
@@ -124,6 +140,12 @@ export function ProviderDetailScreen({
   const [tabDirection, setTabDirection] =
     useState<'forward' | 'backward' | 'none'>('none');
   const [showKey, setShowKey] = useState(false);
+
+  useEffect(() => {
+    setTab('config');
+    setTabDirection('none');
+    setShowKey(false);
+  }, [provider.id]);
 
   const selectTab = (nextTab: 'config' | 'models') => {
     if (nextTab === tab) {
@@ -136,7 +158,12 @@ export function ProviderDetailScreen({
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <AnimatedPressable accessibilityRole="button" onPress={onBack} style={styles.headerButton}>
+        <AnimatedPressable
+          accessibilityRole="button"
+          accessibilityLabel="返回服务商列表"
+          onPress={onBack}
+          style={styles.headerButton}
+        >
           <ArrowLeft size={22} color={theme.colors.text} strokeWidth={2.2} />
         </AnimatedPressable>
         <View style={styles.headerTitleBlock}>
@@ -152,6 +179,7 @@ export function ProviderDetailScreen({
           {onDeleteProvider ? (
             <AnimatedPressable
               accessibilityRole="button"
+              accessibilityLabel={`删除服务商 ${provider.name}`}
               accessibilityState={{ disabled: readOnly }}
               disabled={readOnly}
               onPress={onDeleteProvider}
@@ -202,9 +230,11 @@ export function ProviderDetailScreen({
           />
         ) : (
           <ModelsTab
+            key={provider.id}
             readOnly={readOnly}
             providerName={provider.name}
             activeModelId={activeModelId}
+            activeModel={activeModel}
             addedModels={addedModels}
             addedModelIds={addedModelIds}
             modelCandidates={modelCandidates}
@@ -225,6 +255,8 @@ export function ProviderDetailScreen({
             onAddManualModel={onAddManualModel}
             onSelectModel={onSelectModel}
             onRemoveModel={onRemoveModel}
+            onSetActiveModelTask={onSetActiveModelTask}
+            onToggleActiveModelCapability={onToggleActiveModelCapability}
             onLoadMoreCandidates={onLoadMoreCandidates}
           />
         )}
@@ -265,6 +297,8 @@ function TabButton({
   return (
     <AnimatedPressable
       accessibilityRole="button"
+      accessibilityLabel={`${label}选项卡`}
+      accessibilityState={{ selected: active }}
       onPress={onPress}
       haptic="selection"
       style={styles.tabButton}
@@ -392,6 +426,7 @@ function ConfigTab({
               />
               <AnimatedPressable
                 accessibilityRole="button"
+                accessibilityLabel={showKey ? '隐藏 API Key' : '显示 API Key'}
                 accessibilityState={{ disabled: readOnly }}
                 disabled={readOnly}
                 onPress={onToggleShowKey}
@@ -454,6 +489,7 @@ function ModelsTab({
   readOnly,
   providerName,
   activeModelId,
+  activeModel,
   addedModels,
   addedModelIds,
   modelCandidates,
@@ -474,11 +510,14 @@ function ModelsTab({
   onRefreshModels,
   onSelectModel,
   onRemoveModel,
+  onSetActiveModelTask,
+  onToggleActiveModelCapability,
   onLoadMoreCandidates,
 }: {
   readOnly: boolean;
   providerName: string;
   activeModelId: string;
+  activeModel: ModelInfo | undefined;
   addedModels: ModelInfo[];
   addedModelIds: Set<string>;
   modelCandidates: ModelInfo[];
@@ -499,6 +538,8 @@ function ModelsTab({
   onRefreshModels: () => void;
   onSelectModel: (modelId: string) => void;
   onRemoveModel: (modelId: string) => void;
+  onSetActiveModelTask: (task: ModelTask) => void;
+  onToggleActiveModelCapability: (capability: Capability) => void;
   onLoadMoreCandidates?: () => void;
 }) {
   const theme = useKelivoTheme();
@@ -567,6 +608,94 @@ function ModelsTab({
                 </MotionItem>
               ))}
             </View>
+            {activeModel ? (
+              <View style={styles.modelOverridePanel} testID="active-model-overrides-card">
+                <View style={styles.modelOverrideHeader}>
+                  <View style={styles.modelOverrideTitleBlock}>
+                    <Text style={styles.modelOverrideTitle}>当前模型覆盖</Text>
+                    <Text style={styles.modelOverrideModel} numberOfLines={1}>
+                      {activeModel.name?.trim() || activeModel.id}
+                    </Text>
+                  </View>
+                  <Text style={styles.modelOverrideBadge}>仅影响此模型</Text>
+                </View>
+
+                <View style={styles.overrideGroup}>
+                  <Text style={styles.overrideLabel}>模型用途</Text>
+                  <View style={styles.optionGrid}>
+                    {configurableModelTasks.map((task) => {
+                      const selected = inferModelTask(activeModel) === task;
+                      const label = modelTaskLabel[task];
+                      return (
+                        <AnimatedPressable
+                          key={task}
+                          accessibilityRole="radio"
+                          accessibilityLabel={`将 ${activeModel.id} 的用途设为${label}`}
+                          accessibilityState={{ selected, disabled: readOnly }}
+                          disabled={readOnly}
+                          testID={`active-model-task-${task}`}
+                          haptic="selection"
+                          onPress={() => onSetActiveModelTask(task)}
+                          style={[
+                            styles.overrideChip,
+                            selected && styles.overrideChipActive,
+                            readOnly && styles.buttonDisabled,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.overrideChipText,
+                              selected && styles.overrideChipTextActive,
+                            ]}
+                          >
+                            {label}
+                          </Text>
+                        </AnimatedPressable>
+                      );
+                    })}
+                  </View>
+                </View>
+
+                <View style={styles.overrideGroup}>
+                  <Text style={styles.overrideLabel}>能力覆盖</Text>
+                  <View style={styles.optionGrid}>
+                    {configurableModelCapabilities.map((capability) => {
+                      const selected = activeModel.capabilities.includes(capability.key);
+                      return (
+                        <AnimatedPressable
+                          key={capability.key}
+                          accessibilityRole="checkbox"
+                          accessibilityLabel={`${activeModel.id} ${capability.label}`}
+                          accessibilityState={{ checked: selected, disabled: readOnly }}
+                          disabled={readOnly}
+                          testID={`active-model-capability-${capability.key}`}
+                          haptic="selection"
+                          onPress={() => onToggleActiveModelCapability(capability.key)}
+                          style={[
+                            styles.overrideChip,
+                            selected && styles.overrideChipActive,
+                            readOnly && styles.buttonDisabled,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.overrideChipText,
+                              selected && styles.overrideChipTextActive,
+                            ]}
+                          >
+                            {capability.label}
+                          </Text>
+                        </AnimatedPressable>
+                      );
+                    })}
+                  </View>
+                </View>
+
+                <Text style={styles.modelOverrideHint}>
+                  当目录自动识别不准确时可手动覆盖；用途决定对应的专用入口，能力决定附件、工具与思考选项。
+                </Text>
+              </View>
+            ) : null}
           </View>
         ) : null}
 
@@ -576,6 +705,7 @@ function ModelsTab({
               <Text style={styles.sectionLabel}>可添加模型</Text>
               <AnimatedPressable
                 accessibilityRole="button"
+                accessibilityLabel="清空候选模型"
                 accessibilityState={{ disabled: readOnly }}
                 disabled={readOnly}
                 onPress={onClearCandidates}
@@ -600,6 +730,7 @@ function ModelsTab({
               {modelSearchQuery ? (
                 <AnimatedPressable
                   accessibilityRole="button"
+                  accessibilityLabel="清空模型搜索"
                   onPress={() => onSetModelSearchQuery('')}
                   style={styles.clearButton}
                 >
@@ -698,6 +829,7 @@ function ModelsTab({
         />
         <AnimatedPressable
           accessibilityRole="button"
+          accessibilityLabel="添加手动模型"
           accessibilityState={{ disabled: readOnly }}
           disabled={readOnly}
           onPress={handleAddManual}
@@ -721,6 +853,7 @@ function ModelsTab({
         </AnimatedPressable>
         <AnimatedPressable
           accessibilityRole="button"
+          accessibilityLabel={showManualInput ? '收起手动添加模型' : '手动添加模型'}
           accessibilityState={{ disabled: readOnly }}
           disabled={readOnly}
           onPress={() => setShowManualInput((v) => !v)}
@@ -731,6 +864,8 @@ function ModelsTab({
         </AnimatedPressable>
         <AnimatedPressable
           accessibilityRole="button"
+          accessibilityLabel={`删除已选模型，共 ${selectedIds.size} 个`}
+          accessibilityState={{ disabled: readOnly || selectedIds.size === 0 }}
           disabled={readOnly || selectedIds.size === 0}
           onPress={handleDelete}
           style={[
@@ -949,6 +1084,79 @@ function createStyles(theme: KelivoTheme) {
   },
   listGap: {
     gap: 8,
+  },
+  modelOverridePanel: {
+    gap: 14,
+    marginTop: 2,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: theme.colors.divider,
+  },
+  modelOverrideHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  modelOverrideTitleBlock: {
+    flex: 1,
+    gap: 2,
+  },
+  modelOverrideTitle: {
+    color: theme.colors.text,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  modelOverrideModel: {
+    color: theme.colors.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  modelOverrideBadge: {
+    color: theme.colors.accentText,
+    backgroundColor: theme.colors.accentSoft,
+    borderRadius: theme.radius.pill,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    fontSize: 11,
+    fontWeight: '600',
+    overflow: 'hidden',
+  },
+  overrideGroup: {
+    gap: 8,
+  },
+  overrideLabel: {
+    color: theme.colors.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  overrideChip: {
+    minHeight: 34,
+    paddingHorizontal: 13,
+    paddingVertical: 7,
+    borderRadius: theme.radius.pill,
+    borderWidth: 1,
+    borderColor: theme.colors.outline,
+    backgroundColor: theme.colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  overrideChipActive: {
+    borderColor: theme.colors.accentBorder,
+    backgroundColor: theme.colors.accentSoft,
+  },
+  overrideChipText: {
+    color: theme.colors.textSecondary,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  overrideChipTextActive: {
+    color: theme.colors.accentText,
+  },
+  modelOverrideHint: {
+    color: theme.colors.textTertiary,
+    fontSize: 12,
+    lineHeight: 18,
   },
   cardHeader: {
     flexDirection: 'row',

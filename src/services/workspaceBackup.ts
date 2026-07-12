@@ -431,7 +431,7 @@ function validateProvider(value: unknown, path: string): string {
   requireExactKeysWithOptional(
     provider,
     ['id', 'name', 'kind', 'baseUrl', 'capabilities', 'models'],
-    ['notes'],
+    ['notes', 'enabled'],
     path
   );
   const id = requireLegacyId(provider.id, `${path}.id`);
@@ -450,6 +450,9 @@ function validateProvider(value: unknown, path: string): string {
   }
   validateEnumArray(provider.capabilities, capabilities, `${path}.capabilities`);
   requireOptionalString(provider.notes, `${path}.notes`);
+  if (provider.enabled !== undefined) {
+    requireBoolean(provider.enabled, `${path}.enabled`);
+  }
   const models = requireArray(provider.models, `${path}.models`, 10_000);
   const modelIds = new Set<string>();
   models.forEach((model, index) => {
@@ -1369,6 +1372,7 @@ function sanitizeProvider(provider: ProviderProfile): BackupProvider {
     baseUrl: requireSafeProviderBaseUrlForBackup(provider.baseUrl),
     capabilities: [...provider.capabilities],
     models: provider.models.map(sanitizeModel),
+    enabled: provider.enabled !== false,
     ...(provider.notes !== undefined ? { notes: provider.notes } : {}),
   };
 }
@@ -1799,11 +1803,34 @@ function mergeImportedWorkspace(
         : undefined;
     return {
       ...provider,
+      enabled: provider.enabled !== false,
       models: provider.models.map(sanitizeModel),
       capabilities: [...provider.capabilities],
       ...(apiKey !== undefined ? { apiKey } : {}),
     };
   });
+  const recoveredFromAllProvidersDisabled = !providers.some(
+    (provider) => provider.enabled !== false
+  );
+  if (recoveredFromAllProvidersDisabled) {
+    providers[0] = { ...providers[0], enabled: true };
+  }
+  const enabledProviderTarget = (target: ModelTargetRef | undefined): target is ModelTargetRef => {
+    if (!target) {
+      return false;
+    }
+    const provider = providers.find((candidate) => candidate.id === target.providerId);
+    return Boolean(
+      provider &&
+      provider.enabled !== false &&
+      provider.models.some((model) => model.id === target.modelId)
+    );
+  };
+  const activeProviderId = providers.some(
+    (provider) => provider.id === imported.activeProviderId && provider.enabled !== false
+  )
+    ? imported.activeProviderId
+    : providers.find((provider) => provider.enabled !== false)!.id;
   const currentPlugins = new Map(
     currentWorkspace.plugins.map((plugin) => [plugin.id, plugin] as const)
   );
@@ -1865,7 +1892,9 @@ function mergeImportedWorkspace(
   const projects: WorkspaceProject[] = imported.projects?.length
     ? imported.projects.map((project) => ({
         ...project,
-        ...(project.defaultTarget ? { defaultTarget: { ...project.defaultTarget } } : {}),
+        ...(enabledProviderTarget(project.defaultTarget)
+          ? { defaultTarget: { ...project.defaultTarget } }
+          : { defaultTarget: undefined }),
       }))
     : [{
         id: 'project-default',
@@ -1894,9 +1923,18 @@ function mergeImportedWorkspace(
   const activeConversation = conversations.find(
     (conversation) => conversation.id === imported.activeConversationId
   )!;
+  const comparisonTargets = imported.comparisonTargets
+    .filter(enabledProviderTarget)
+    .map((target) => ({ ...target }));
+  const transcriptionTarget = enabledProviderTarget(imported.voice.transcriptionTarget)
+    ? { ...imported.voice.transcriptionTarget }
+    : undefined;
+  const speechTarget = enabledProviderTarget(imported.voice.speechTarget)
+    ? { ...imported.voice.speechTarget }
+    : undefined;
   return {
     providers,
-    activeProviderId: imported.activeProviderId,
+    activeProviderId,
     activeModelIdByProvider: { ...imported.activeModelIdByProvider },
     reasoningEffortByModel: { ...imported.reasoningEffortByModel },
     parameterSettings: { ...imported.parameterSettings },
@@ -1915,8 +1953,8 @@ function mergeImportedWorkspace(
     messages: activeConversation.messages,
     plugins,
     promptTemplates: imported.promptTemplates.map((template) => ({ ...template })),
-    comparisonEnabled: imported.comparisonEnabled,
-    comparisonTargets: imported.comparisonTargets.map((target) => ({ ...target })),
+    comparisonEnabled: imported.comparisonEnabled && comparisonTargets.length >= 2,
+    comparisonTargets,
     modelPricing: imported.modelPricing.map((pricing) => ({ ...pricing })),
     costGuard: { ...(imported.costGuard ?? defaultCostGuardSettings) },
     providerUsageEvents: currentWorkspace.providerUsageEvents.map((event) => ({
@@ -1924,10 +1962,13 @@ function mergeImportedWorkspace(
       unknownCostComponents: [...event.unknownCostComponents],
       ...(event.knownCostEstimate ? { knownCostEstimate: { ...event.knownCostEstimate } } : {}),
     })),
-    webSearch: { ...imported.webSearch },
+    webSearch: {
+      ...imported.webSearch,
+      enabled: recoveredFromAllProvidersDisabled ? false : imported.webSearch.enabled,
+    },
     voice: {
-      ...(imported.voice.transcriptionTarget ? { transcriptionTarget: { ...imported.voice.transcriptionTarget } } : {}),
-      ...(imported.voice.speechTarget ? { speechTarget: { ...imported.voice.speechTarget } } : {}),
+      ...(transcriptionTarget ? { transcriptionTarget } : {}),
+      ...(speechTarget ? { speechTarget } : {}),
       speechVoice: imported.voice.speechVoice,
       speechFormat: imported.voice.speechFormat,
     },

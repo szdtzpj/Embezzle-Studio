@@ -67,7 +67,47 @@ const PRESS_IN_CONFIG = { duration: 70, easing: ReanimatedEasing.out(ReanimatedE
 const PRESS_OUT_SPRING = { damping: 17, stiffness: 340, mass: 0.5 } as const;
 const DISABLED_FADE = { duration: 160, easing: ReanimatedEasing.out(ReanimatedEasing.quad) } as const;
 
-export function AnimatedPressable({
+export function AnimatedPressable(props: AnimatedPressableProps) {
+  if (Platform.OS === 'android') {
+    return <AndroidPressable {...props} />;
+  }
+
+  return <AnimatedPressableImpl {...props} />;
+}
+
+function AndroidPressable({
+  style,
+  children,
+  onPressIn,
+  onPressOut,
+  disabled,
+  haptic = 'light',
+  pressScale: _pressScale,
+  pressOpacity: _pressOpacity,
+  pressTranslateY: _pressTranslateY,
+  ...rest
+}: AnimatedPressableProps) {
+  return (
+    <Pressable
+      {...rest}
+      disabled={disabled}
+      onPressIn={(event) => {
+        if (!disabled) {
+          triggerHaptic(haptic);
+        }
+        onPressIn?.(event);
+      }}
+      onPressOut={onPressOut}
+      style={[style, disabled ? androidDisabledStyle : undefined]}
+    >
+      {children}
+    </Pressable>
+  );
+}
+
+const androidDisabledStyle: ViewStyle = { opacity: 0.5 };
+
+function AnimatedPressableImpl({
   style,
   children,
   onPressIn,

@@ -967,6 +967,7 @@ function normalizePlugins(
       (
         !getRemoteMcpExecutableReadiness(normalized, providerIds).executable ||
         !providerId ||
+        providersById.get(providerId)?.enabled === false ||
         !isExactOfficialOpenAiProvider(providersById.get(providerId)!)
       )
     ) {
@@ -1102,7 +1103,12 @@ function normalizeModelTarget(
   const providerId = nonEmptyString(value.providerId);
   const modelId = nonEmptyString(value.modelId);
   const provider = providers.find((candidate) => candidate.id === providerId);
-  if (!provider || !modelId || !provider.models.some((model) => model.id === modelId)) {
+  if (
+    !provider ||
+    provider.enabled === false ||
+    !modelId ||
+    !provider.models.some((model) => model.id === modelId)
+  ) {
     return undefined;
   }
   return { providerId: provider.id, modelId };
@@ -1720,6 +1726,12 @@ function normalizeWorkspace(snapshot: Record<string, unknown>, providers: Provid
     modelCandidatesByProvider[provider.id] = retainedCandidates;
     return { ...provider, models: addedModels };
   });
+  const recoveredFromAllProvidersDisabled = !normalizedProviders.some(
+    (provider) => provider.enabled !== false
+  );
+  if (recoveredFromAllProvidersDisabled) {
+    normalizedProviders[0] = { ...normalizedProviders[0], enabled: true };
+  }
   const projects = normalizeProjects(snapshot.projects, normalizedProviders, now);
   const structuredConversations = normalizeConversationStructure(normalizeConversations(snapshot, now), projects);
   const artifacts = normalizeArtifacts(snapshot.artifacts, projects, structuredConversations, now);
@@ -1738,10 +1750,16 @@ function normalizeWorkspace(snapshot: Record<string, unknown>, providers: Provid
   const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId)!;
   const activeProjectId = activeConversation.projectId ?? projects[0].id;
   const requestedProviderId = nonEmptyString(snapshot.activeProviderId);
-  const activeProviderId = normalizedProviders.some((provider) => provider.id === requestedProviderId)
-    ? requestedProviderId!
-    : normalizedProviders[0].id;
-  const comparisonTargets = normalizeComparisonTargets(snapshot.comparisonTargets, normalizedProviders);
+  const requestedProvider = normalizedProviders.find(
+    (provider) => provider.id === requestedProviderId && provider.enabled !== false
+  );
+  const activeProviderId = requestedProvider?.id
+    ?? normalizedProviders.find((provider) => provider.enabled !== false)!.id;
+  const comparisonTargets = normalizeComparisonTargets(snapshot.comparisonTargets, normalizedProviders).filter(
+    (target) => normalizedProviders.some(
+      (provider) => provider.id === target.providerId && provider.enabled !== false
+    )
+  );
 
   return {
     providers: normalizedProviders,
@@ -1757,7 +1775,11 @@ function normalizeWorkspace(snapshot: Record<string, unknown>, providers: Provid
     activeConversationId,
     conversations,
     messages: activeConversation.messages,
-    plugins: normalizePlugins(snapshot.plugins, normalizedProviders),
+    plugins: normalizePlugins(snapshot.plugins, normalizedProviders).map((plugin) =>
+      recoveredFromAllProvidersDisabled && plugin.type === 'remote-mcp'
+        ? { ...plugin, enabled: false }
+        : plugin
+    ),
     promptTemplates: normalizePromptTemplates(snapshot.promptTemplates),
     comparisonEnabled: snapshot.comparisonEnabled === true && comparisonTargets.length >= 2,
     comparisonTargets,
