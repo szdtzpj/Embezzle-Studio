@@ -68,7 +68,6 @@ import { appInfo } from './src/data/appInfo';
 import { createDefaultWorkspace, defaultParameterSettings } from './src/data/providerCatalog';
 import type {
   AppWorkspace,
-  Capability,
   ChatCompletionResult,
   ChatTokenUsage,
   ChatConversation,
@@ -864,29 +863,6 @@ const modelTaskLabel: Record<ModelTask, string> = {
   embedding: '嵌入',
   rerank: '重排',
 };
-const configurableModelCapabilities: Array<{ key: Capability; label: string }> = [
-  { key: 'image-input', label: '视觉' },
-  { key: 'video-input', label: '视频理解' },
-  { key: 'file-input', label: '文件' },
-  { key: 'reasoning', label: '推理' },
-  { key: 'tool-calling', label: '工具' },
-  { key: 'web-search', label: '联网' },
-  { key: 'image-generation', label: '生图' },
-  { key: 'video-generation', label: '视频生成' },
-  { key: 'speech-to-text', label: '转写' },
-  { key: 'text-to-speech', label: '朗读' },
-  { key: 'mcp', label: 'MCP' },
-];
-const configurableModelTasks: ModelTask[] = [
-  'chat',
-  'image-generation',
-  'video-generation',
-  'audio-transcription',
-  'speech-generation',
-  'embedding',
-  'rerank',
-];
-
 function parameterRuntimeSummary(settings: ModelParameterSettings): string {
   if (!settings.enabled) {
     return '参数默认';
@@ -3718,106 +3694,6 @@ function AppContent({
       };
     });
     setNotice('已移除模型。');
-  }
-
-  function updateActiveModel(patch: Partial<ModelInfo>) {
-    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle() || !activeProvider || !activeModel) {
-      return;
-    }
-    setWorkspace((current) => {
-      const provider = current.providers.find((item) => item.id === activeProvider.id);
-      const model = provider?.models.find((item) => item.id === activeModel.id);
-      if (!provider || !model) return current;
-      const nextModel: ModelInfo = { ...model, ...patch, source: 'manual' };
-      const nextTask = inferModelTask(nextModel);
-      const matchesTarget = (target: ModelTargetRef | undefined) =>
-        target?.providerId === provider.id && target.modelId === model.id;
-      const comparisonTargets = nextTask === 'chat'
-        ? current.comparisonTargets
-        : current.comparisonTargets.filter((target) => !matchesTarget(target));
-      const voice = { ...current.voice };
-      if (
-        matchesTarget(voice.transcriptionTarget) &&
-        (nextTask !== 'audio-transcription' || !nextModel.capabilities.includes('speech-to-text'))
-      ) {
-        delete voice.transcriptionTarget;
-      }
-      if (
-        matchesTarget(voice.speechTarget) &&
-        (nextTask !== 'speech-generation' || !nextModel.capabilities.includes('text-to-speech'))
-      ) {
-        delete voice.speechTarget;
-      }
-      const reasoningEffortByModel = { ...current.reasoningEffortByModel };
-      if (nextTask !== 'chat' || !nextModel.capabilities.includes('reasoning')) {
-        delete reasoningEffortByModel[`${provider.id}:${model.id}`];
-      }
-      return {
-        ...current,
-        providers: current.providers.map((item) =>
-          item.id === provider.id
-            ? {
-                ...item,
-                models: item.models.map((candidate) =>
-                  candidate.id === model.id ? nextModel : candidate
-                ),
-              }
-            : item
-        ),
-        comparisonTargets,
-        comparisonEnabled: current.comparisonEnabled && comparisonTargets.length >= 2,
-        voice,
-        reasoningEffortByModel,
-      };
-    });
-  }
-
-  function setActiveModelTask(task: ModelTask) {
-    if (!ensureWorkspaceWritable() || !activeModel) {
-      return;
-    }
-    const taskCapabilities: Partial<Record<ModelTask, Capability>> = {
-      'image-generation': 'image-generation',
-      'video-generation': 'video-generation',
-      'audio-transcription': 'speech-to-text',
-      'speech-generation': 'text-to-speech',
-      embedding: 'embedding',
-      rerank: 'rerank',
-    };
-    const taskCapabilitySet = new Set(
-      Object.values(taskCapabilities).filter((value): value is Capability => Boolean(value))
-    );
-    const selectedCapability = taskCapabilities[task];
-    const capabilities = activeModel.capabilities.filter((capability) => !taskCapabilitySet.has(capability));
-    if (selectedCapability) {
-      capabilities.push(selectedCapability);
-    }
-    const capabilityOverrides = { ...activeModel.capabilityOverrides };
-    for (const capability of taskCapabilitySet) {
-      capabilityOverrides[capability] = capability === selectedCapability;
-    }
-    updateActiveModel({ task, capabilities, capabilityOverrides });
-    clearPendingAttachments();
-  }
-
-  function toggleActiveModelCapability(capability: Capability) {
-    if (!ensureWorkspaceWritable() || !activeModel) {
-      return;
-    }
-    const enabled = !activeModel.capabilities.includes(capability);
-    const capabilities = enabled
-      ? [...activeModel.capabilities, capability]
-      : activeModel.capabilities.filter((value) => value !== capability);
-    updateActiveModel({
-      capabilities,
-      capabilityOverrides: {
-        ...activeModel.capabilityOverrides,
-        [capability]: enabled,
-      },
-    });
-    if ((capability === 'image-input' || capability === 'video-input') && !enabled) {
-      clearPendingAttachments();
-    }
   }
 
   async function refreshModels() {
@@ -10035,14 +9911,6 @@ function SidebarDrawer({
   );
 }
 
-interface ModelButtonProps {
-  model: ModelInfo;
-  providerName?: string;
-  active: boolean;
-  onPress: () => void;
-  onRemove: () => void;
-}
-
 function ModelTaskBadge({ model }: { model: ModelInfo }) {
   const { styles } = useAppTheme();
   const task = inferModelTask(model);
@@ -10050,65 +9918,6 @@ function ModelTaskBadge({ model }: { model: ModelInfo }) {
   return (
     <View style={styles.modelTaskBadge}>
       <Text style={styles.modelTaskBadgeText}>{modelTaskLabel[task]}</Text>
-    </View>
-  );
-}
-
-function ModelButton({ model, providerName, active, onPress, onRemove }: ModelButtonProps) {
-  const { styles } = useAppTheme();
-  return (
-    <View style={[styles.modelButton, active && styles.modelButtonActive]}>
-      <AnimatedPressable accessibilityRole="button" onPress={onPress} style={styles.modelSelectArea}>
-        <ModelAvatar modelId={model.id} providerName={providerName} size={17} containerSize={26} />
-        <View style={styles.modelTextBlock}>
-          <Text numberOfLines={1} style={[styles.modelName, active && styles.modelNameActive]}>
-            {model.name ?? model.id}
-          </Text>
-          <Text numberOfLines={1} style={styles.modelMeta}>
-            {model.id}
-          </Text>
-          <ModelTaskBadge model={model} />
-        </View>
-      </AnimatedPressable>
-      <AnimatedPressable accessibilityRole="button" onPress={onRemove} style={styles.compactButton}>
-        <Text style={styles.compactButtonText}>删除</Text>
-      </AnimatedPressable>
-    </View>
-  );
-}
-
-interface CandidateModelRowProps {
-  model: ModelInfo;
-  providerName?: string;
-  added: boolean;
-  onAdd: () => void;
-}
-
-function CandidateModelRow({ model, providerName, added, onAdd }: CandidateModelRowProps) {
-  const { styles } = useAppTheme();
-  return (
-    <View style={styles.candidateRow}>
-      <ModelAvatar modelId={model.id} providerName={providerName} size={17} containerSize={26} />
-      <View style={styles.modelTextBlock}>
-        <Text numberOfLines={1} style={styles.modelName}>
-          {model.name ?? model.id}
-        </Text>
-        <Text numberOfLines={1} style={styles.modelMeta}>
-          {model.id}
-        </Text>
-        <ModelTaskBadge model={model} />
-      </View>
-      <AnimatedPressable
-        accessibilityRole="button"
-        accessibilityLabel={added ? `已添加模型 ${model.name ?? model.id}` : `添加模型 ${model.name ?? model.id}`}
-        disabled={added}
-        onPress={onAdd}
-        style={[styles.addModelButton, added && styles.addModelButtonAdded]}
-      >
-        <Text style={[styles.addModelButtonText, added && styles.addModelButtonTextAdded]}>
-          {added ? '已添加' : '+'}
-        </Text>
-      </AnimatedPressable>
     </View>
   );
 }
