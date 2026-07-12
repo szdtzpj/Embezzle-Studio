@@ -1,8 +1,41 @@
-# Embezzle Studio
+<p align="center">
+  <img src="./assets/brand-mark.png" width="280" alt="Embezzle Studio Logo" />
+</p>
 
-[简体中文](./README.md) | [English](./README.en.md)
+<h1 align="center">Embezzle Studio</h1>
 
-Embezzle Studio 是一个面向 Android 的移动端 AI 对话客户端。项目还在早期开发中，当前目标是把常用的 OpenAI 兼容接口、个人中转站和国内模型服务商集中到一个可配置的手机应用里，方便在移动端进行模型选择、对话和简单的多模态调用。
+<p align="center">
+  <strong>把你的模型、资料与创作成果，装进一个由你掌控的移动工作台。</strong>
+</p>
+
+<p align="center">
+  面向 Android 的 BYOK 多模型对话、创作与本地知识工作台
+</p>
+
+<p align="center">
+  <a href="https://szdtzpj.github.io/Embezzle-Studio/release.html"><img alt="Latest Release" src="https://img.shields.io/github/v/release/szdtzpj/Embezzle-Studio?display_name=tag&amp;sort=semver&amp;style=for-the-badge&amp;color=7C3AED" /></a>
+  <a href="https://github.com/szdtzpj/Embezzle-Studio/actions/workflows/quality.yml"><img alt="Quality" src="https://img.shields.io/github/actions/workflow/status/szdtzpj/Embezzle-Studio/quality.yml?branch=main&amp;style=for-the-badge&amp;label=quality" /></a>
+  <img alt="Android 24+" src="https://img.shields.io/badge/Android-24%2B-3DDC84?style=for-the-badge&amp;logo=android&amp;logoColor=white" />
+  <img alt="BYOK" src="https://img.shields.io/badge/BYOK-user--funded-0EA5E9?style=for-the-badge" />
+</p>
+
+<p align="center">
+  <a href="https://szdtzpj.github.io/Embezzle-Studio/release.html"><strong>下载 Android 正式版</strong></a>
+  · <a href="./docs/local-knowledge-workbench.md">本地知识工作台</a>
+  · <a href="./docs/product-architecture.md">架构与安全边界</a>
+  · <a href="./README.en.md">English</a>
+</p>
+
+<table>
+  <tr>
+    <td width="50%" valign="top"><strong>🔑 用户自有服务商</strong><br /><sub>模型、搜索、语音与媒体调用全部使用用户自己的 Endpoint、API Key、额度与账单。</sub></td>
+    <td width="50%" valign="top"><strong>🛡️ Local-first</strong><br /><sub>项目、对话、成果、资料、检索与费用估算保存在本机，不依赖 Embezzle Studio 服务器。</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><strong>⚡ 多模型统一工作台</strong><br /><sub>集中管理 OpenAI 兼容接口、火山方舟、阿里百炼和个人中转，并支持显式多模型对比。</sub></td>
+    <td width="50%" valign="top"><strong>📚 从对话到成果</strong><br /><sub>把回答沉淀为可版本化成果与项目资料，在发送前检查实际上下文和 Token 风险。</sub></td>
+  </tr>
+</table>
 
 ## 当前功能
 
@@ -31,7 +64,7 @@ Embezzle Studio 是一个面向 Android 的移动端 AI 对话客户端。项目
 
 ## 仍在完善
 
-当前开发分支为 `1.3.0` / Android versionCode 9，并已有本机验证候选，但尚未 push、tag、上传、发布或替换公开 Latest。公开稳定版仍是 `v1.0.6`；现有 `1.2.0` 本机候选只属于上一开发阶段的历史证据，不能当作 `1.3.0` APK，也不能与公开 Release 资产混用。
+当前待发布版本为 `1.3.0` / Android versionCode 9，并已有本机验证候选。在精确 tag、受保护 Android 工作流、Immutable Release 和 Pages 下载链全部完成前，公开稳定版仍是 `v1.0.6`；现有 `1.2.0` 本机候选只属于上一开发阶段的历史证据，不能当作 `1.3.0` APK，也不能与公开 Release 资产混用。
 
 Embezzle Studio 不购买、转售、补贴或代理模型、搜索、语音和媒体能力，也不运行生产 API、汇率服务、云同步、遥测后端或任务 worker。所有服务商调用和费用都由用户配置的账号承担；本地费用护栏不做汇率换算，且其估算/尝试账本不能替代服务商账单。
 
@@ -102,7 +135,7 @@ Pull Request 和 `main` 分支推送会触发 `.github/workflows/quality.yml`。
 
 干净 prebuild、`clean assembleRelease` 与正式证书本机签名通过。候选 APK 位于 `D:\EmbezzleStudio-Releases\v1.3.0-candidate\Embezzle-Studio-v1.3.0-candidate-release.apk`，97,448,407 字节，SHA-256 `c95dafe6e6eb77f3a1a4c7504c6ad05c27218b45972de2e247db264ec4c777d4`。包名/版本/code 为 `com.szdtzpj.embezzlestudio` / 1.3.0 / 9，min/target 24/36，`allowBackup=false`，有意 `RECORD_AUDIO`，无 CAMERA/`SYSTEM_ALERT_WINDOW`；只有一个预期正式签名者，证书 SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`，v2/v3 和 zipalign 通过。
 
-`adb devices -l` 为空，因此本轮没有 Android 真机或真实服务商账号/计费验收。也没有 push、tag、上传、创建 GitHub Release、更新 Pages 或公开 `1.3.0` APK；公开稳定版仍是 `v1.0.6`。详细能力与安全边界见[本地知识与成果工作台](./docs/local-knowledge-workbench.md)，完整本机证据与外部边界见[`1.3.0` 续作断点](./docs/CONTINUATION_CHECKPOINT_2026-07-12_V1.3.md)。
+`adb devices -l` 为空，因此本轮没有 Android 真机或真实服务商账号/计费验收。本机候选验证记录建立时，`1.3.0` 尚未 tag、上传、创建 GitHub Release、更新 Pages 或公开；后续公网状态请以顶部动态版本徽章和[可信下载页](https://szdtzpj.github.io/Embezzle-Studio/release.html)为准。详细能力与安全边界见[本地知识与成果工作台](./docs/local-knowledge-workbench.md)，完整本机证据与外部边界见[`1.3.0` 续作断点](./docs/CONTINUATION_CHECKPOINT_2026-07-12_V1.3.md)。
 
 当前仓库已经创建 `Settings -> Environments -> android-release`、把 deployment branch policy 限制为 `main`，并配置了下列五个 Environment secrets；以下表格和命令同时作为环境重建或密钥轮换手册。若仓库/组织方案支持 deployment protection rules，还应启用 required reviewers 和 `Prevent self-review`。[GitHub Environments 官方限制](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)说明：Free、Pro 或 Team 方案的 required reviewers 只可用于公开仓库；私有仓库的 Environment secrets 和 deployment branches/tags 至少需要 Pro/Team，保持私有并获得 required reviewers 则需要 Enterprise。个人私有仓库的直接 collaborator 也没有可降级的 read 角色；当前按维护者决定，`BlueOcean223` 保留为明确受信任的 write collaborator，并接受没有双人审批的剩余风险。不要把“仅允许 `main` + owner workflow gate”描述成等价的双人审批。
 

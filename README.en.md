@@ -1,8 +1,41 @@
-# Embezzle Studio
+<p align="center">
+  <img src="./assets/brand-mark.png" width="280" alt="Embezzle Studio Logo" />
+</p>
 
-[简体中文](./README.md) | [English](./README.en.md)
+<h1 align="center">Embezzle Studio</h1>
 
-Embezzle Studio is an Android-focused mobile AI chat client. The project is still in early development. Its current goal is to bring commonly used OpenAI-compatible APIs, personal relay services, and Chinese model providers into one configurable mobile app for convenient model selection, conversations, and basic multimodal calls on mobile devices.
+<p align="center">
+  <strong>Bring your models, knowledge, and creative work into one mobile workspace you control.</strong>
+</p>
+
+<p align="center">
+  A BYOK multi-model chat, creation, and local-knowledge workspace for Android
+</p>
+
+<p align="center">
+  <a href="https://szdtzpj.github.io/Embezzle-Studio/release.html"><img alt="Latest Release" src="https://img.shields.io/github/v/release/szdtzpj/Embezzle-Studio?display_name=tag&amp;sort=semver&amp;style=for-the-badge&amp;color=7C3AED" /></a>
+  <a href="https://github.com/szdtzpj/Embezzle-Studio/actions/workflows/quality.yml"><img alt="Quality" src="https://img.shields.io/github/actions/workflow/status/szdtzpj/Embezzle-Studio/quality.yml?branch=main&amp;style=for-the-badge&amp;label=quality" /></a>
+  <img alt="Android 24+" src="https://img.shields.io/badge/Android-24%2B-3DDC84?style=for-the-badge&amp;logo=android&amp;logoColor=white" />
+  <img alt="BYOK" src="https://img.shields.io/badge/BYOK-user--funded-0EA5E9?style=for-the-badge" />
+</p>
+
+<p align="center">
+  <a href="https://szdtzpj.github.io/Embezzle-Studio/release.html"><strong>Download for Android</strong></a>
+  · <a href="./docs/local-knowledge-workbench.md">Local Knowledge Workbench</a>
+  · <a href="./docs/product-architecture.md">Architecture &amp; Trust Boundaries</a>
+  · <a href="./README.md">简体中文</a>
+</p>
+
+<table>
+  <tr>
+    <td width="50%" valign="top"><strong>🔑 Bring your own providers</strong><br /><sub>Model, search, voice, and media calls use the user's own endpoint, API key, quota, and billing.</sub></td>
+    <td width="50%" valign="top"><strong>🛡️ Local-first</strong><br /><sub>Projects, conversations, artifacts, references, search, and cost estimates stay on-device without an Embezzle Studio server.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><strong>⚡ One multi-model workspace</strong><br /><sub>Manage OpenAI-compatible APIs, Volcengine Ark, Alibaba Bailian, and personal relays with explicit multi-model comparison.</sub></td>
+    <td width="50%" valign="top"><strong>📚 From chat to durable work</strong><br /><sub>Turn answers into versioned artifacts and project references, then inspect exact context and token risk before sending.</sub></td>
+  </tr>
+</table>
 
 ## Current Features
 
@@ -31,7 +64,7 @@ Embezzle Studio is an Android-focused mobile AI chat client. The project is stil
 
 ## Still Being Improved
 
-The development branch is `1.3.0` / Android versionCode 9 and now has a locally verified candidate, but it has not been pushed, tagged, uploaded, released, or made public and has not replaced public Latest. Public stable remains `v1.0.6`; the existing local `1.2.0` candidate is historical evidence for the previous development phase, not a `1.3.0` APK or a public Release asset.
+The pending release is `1.3.0` / Android versionCode 9 and has a locally verified candidate. Public stable remains `v1.0.6` until the exact tag, protected Android workflow, Immutable Release, and Pages download chain all complete. The existing local `1.2.0` candidate is historical evidence for the previous development phase, not a `1.3.0` APK or a public Release asset.
 
 Embezzle Studio does not buy, resell, subsidize, or proxy model, search, voice, or media capacity, and operates no production API, exchange-rate service, cloud sync, telemetry backend, or task worker. Every provider call and charge belongs to the user-configured account. The local cost guard performs no FX conversion, and its estimates/attempt ledger cannot replace the provider's bill.
 
@@ -102,7 +135,7 @@ The final local `1.3.0` gate passes: `npm.cmd run check` reports 38 test files /
 
 Clean prebuild, `clean assembleRelease`, and local production signing pass. The candidate is `D:\EmbezzleStudio-Releases\v1.3.0-candidate\Embezzle-Studio-v1.3.0-candidate-release.apk`, 97,448,407 bytes, SHA-256 `c95dafe6e6eb77f3a1a4c7504c6ad05c27218b45972de2e247db264ec4c777d4`. It identifies as `com.szdtzpj.embezzlestudio` version `1.3.0`/code 9, minSdk 24/targetSdk 36, `allowBackup=false`, intentional `RECORD_AUDIO`, and no CAMERA or `SYSTEM_ALERT_WINDOW`. Exactly one expected production signer is present with certificate SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`; v2/v3 and zipalign pass.
 
-`adb devices -l` is empty, so this run claims no Android-device or real-provider-account/billing acceptance. No push, tag, upload, GitHub Release, Pages update, or public `1.3.0` APK has occurred; public stable remains `v1.0.6`. See [Local Knowledge and Artifact Workbench](./docs/local-knowledge-workbench.md) for the capability/security contract and the [`1.3.0` continuation checkpoint](./docs/CONTINUATION_CHECKPOINT_2026-07-12_V1.3.md) for complete local evidence and external boundaries.
+`adb devices -l` is empty, so this run claims no Android-device or real-provider-account/billing acceptance. At the time the local-candidate evidence was recorded, `1.3.0` had not been tagged, uploaded, released through GitHub, staged to Pages, or made public. Use the dynamic badge above and the [trusted download page](https://szdtzpj.github.io/Embezzle-Studio/release.html) for the later public state. See [Local Knowledge and Artifact Workbench](./docs/local-knowledge-workbench.md) for the capability/security contract and the [`1.3.0` continuation checkpoint](./docs/CONTINUATION_CHECKPOINT_2026-07-12_V1.3.md) for complete local evidence and external boundaries.
 
 This repository now has the `android-release` environment under `Settings -> Environments`, restricts its deployment branch policy to `main`, and has the five Environment secrets below configured; the table and commands also serve as the environment-rebuild or key-rotation runbook. The [official GitHub Environments limitations](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) require at least Pro/Team for private-repository Environment secrets and deployment branch/tag policies, make required reviewers public-only on Free/Pro/Team, and require Enterprise for that reviewer gate on a private repository. A direct collaborator on a private personal repository also has no read-only role to downgrade to. By maintainer decision, `BlueOcean223` remains an explicitly trusted write collaborator, accepting the residual lack of two-person approval. Do not describe the `main` restriction and owner workflow gate as equivalent to two-person approval.
 
