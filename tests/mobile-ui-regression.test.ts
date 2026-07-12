@@ -318,27 +318,29 @@ describe('Android mobile UI regressions', () => {
     expect(overflowActionsSource).toContain('onPress={onEdit}');
   });
 
-  it('clears task-incompatible model references without invalidating project media defaults', async () => {
+  it('clears removed model references from comparison, voice, and reasoning prefs', async () => {
+    // Settings redesign no longer exposes in-place model task/capability overrides.
+    // Reference cleanup still happens when a model is removed from a provider.
     const appSource = await source('App.tsx');
-    const updateModelSource = appSource.slice(
-      appSource.indexOf('function updateActiveModel('),
-      appSource.indexOf('function setActiveModelTask(')
+    const removeModelSource = appSource.slice(
+      appSource.indexOf('function removeModel('),
+      appSource.indexOf('async function refreshModels(')
     );
 
-    expect(updateModelSource).toContain("const comparisonTargets = nextTask === 'chat'");
-    expect(updateModelSource).toContain(
-      'current.comparisonTargets.filter((target) => !matchesTarget(target))'
+    expect(removeModelSource).toContain(
+      'const comparisonTargets = current.comparisonTargets.filter('
     );
-    expect(updateModelSource).toContain('delete voice.transcriptionTarget');
-    expect(updateModelSource).toContain('delete voice.speechTarget');
-    expect(updateModelSource).toContain(
-      'delete reasoningEffortByModel[`${provider.id}:${model.id}`]'
+    expect(removeModelSource).toContain('delete voice.transcriptionTarget');
+    expect(removeModelSource).toContain('delete voice.speechTarget');
+    expect(removeModelSource).toContain(
+      'delete reasoningEffortByModel[`${activeProvider.id}:${modelId}`]'
     );
-    expect(updateModelSource).toContain(
+    expect(removeModelSource).toContain(
       'comparisonEnabled: current.comparisonEnabled && comparisonTargets.length >= 2'
     );
-    expect(updateModelSource).not.toContain('defaultTarget');
-    expect(updateModelSource).not.toContain('projects:');
+    // Removing a model may clear a project default that pointed at it.
+    expect(removeModelSource).toContain('defaultTarget');
+    expect(removeModelSource).toContain('projects:');
   });
 
   it('keeps request-based voice Android-only and disables background audio services', async () => {

@@ -7705,6 +7705,8 @@ function toggleSettingsScreen() {
       });
       setSettingsMounted(true);
       setActiveVideoAttachmentId(null);
+      setSidebarOpen(false);
+      setModelPickerOpen(false);
     }
     setSettingsOpen(nextOpen);
   }
@@ -7748,56 +7750,56 @@ function toggleSettingsScreen() {
           keyboardVerticalOffset={0}
           style={styles.keyboard}
         >
-          <View style={styles.topBar}>
-            <View style={styles.topHeaderRow}>
-              <View style={styles.topLeft}>
-                <AnimatedPressable accessibilityRole="button" accessibilityLabel="打开聊天记录" onPress={() => setSidebarOpen(true)} style={styles.iconButton}>
-                  <Menu size={20} color={palette.text} strokeWidth={2} />
-                </AnimatedPressable>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  accessibilityLabel="选择模型"
-                  testID="model-picker-trigger"
-                  onPress={() => setModelPickerOpen(true)}
-                  style={styles.modelPickerPill}
-                >
-                  <ModelAvatar
-                    modelId={activeModelId}
-                    providerName={activeProvider.name}
-                    size={16}
-                    containerSize={24}
-                  />
-                  <Text numberOfLines={1} style={styles.modelPickerPillText}>
-                    {activeModelId ? formatCompactModelName(activeModelId, activeProvider.name) : '选择模型'}
-                    {activeReasoningEffort !== 'default' && activeModelTask === 'chat'
-                      ? ` ${activeReasoningOptions.find((o) => o.key === activeReasoningEffort)?.label ?? reasoningEffortLabels[activeReasoningEffort]}`
-                      : ''}
-                  </Text>
-                  <ChevronDown size={16} color={palette.textSecondary} strokeWidth={2} />
-                </AnimatedPressable>
-              </View>
-              <View style={styles.topHeaderActions}>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  accessibilityLabel="打开本地成果工作台"
-                  onPress={() => openWorkspaceWorkbench()}
-                  style={styles.iconButton}
-                >
-                  <FileText size={19} color={palette.text} strokeWidth={2} />
-                </AnimatedPressable>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  accessibilityLabel={settingsOpen ? '返回聊天' : '打开设置'}
-                  onPress={toggleSettingsScreen}
-                  style={styles.iconButton}
-                >
-                  <IconCrossfade swapKey={settingsOpen ? 'chat' : 'settings'}>
-                    {settingsOpen ? <MessageSquare size={20} color={palette.text} strokeWidth={2} /> : <Settings size={20} color={palette.text} strokeWidth={2} />}
-                  </IconCrossfade>
-                </AnimatedPressable>
+          {!settingsOpen ? (
+            <View style={styles.topBar}>
+              <View style={styles.topHeaderRow}>
+                <View style={styles.topLeft}>
+                  <AnimatedPressable accessibilityRole="button" accessibilityLabel="打开聊天记录" onPress={() => setSidebarOpen(true)} style={styles.iconButton}>
+                    <Menu size={20} color={palette.text} strokeWidth={2} />
+                  </AnimatedPressable>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    accessibilityLabel="选择模型"
+                    testID="model-picker-trigger"
+                    onPress={() => setModelPickerOpen(true)}
+                    style={styles.modelPickerPill}
+                  >
+                    <ModelAvatar
+                      modelId={activeModelId}
+                      providerName={activeProvider.name}
+                      size={16}
+                      containerSize={24}
+                    />
+                    <Text numberOfLines={1} style={styles.modelPickerPillText}>
+                      {activeModelId ? formatCompactModelName(activeModelId, activeProvider.name) : '选择模型'}
+                      {activeReasoningEffort !== 'default' && activeModelTask === 'chat'
+                        ? ` ${activeReasoningOptions.find((o) => o.key === activeReasoningEffort)?.label ?? reasoningEffortLabels[activeReasoningEffort]}`
+                        : ''}
+                    </Text>
+                    <ChevronDown size={16} color={palette.textSecondary} strokeWidth={2} />
+                  </AnimatedPressable>
+                </View>
+                <View style={styles.topHeaderActions}>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    accessibilityLabel="打开本地成果工作台"
+                    onPress={() => openWorkspaceWorkbench()}
+                    style={styles.iconButton}
+                  >
+                    <FileText size={19} color={palette.text} strokeWidth={2} />
+                  </AnimatedPressable>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    accessibilityLabel="打开设置"
+                    onPress={toggleSettingsScreen}
+                    style={styles.iconButton}
+                  >
+                    <Settings size={20} color={palette.text} strokeWidth={2} />
+                  </AnimatedPressable>
+                </View>
               </View>
             </View>
-          </View>
+          ) : null}
 
           {workspaceReadOnly ? (
             <View
