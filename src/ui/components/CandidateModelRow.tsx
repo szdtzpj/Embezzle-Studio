@@ -1,9 +1,9 @@
 import { StyleSheet, Text, View } from 'react-native';
 import { AnimatedPressable } from './AnimatedPressable';
 import { ModelAvatar } from './ModelAvatar';
-import { ModelTaskBadge } from './ModelTaskBadge';
 import { MotionSwap } from './Motion';
 import { useKelivoTheme, type KelivoTheme } from '../theme';
+import { modelCapabilityTags } from '../utils/modelDisplay';
 import type { ModelInfo } from '../../domain/types';
 
 export interface CandidateModelRowProps {
@@ -17,6 +17,7 @@ export interface CandidateModelRowProps {
 export function CandidateModelRow({ model, providerName, added, disabled = false, onAdd }: CandidateModelRowProps) {
   const theme = useKelivoTheme();
   const styles = getStyles(theme);
+  const tags = modelCapabilityTags(model, { max: 6 });
 
   return (
     <View style={styles.root}>
@@ -28,7 +29,13 @@ export function CandidateModelRow({ model, providerName, added, disabled = false
         <Text numberOfLines={1} style={styles.meta}>
           {model.id}
         </Text>
-        <ModelTaskBadge model={model} />
+        <View style={styles.badgeRow}>
+          {tags.map((tag) => (
+            <View key={tag} style={styles.badge}>
+              <Text style={styles.badgeText}>{tag}</Text>
+            </View>
+          ))}
+        </View>
       </View>
       <AnimatedPressable
         accessibilityRole="button"
@@ -77,6 +84,23 @@ function createStyles(theme: KelivoTheme) {
     marginTop: 4,
     color: theme.colors.textSecondary,
     fontSize: 12,
+  },
+  badgeRow: {
+    marginTop: 6,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 5,
+  },
+  badge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+    backgroundColor: theme.colors.primaryContainer,
+  },
+  badgeText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: theme.colors.onPrimaryContainer,
   },
   addButton: {
     minWidth: 48,

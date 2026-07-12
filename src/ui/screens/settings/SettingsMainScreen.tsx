@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from 'react';
 import {
   ArrowLeft,
   SunMoon,
@@ -7,7 +8,6 @@ import {
   Columns3,
   BookOpen,
   Video,
-  SlidersHorizontal,
   Globe2,
   Wrench,
   Mic,
@@ -15,7 +15,14 @@ import {
   ChartColumn,
   Download,
 } from 'lucide-react-native';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import {
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { AnimatedPressable } from '../../components/AnimatedPressable';
 import { MotionItem } from '../../components/Motion';
 import { SectionHeader, SectionCard, TactileRow, RowDivider } from '../../components/settings/SettingsList';
@@ -26,6 +33,9 @@ import type { SettingsToolsSection } from './toolsSections';
 export interface SettingsMainScreenProps {
   colorMode: 'system' | 'light' | 'dark';
   activeProvider: ProviderProfile;
+  /** Restored when this screen remounts after a sub-page pop. */
+  scrollOffsetY?: number;
+  onScrollOffsetChange?: (offsetY: number) => void;
   onBack: () => void;
   onColorMode: () => void;
   onProviders: () => void;
@@ -48,6 +58,8 @@ function colorModeLabel(mode: 'system' | 'light' | 'dark') {
 export function SettingsMainScreen({
   colorMode,
   activeProvider,
+  scrollOffsetY = 0,
+  onScrollOffsetChange,
   onBack,
   onColorMode,
   onProviders,
@@ -57,6 +69,26 @@ export function SettingsMainScreen({
   const theme = useKelivoTheme();
   const styles = getStyles(theme);
   const iconColor = theme.colors.text;
+  const scrollRef = useRef<ScrollView>(null);
+  const restoreYRef = useRef(scrollOffsetY);
+  const didRestoreRef = useRef(false);
+
+  useLayoutEffect(() => {
+    const y = restoreYRef.current;
+    if (y <= 0 || didRestoreRef.current) {
+      return;
+    }
+    // Wait one frame so content height is ready after remount.
+    const frame = requestAnimationFrame(() => {
+      scrollRef.current?.scrollTo({ y, animated: false });
+      didRestoreRef.current = true;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    onScrollOffsetChange?.(event.nativeEvent.contentOffset.y);
+  };
 
   return (
     <View style={styles.container}>
@@ -69,9 +101,12 @@ export function SettingsMainScreen({
       </View>
 
       <ScrollView
+        ref={scrollRef}
         style={styles.scroll}
         contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled"
+        scrollEventThrottle={16}
+        onScroll={handleScroll}
       >
         <MotionItem index={0}>
           <SectionHeader title="通用设置" first />
@@ -93,13 +128,6 @@ export function SettingsMainScreen({
               label="供应商"
               detail={activeProvider.name}
               onPress={onProviders}
-            />
-            <RowDivider />
-            <TactileRow
-              icon={<SlidersHorizontal size={20} color={iconColor} strokeWidth={2} />}
-              label="服务商配置与模型"
-              detail="向导 / 能力矩阵"
-              onPress={() => onToolsSection('providerSetup')}
             />
             <RowDivider />
             <TactileRow

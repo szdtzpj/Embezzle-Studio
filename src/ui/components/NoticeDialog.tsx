@@ -1,22 +1,19 @@
 import type { ReactNode } from 'react';
 import { Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
-import { AlertTriangle, Info, ShieldAlert, Trash2 } from 'lucide-react-native';
+import { AlertTriangle, CheckCircle2 } from 'lucide-react-native';
 import { AnimatedPressable } from './AnimatedPressable';
 import { MotionItem } from './Motion';
 import { useKelivoTheme, type KelivoTheme } from '../theme';
 import type { DialogTone } from './dialogService';
 
-export interface ConfirmDialogProps {
+export interface NoticeDialogProps {
   visible: boolean;
   title: string;
   description: string;
-  subject?: string;
-  confirmLabel?: string;
-  cancelLabel?: string;
+  buttonLabel?: string;
   tone?: DialogTone;
   icon?: ReactNode;
-  onConfirm: () => void;
-  onCancel: () => void;
+  onClose: () => void;
 }
 
 function DefaultIcon({ tone }: { tone: DialogTone }) {
@@ -24,27 +21,21 @@ function DefaultIcon({ tone }: { tone: DialogTone }) {
   if (tone === 'warning') {
     return <AlertTriangle size={22} color={theme.colors.warning} strokeWidth={2.25} />;
   }
-  if (tone === 'primary') {
-    return <Info size={22} color={theme.colors.primary} strokeWidth={2.25} />;
-  }
   if (tone === 'danger') {
-    return <Trash2 size={22} color={theme.colors.error} strokeWidth={2.25} />;
+    return <AlertTriangle size={22} color={theme.colors.error} strokeWidth={2.25} />;
   }
-  return <ShieldAlert size={22} color={theme.colors.error} strokeWidth={2.25} />;
+  return <CheckCircle2 size={22} color={theme.colors.success} strokeWidth={2.25} />;
 }
 
-export function ConfirmDialog({
+export function NoticeDialog({
   visible,
   title,
   description,
-  subject,
-  confirmLabel = '确定',
-  cancelLabel = '取消',
-  tone = 'danger',
+  buttonLabel = '好的',
+  tone = 'primary',
   icon,
-  onConfirm,
-  onCancel,
-}: ConfirmDialogProps) {
+  onClose,
+}: NoticeDialogProps) {
   const theme = useKelivoTheme();
   const styles = getStyles(theme, tone);
 
@@ -54,9 +45,9 @@ export function ConfirmDialog({
       transparent
       statusBarTranslucent
       animationType="fade"
-      onRequestClose={onCancel}
+      onRequestClose={onClose}
     >
-      <Pressable style={styles.scrim} onPress={onCancel}>
+      <Pressable style={styles.scrim} onPress={onClose}>
         <MotionItem
           delay={20}
           distance={12}
@@ -79,40 +70,18 @@ export function ConfirmDialog({
               <View style={styles.iconWrap}>
                 {icon ?? <DefaultIcon tone={tone} />}
               </View>
-
               <Text style={styles.title}>{title}</Text>
-
-              {subject ? (
-                <View style={styles.subjectWrap}>
-                  <Text style={styles.subject} numberOfLines={2}>
-                    {subject}
-                  </Text>
-                </View>
-              ) : null}
-
               <Text style={styles.description}>{description}</Text>
             </View>
-
-            <View style={styles.actions}>
-              <AnimatedPressable
-                accessibilityRole="button"
-                accessibilityLabel={cancelLabel}
-                onPress={onCancel}
-                haptic="light"
-                style={styles.cancelButton}
-              >
-                <Text style={styles.cancelText}>{cancelLabel}</Text>
-              </AnimatedPressable>
-              <AnimatedPressable
-                accessibilityRole="button"
-                accessibilityLabel={confirmLabel}
-                onPress={onConfirm}
-                haptic={tone === 'danger' ? 'warning' : 'medium'}
-                style={styles.confirmButton}
-              >
-                <Text style={styles.confirmText}>{confirmLabel}</Text>
-              </AnimatedPressable>
-            </View>
+            <AnimatedPressable
+              accessibilityRole="button"
+              accessibilityLabel={buttonLabel}
+              onPress={onClose}
+              haptic="light"
+              style={styles.button}
+            >
+              <Text style={styles.buttonText}>{buttonLabel}</Text>
+            </AnimatedPressable>
           </Pressable>
         </MotionItem>
       </Pressable>
@@ -124,21 +93,21 @@ function createStyles(theme: KelivoTheme, tone: DialogTone) {
   const accent =
     tone === 'warning'
       ? theme.colors.warning
-      : tone === 'primary'
-        ? theme.colors.primary
-        : theme.colors.error;
+      : tone === 'danger'
+        ? theme.colors.error
+        : theme.colors.primary;
   const accentContainer =
     tone === 'warning'
       ? theme.colors.warningContainer
-      : tone === 'primary'
-        ? theme.colors.primaryContainer
-        : theme.colors.errorContainer;
+      : tone === 'danger'
+        ? theme.colors.errorContainer
+        : theme.colors.primaryContainer;
   const onAccent =
     tone === 'warning'
       ? theme.colors.text
-      : tone === 'primary'
-        ? theme.colors.onPrimary
-        : theme.colors.onError;
+      : tone === 'danger'
+        ? theme.colors.onError
+        : theme.colors.onPrimary;
 
   return StyleSheet.create({
     scrim: {
@@ -193,21 +162,6 @@ function createStyles(theme: KelivoTheme, tone: DialogTone) {
       fontWeight: '700',
       textAlign: 'center',
     },
-    subjectWrap: {
-      maxWidth: '100%',
-      marginTop: 10,
-      paddingHorizontal: 12,
-      paddingVertical: 7,
-      borderRadius: 10,
-      backgroundColor: theme.colors.surfaceSunken,
-    },
-    subject: {
-      color: theme.colors.text,
-      fontSize: 14,
-      lineHeight: 20,
-      fontWeight: '600',
-      textAlign: 'center',
-    },
     description: {
       marginTop: 11,
       color: theme.colors.textSecondary,
@@ -215,36 +169,16 @@ function createStyles(theme: KelivoTheme, tone: DialogTone) {
       lineHeight: 20,
       textAlign: 'center',
     },
-    actions: {
+    button: {
       width: '100%',
-      flexDirection: 'row',
-      gap: 10,
+      height: 42,
       marginTop: 19,
-    },
-    cancelButton: {
-      flex: 1,
-      height: 42,
-      borderRadius: 12,
-      alignItems: 'center',
-      justifyContent: 'center',
-      borderWidth: 0.8,
-      borderColor: theme.colors.outline,
-      backgroundColor: theme.colors.surfaceSunken,
-    },
-    cancelText: {
-      color: theme.colors.textSecondary,
-      fontSize: 14,
-      fontWeight: '600',
-    },
-    confirmButton: {
-      flex: 1,
-      height: 42,
       borderRadius: 12,
       alignItems: 'center',
       justifyContent: 'center',
       backgroundColor: accent,
     },
-    confirmText: {
+    buttonText: {
       color: onAccent,
       fontSize: 14,
       fontWeight: '700',

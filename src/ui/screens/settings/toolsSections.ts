@@ -1,6 +1,5 @@
 export type SettingsToolsSection =
   | 'workspace'
-  | 'providerSetup'
   | 'comparison'
   | 'webSearch'
   | 'prompts'
@@ -13,7 +12,6 @@ export type SettingsToolsSection =
 
 export const settingsToolsSectionTitles: Record<SettingsToolsSection, string> = {
   workspace: '项目工作台',
-  providerSetup: '服务商配置与模型',
   comparison: '多模型对比',
   webSearch: '联网搜索',
   prompts: '提示词与角色模板',

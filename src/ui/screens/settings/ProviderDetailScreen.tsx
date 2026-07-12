@@ -23,16 +23,26 @@ import { CandidateModelRow } from '../../components/CandidateModelRow';
 import { ModelAvatar } from '../../components/ModelAvatar';
 import { ModelManageRow } from '../../components/ModelManageRow';
 import { MotionItem, MotionPresence, MotionSwap, MotionSwitch } from '../../components/Motion';
+import { SettingsSelect } from '../../components/settings/SettingsSelect';
 import { useKelivoTheme, type KelivoTheme } from '../../theme';
-import { inferModelTask } from '../../../services/modelCapabilities';
-import type { Capability, ModelInfo, ModelTask, ProviderProfile } from '../../../domain/types';
+import type {
+  ModelInfo,
+  ProviderKind,
+  ProviderProfile,
+} from '../../../domain/types';
 import type { ModelCapabilityFilter } from '../../../services/modelCapabilities';
-import { modelTaskLabel } from '../../utils/modelDisplay';
+import type { ProviderEndpointInspection } from '../../../services/providerSetup';
+
+const providerKindOptions: Array<{ key: ProviderKind; label: string }> = [
+  { key: 'volcengine-ark', label: '火山方舟' },
+  { key: 'bailian-compatible', label: '阿里百炼' },
+  { key: 'openai-compatible', label: 'OpenAI' },
+  { key: 'custom', label: '兼容接口' },
+];
 
 export interface ProviderDetailScreenProps {
   readOnly: boolean;
   provider: ProviderProfile;
-  activeModel?: ModelInfo;
   activeModelId: string;
   addedModels: ModelInfo[];
   addedModelIds: Set<string>;
@@ -44,11 +54,19 @@ export interface ProviderDetailScreenProps {
   candidateModelFilters: Array<{ key: ModelCapabilityFilter; label: string }>;
   manualModelId: string;
   refreshingModels: boolean;
-  configurableModelTasks: ModelTask[];
-  configurableModelCapabilities: Array<{ key: Capability; label: string }>;
   notice: string;
+  /** Draft-based setup wizard fields (main v1.2+ binding flow). */
+  nameDraft: string;
+  kindDraft: ProviderKind;
+  baseUrlDraft: string;
+  apiKeyDraft: string;
+  endpointInspection: ProviderEndpointInspection;
+  hasMoreCandidates?: boolean;
   onBack: () => void;
-  onUpdateProvider: (patch: Partial<ProviderProfile>) => void;
+  onSetNameDraft: (name: string) => void;
+  onChangeBindingDraft: (patch: { kind?: ProviderKind; baseUrl?: string }) => void;
+  onSetApiKeyDraft: (apiKey: string) => void;
+  onSaveProviderDraft: () => void;
   onRefreshModels: () => void;
   onSetModelSearchQuery: (query: string) => void;
   onSetModelCapabilityFilter: (filter: ModelCapabilityFilter) => void;
@@ -58,15 +76,13 @@ export interface ProviderDetailScreenProps {
   onAddManualModel: () => void;
   onSelectModel: (modelId: string) => void;
   onRemoveModel: (modelId: string) => void;
-  onSetActiveModelTask: (task: ModelTask) => void;
-  onToggleActiveModelCapability: (capability: Capability) => void;
+  onLoadMoreCandidates?: () => void;
   onDeleteProvider?: () => void;
 }
 
 export function ProviderDetailScreen({
   readOnly,
   provider,
-  activeModel,
   activeModelId,
   addedModels,
   addedModelIds,
@@ -78,11 +94,18 @@ export function ProviderDetailScreen({
   candidateModelFilters,
   manualModelId,
   refreshingModels,
-  configurableModelTasks,
-  configurableModelCapabilities,
   notice,
+  nameDraft,
+  kindDraft,
+  baseUrlDraft,
+  apiKeyDraft,
+  endpointInspection,
+  hasMoreCandidates = false,
   onBack,
-  onUpdateProvider,
+  onSetNameDraft,
+  onChangeBindingDraft,
+  onSetApiKeyDraft,
+  onSaveProviderDraft,
   onRefreshModels,
   onSetModelSearchQuery,
   onSetModelCapabilityFilter,
@@ -92,8 +115,7 @@ export function ProviderDetailScreen({
   onAddManualModel,
   onSelectModel,
   onRemoveModel,
-  onSetActiveModelTask,
-  onToggleActiveModelCapability,
+  onLoadMoreCandidates,
   onDeleteProvider,
 }: ProviderDetailScreenProps) {
   const theme = useKelivoTheme();
@@ -164,16 +186,24 @@ export function ProviderDetailScreen({
         {tab === 'config' ? (
           <ConfigTab
             readOnly={readOnly}
-            provider={provider}
             showKey={showKey}
+            nameDraft={nameDraft}
+            kindDraft={kindDraft}
+            baseUrlDraft={baseUrlDraft}
+            apiKeyDraft={apiKeyDraft}
+            endpointInspection={endpointInspection}
+            refreshingModels={refreshingModels}
             onToggleShowKey={() => setShowKey((v) => !v)}
-            onUpdateProvider={onUpdateProvider}
+            onSetNameDraft={onSetNameDraft}
+            onChangeBindingDraft={onChangeBindingDraft}
+            onSetApiKeyDraft={onSetApiKeyDraft}
+            onSaveProviderDraft={onSaveProviderDraft}
+            onRefreshModels={onRefreshModels}
           />
         ) : (
           <ModelsTab
             readOnly={readOnly}
             providerName={provider.name}
-            activeModel={activeModel}
             activeModelId={activeModelId}
             addedModels={addedModels}
             addedModelIds={addedModelIds}
@@ -185,8 +215,7 @@ export function ProviderDetailScreen({
             candidateModelFilters={candidateModelFilters}
             manualModelId={manualModelId}
             refreshingModels={refreshingModels}
-            configurableModelTasks={configurableModelTasks}
-            configurableModelCapabilities={configurableModelCapabilities}
+            hasMoreCandidates={hasMoreCandidates}
             onRefreshModels={onRefreshModels}
             onSetModelSearchQuery={onSetModelSearchQuery}
             onSetModelCapabilityFilter={onSetModelCapabilityFilter}
@@ -196,8 +225,7 @@ export function ProviderDetailScreen({
             onAddManualModel={onAddManualModel}
             onSelectModel={onSelectModel}
             onRemoveModel={onRemoveModel}
-            onSetActiveModelTask={onSetActiveModelTask}
-            onToggleActiveModelCapability={onToggleActiveModelCapability}
+            onLoadMoreCandidates={onLoadMoreCandidates}
           />
         )}
       </MotionSwitch>
@@ -262,16 +290,34 @@ function TabButton({
 
 function ConfigTab({
   readOnly,
-  provider,
   showKey,
+  nameDraft,
+  kindDraft,
+  baseUrlDraft,
+  apiKeyDraft,
+  endpointInspection,
+  refreshingModels,
   onToggleShowKey,
-  onUpdateProvider,
+  onSetNameDraft,
+  onChangeBindingDraft,
+  onSetApiKeyDraft,
+  onSaveProviderDraft,
+  onRefreshModels,
 }: {
   readOnly: boolean;
-  provider: ProviderProfile;
   showKey: boolean;
+  nameDraft: string;
+  kindDraft: ProviderKind;
+  baseUrlDraft: string;
+  apiKeyDraft: string;
+  endpointInspection: ProviderEndpointInspection;
+  refreshingModels: boolean;
   onToggleShowKey: () => void;
-  onUpdateProvider: (patch: Partial<ProviderProfile>) => void;
+  onSetNameDraft: (name: string) => void;
+  onChangeBindingDraft: (patch: { kind?: ProviderKind; baseUrl?: string }) => void;
+  onSetApiKeyDraft: (apiKey: string) => void;
+  onSaveProviderDraft: () => void;
+  onRefreshModels: () => void;
 }) {
   const theme = useKelivoTheme();
   const styles = getStyles(theme);
@@ -281,75 +327,123 @@ function ConfigTab({
       style={styles.tabContent}
       contentContainerStyle={styles.tabContentInner}
       showsVerticalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
     >
       <MotionItem index={0} distance={8}>
-        <Text style={styles.sectionLabel}>管理</Text>
-        <View style={styles.card}>
+        <View style={styles.card} testID="provider-setup-wizard-card">
+          <View style={styles.cardHeader}>
+            <Text style={styles.sectionLabel}>服务商配置向导</Text>
+            <Text style={styles.badgeText}>
+              {endpointInspection.valid ? '本地校验通过' : '等待修正'}
+            </Text>
+          </View>
+          <Text style={styles.inputHint}>
+            先在本机校验协议、地址和密钥绑定，再请求模型目录。模型目录请求不生成内容；不会使用 Embezzle Studio 的额度或服务器。
+          </Text>
+
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>名称</Text>
             <TextInput
               editable={!readOnly}
-              value={provider.name}
-              onChangeText={(name) => onUpdateProvider({ name })}
+              value={nameDraft}
+              onChangeText={onSetNameDraft}
               style={styles.input}
               placeholder="Provider name"
               placeholderTextColor={theme.colors.textTertiary}
             />
           </View>
-        </View>
-      </MotionItem>
 
-      <MotionItem index={1} distance={8} style={styles.card}>
-        <View style={styles.inputGroup}>
-          <Text style={styles.inputLabel}>API Key</Text>
-          <View style={styles.keyInputWrap}>
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>协议类型</Text>
+            <SettingsSelect
+              value={kindDraft}
+              options={providerKindOptions}
+              disabled={readOnly}
+              accessibilityLabel="协议类型"
+              onChange={(kind) => onChangeBindingDraft({ kind })}
+            />
+          </View>
+
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Base URL</Text>
             <TextInput
               autoCapitalize="none"
               editable={!readOnly}
-              secureTextEntry={!showKey}
-              value={provider.apiKey ?? ''}
-              onChangeText={(apiKey) => onUpdateProvider({ apiKey })}
-              style={[styles.input, styles.keyInput]}
-              placeholder="留空则使用上层默认"
+              value={baseUrlDraft}
+              onChangeText={(baseUrl) => onChangeBindingDraft({ baseUrl })}
+              style={styles.input}
+              placeholder="https://api.example.com/v1"
               placeholderTextColor={theme.colors.textTertiary}
             />
-            <AnimatedPressable
-              accessibilityRole="button"
-              accessibilityState={{ disabled: readOnly }}
-              disabled={readOnly}
-              onPress={onToggleShowKey}
-              style={styles.eyeButton}
-            >
-              <MotionSwap
-                motionKey={showKey ? 'visible' : 'hidden'}
-                style={styles.eyeIconSwap}
-              >
-                {showKey ? (
-                  <EyeOff size={18} color={theme.colors.textSecondary} strokeWidth={2} />
-                ) : (
-                  <Eye size={18} color={theme.colors.textSecondary} strokeWidth={2} />
-                )}
-              </MotionSwap>
-            </AnimatedPressable>
           </View>
-          {Platform.OS === 'web' ? (
-            <Text style={styles.inputHint}>
-              Web 端仅在当前标签页会话中保存密钥；Android 使用系统安全存储。
-            </Text>
-          ) : null}
-        </View>
 
-        <View style={styles.inputGroup}>
-          <Text style={styles.inputLabel}>API Base URL</Text>
-          <TextInput
-            autoCapitalize="none"
-            editable={!readOnly}
-            value={provider.baseUrl}
-            onChangeText={(baseUrl) => onUpdateProvider({ baseUrl })}
-            style={styles.input}
-            placeholder="https://api.example.com/v1"
-            placeholderTextColor={theme.colors.textTertiary}
-          />
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>API Key</Text>
+            <View style={styles.keyInputWrap}>
+              <TextInput
+                autoCapitalize="none"
+                editable={!readOnly}
+                secureTextEntry={!showKey}
+                value={apiKeyDraft}
+                onChangeText={onSetApiKeyDraft}
+                style={[styles.input, styles.keyInput]}
+                placeholder="服务商 API Key"
+                placeholderTextColor={theme.colors.textTertiary}
+              />
+              <AnimatedPressable
+                accessibilityRole="button"
+                accessibilityState={{ disabled: readOnly }}
+                disabled={readOnly}
+                onPress={onToggleShowKey}
+                style={styles.eyeButton}
+              >
+                <MotionSwap
+                  motionKey={showKey ? 'visible' : 'hidden'}
+                  style={styles.eyeIconSwap}
+                >
+                  {showKey ? (
+                    <EyeOff size={18} color={theme.colors.textSecondary} strokeWidth={2} />
+                  ) : (
+                    <Eye size={18} color={theme.colors.textSecondary} strokeWidth={2} />
+                  )}
+                </MotionSwap>
+              </AnimatedPressable>
+            </View>
+            {Platform.OS === 'web' ? (
+              <Text style={styles.inputHint}>
+                Web 端仅在当前标签页会话中保存密钥，关闭标签页后会清除；Android 使用系统安全存储。
+              </Text>
+            ) : null}
+          </View>
+
+          {endpointInspection.errors.map((error) => (
+            <Text key={error} style={styles.errorText}>• {error}</Text>
+          ))}
+          {endpointInspection.warnings.map((warning) => (
+            <Text key={warning} style={styles.warningText}>• {warning}</Text>
+          ))}
+
+          <AnimatedPressable
+            accessibilityRole="button"
+            accessibilityState={{ disabled: readOnly }}
+            disabled={readOnly}
+            onPress={onSaveProviderDraft}
+            style={[styles.secondaryButton, readOnly && styles.buttonDisabled]}
+          >
+            <Text style={styles.secondaryButtonText}>保存并绑定此端点</Text>
+          </AnimatedPressable>
+
+          <AnimatedPressable
+            accessibilityRole="button"
+            accessibilityState={{ disabled: readOnly || refreshingModels, busy: refreshingModels }}
+            disabled={readOnly || refreshingModels}
+            onPress={onRefreshModels}
+            style={[styles.primaryButton, (readOnly || refreshingModels) && styles.buttonDisabled]}
+          >
+            <Text style={styles.primaryButtonText}>
+              {refreshingModels ? '请求中...' : '检查连接并获取模型目录'}
+            </Text>
+          </AnimatedPressable>
         </View>
       </MotionItem>
     </ScrollView>
@@ -359,7 +453,6 @@ function ConfigTab({
 function ModelsTab({
   readOnly,
   providerName,
-  activeModel,
   activeModelId,
   addedModels,
   addedModelIds,
@@ -371,8 +464,7 @@ function ModelsTab({
   candidateModelFilters,
   manualModelId,
   refreshingModels,
-  configurableModelTasks,
-  configurableModelCapabilities,
+  hasMoreCandidates,
   onSetModelSearchQuery,
   onSetModelCapabilityFilter,
   onAddCandidateModel,
@@ -382,12 +474,10 @@ function ModelsTab({
   onRefreshModels,
   onSelectModel,
   onRemoveModel,
-  onSetActiveModelTask,
-  onToggleActiveModelCapability,
+  onLoadMoreCandidates,
 }: {
   readOnly: boolean;
   providerName: string;
-  activeModel?: ModelInfo;
   activeModelId: string;
   addedModels: ModelInfo[];
   addedModelIds: Set<string>;
@@ -399,8 +489,7 @@ function ModelsTab({
   candidateModelFilters: Array<{ key: ModelCapabilityFilter; label: string }>;
   manualModelId: string;
   refreshingModels: boolean;
-  configurableModelTasks: ModelTask[];
-  configurableModelCapabilities: Array<{ key: Capability; label: string }>;
+  hasMoreCandidates: boolean;
   onSetModelSearchQuery: (query: string) => void;
   onSetModelCapabilityFilter: (filter: ModelCapabilityFilter) => void;
   onAddCandidateModel: (model: ModelInfo) => void;
@@ -410,8 +499,7 @@ function ModelsTab({
   onRefreshModels: () => void;
   onSelectModel: (modelId: string) => void;
   onRemoveModel: (modelId: string) => void;
-  onSetActiveModelTask: (task: ModelTask) => void;
-  onToggleActiveModelCapability: (capability: Capability) => void;
+  onLoadMoreCandidates?: () => void;
 }) {
   const theme = useKelivoTheme();
   const styles = getStyles(theme);
@@ -456,8 +544,14 @@ function ModelsTab({
         showsVerticalScrollIndicator={false}
       >
         {hasModels ? (
-          <View style={styles.card}>
-            <Text style={styles.sectionLabel}>已添加模型</Text>
+          <View style={styles.card} testID="model-capability-tags-card">
+            <View style={styles.cardHeader}>
+              <Text style={styles.sectionLabel}>已添加模型</Text>
+              <Text style={styles.badgeText}>{addedModels.length} 个</Text>
+            </View>
+            <Text style={styles.inputHint}>
+              标签展示用途与能力；点选可设为当前模型。
+            </Text>
             <View style={styles.listGap}>
               {addedModels.map((model, index) => (
                 <MotionItem key={model.id} index={index} distance={6} duration={220}>
@@ -472,55 +566,6 @@ function ModelsTab({
                   />
                 </MotionItem>
               ))}
-            </View>
-          </View>
-        ) : null}
-
-        {activeModel ? (
-          <View style={styles.card}>
-            <Text style={styles.sectionLabel}>当前模型覆盖</Text>
-            <Text style={styles.inputHint}>
-              仅在自动识别不准确时修改；用途和能力会随模型配置保存。
-            </Text>
-            <Text style={styles.inputLabel}>用途</Text>
-            <View style={styles.optionGrid}>
-              {configurableModelTasks.map((task) => {
-                const selected = inferModelTask(activeModel) === task;
-                return (
-                  <AnimatedPressable
-                    key={task}
-                    accessibilityRole="button"
-                    accessibilityState={{ disabled: readOnly, selected }}
-                    disabled={readOnly}
-                    onPress={() => onSetActiveModelTask(task)}
-                    style={[styles.filterChip, selected && styles.filterChipActive]}
-                  >
-                    <Text style={[styles.filterChipText, selected && styles.filterChipTextActive]}>
-                      {modelTaskLabel[task]}
-                    </Text>
-                  </AnimatedPressable>
-                );
-              })}
-            </View>
-            <Text style={styles.inputLabel}>能力</Text>
-            <View style={styles.optionGrid}>
-              {configurableModelCapabilities.map((capability) => {
-                const selected = activeModel.capabilities.includes(capability.key);
-                return (
-                  <AnimatedPressable
-                    key={capability.key}
-                    accessibilityRole="checkbox"
-                    accessibilityState={{ checked: selected, disabled: readOnly }}
-                    disabled={readOnly}
-                    onPress={() => onToggleActiveModelCapability(capability.key)}
-                    style={[styles.filterChip, selected && styles.filterChipActive]}
-                  >
-                    <Text style={[styles.filterChipText, selected && styles.filterChipTextActive]}>
-                      {capability.label}
-                    </Text>
-                  </AnimatedPressable>
-                );
-              })}
             </View>
           </View>
         ) : null}
@@ -543,6 +588,7 @@ function ModelsTab({
             <View style={styles.searchRow}>
               <Search size={16} color={theme.colors.textTertiary} strokeWidth={2} />
               <TextInput
+                testID="candidate-model-search"
                 autoCapitalize="none"
                 autoCorrect={false}
                 placeholder="搜索模型名称或 ID"
@@ -573,6 +619,7 @@ function ModelsTab({
                   <AnimatedPressable
                     key={filter.key}
                     accessibilityRole="button"
+                    testID={`candidate-model-filter-${filter.key}`}
                     onPress={() => onSetModelCapabilityFilter(filter.key)}
                     haptic="selection"
                     style={[styles.filterChip, active && styles.filterChipActive]}
@@ -590,7 +637,7 @@ function ModelsTab({
               })}
             </ScrollView>
 
-            <Text style={styles.countText}>
+            <Text testID="candidate-model-search-count" style={styles.countText}>
               显示 {renderedModelCandidates.length} / {filteredModelCandidates.length} 条匹配结果，共 {modelCandidates.length} 条
             </Text>
 
@@ -610,6 +657,16 @@ function ModelsTab({
                 <View style={styles.emptyCard}>
                   <Text style={styles.emptyCardText}>没有匹配的模型</Text>
                 </View>
+              ) : null}
+              {hasMoreCandidates && onLoadMoreCandidates ? (
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  accessibilityLabel="加载更多候选模型"
+                  onPress={onLoadMoreCandidates}
+                  style={styles.secondaryButton}
+                >
+                  <Text style={styles.secondaryButtonText}>加载更多</Text>
+                </AnimatedPressable>
               ) : null}
             </View>
           </View>
@@ -842,6 +899,37 @@ function createStyles(theme: KelivoTheme) {
     color: theme.colors.text,
     fontWeight: '600',
     fontSize: 14,
+  },
+  primaryButton: {
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: theme.colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+  },
+  primaryButtonText: {
+    color: theme.colors.onPrimary,
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  buttonDisabled: {
+    opacity: 0.5,
+  },
+  badgeText: {
+    color: theme.colors.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  errorText: {
+    color: theme.colors.error,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  warningText: {
+    color: theme.colors.warning,
+    fontSize: 12,
+    lineHeight: 18,
   },
   manualRow: {
     flexDirection: 'row',

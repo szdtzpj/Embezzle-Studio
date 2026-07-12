@@ -4,8 +4,7 @@ import { AnimatedPressable } from './AnimatedPressable';
 import { ModelAvatar } from './ModelAvatar';
 import { MotionSwap } from './Motion';
 import { useKelivoTheme, type KelivoTheme } from '../theme';
-import { inferModelTask } from '../../services/modelCapabilities';
-import { modelTaskLabel } from '../utils/modelDisplay';
+import { modelCapabilityTags } from '../utils/modelDisplay';
 import type { ModelInfo } from '../../domain/types';
 
 export interface ModelManageRowProps {
@@ -16,32 +15,6 @@ export interface ModelManageRowProps {
   disabled?: boolean;
   onActivate: () => void;
   onToggleSelect: () => void;
-}
-
-function capabilityBadges(model: ModelInfo) {
-  const badges: string[] = [modelTaskLabel[inferModelTask(model)]];
-  const caps = model.capabilities ?? [];
-
-  if (caps.includes('image-input')) {
-    badges.push('视觉');
-  }
-  if (caps.includes('video-input')) {
-    badges.push('视频理解');
-  }
-  if (caps.includes('reasoning')) {
-    badges.push('推理');
-  }
-  if (caps.includes('tool-calling')) {
-    badges.push('工具');
-  }
-  if (caps.includes('web-search')) {
-    badges.push('联网');
-  }
-  if (caps.includes('file-input')) {
-    badges.push('文件');
-  }
-
-  return badges.slice(0, 4);
 }
 
 export function ModelManageRow({
@@ -55,7 +28,7 @@ export function ModelManageRow({
 }: ModelManageRowProps) {
   const theme = useKelivoTheme();
   const styles = getStyles(theme);
-  const badges = capabilityBadges(model);
+  const badges = modelCapabilityTags(model, { max: 8 });
 
   return (
     <View style={[styles.row, active && styles.rowActive]}>

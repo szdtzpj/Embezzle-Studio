@@ -13,10 +13,14 @@ import {
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { MotionSwitch } from '../components/Motion';
 import { useKelivoTheme, type KelivoTheme } from '../theme';
-import { isUserCreatedProvider } from '../../data/providerCatalog';
 import type { AppUpdateInfo } from '../../services/updateChecker';
-import type { Capability, ModelInfo, ModelTask, ProviderProfile } from '../../domain/types';
+import type {
+  ModelInfo,
+  ProviderKind,
+  ProviderProfile,
+} from '../../domain/types';
 import type { ModelCapabilityFilter } from '../../services/modelCapabilities';
+import type { ProviderEndpointInspection } from '../../services/providerSetup';
 
 export type { SettingsToolsSection } from './settings/toolsSections';
 
@@ -27,7 +31,6 @@ export interface SettingsScreenProps {
   onClose: () => void;
   providers: ProviderProfile[];
   activeProvider: ProviderProfile;
-  activeModel?: ModelInfo;
   activeModelId: string;
   addedModels: ModelInfo[];
   addedModelIds: Set<string>;
@@ -39,19 +42,26 @@ export interface SettingsScreenProps {
   candidateModelFilters: Array<{ key: ModelCapabilityFilter; label: string }>;
   manualModelId: string;
   refreshingModels: boolean;
-  configurableModelTasks: ModelTask[];
-  configurableModelCapabilities: Array<{ key: Capability; label: string }>;
   checkingUpdate: boolean;
   updateInfo: AppUpdateInfo | null;
   updateNotice: string;
   notice: string;
+  providerNameDraft: string;
+  providerKindDraft: ProviderKind;
+  providerBaseUrlDraft: string;
+  providerApiKeyDraft: string;
+  providerEndpointInspection: ProviderEndpointInspection;
+  hasMoreCandidates?: boolean;
   /** Main-branch feature cards, keyed by settings section. */
   renderToolsSection?: (section: SettingsToolsSection) => ReactNode;
   onSelectProvider: (providerId: string) => void;
   onToggleProviderEnabled: (providerId: string) => void;
   onDeleteProvider: (providerId: string, onDeleted?: () => void) => void;
   onAddCustomProvider: () => void;
-  onUpdateProvider: (patch: Partial<ProviderProfile>) => void;
+  onSetProviderNameDraft: (name: string) => void;
+  onChangeProviderBindingDraft: (patch: { kind?: ProviderKind; baseUrl?: string }) => void;
+  onSetProviderApiKeyDraft: (apiKey: string) => void;
+  onSaveProviderDraft: () => void;
   onRefreshModels: () => void;
   onSetModelSearchQuery: (query: string) => void;
   onSetModelCapabilityFilter: (filter: ModelCapabilityFilter) => void;
@@ -61,8 +71,7 @@ export interface SettingsScreenProps {
   onAddManualModel: () => void;
   onSelectModel: (modelId: string) => void;
   onRemoveModel: (modelId: string) => void;
-  onSetActiveModelTask: (task: ModelTask) => void;
-  onToggleActiveModelCapability: (capability: Capability) => void;
+  onLoadMoreCandidates?: () => void;
   onCheckUpdates: () => void;
   onOpenUpdateTarget: (kind: 'release' | 'install') => void;
 }
@@ -89,6 +98,8 @@ export function SettingsScreen(props: SettingsScreenProps) {
     useState<PendingProviderDeletion | null>(null);
   const [navigationDirection, setNavigationDirection] =
     useState<'forward' | 'backward' | 'none'>('none');
+  /** Survives sub-page remounts so "关于" 等返回后仍停在刚才的滚动位置. */
+  const [mainScrollOffsetY, setMainScrollOffsetY] = useState(0);
   const current = stack[stack.length - 1];
 
   const push = (screen: Exclude<ScreenState, { key: 'main' }>) => {
@@ -107,11 +118,11 @@ export function SettingsScreen(props: SettingsScreenProps) {
   };
 
   const requestDeleteProvider = (providerId: string, onDeleted?: () => void) => {
-    if (props.readOnly) {
+    if (props.readOnly || props.providers.length <= 1) {
       return;
     }
     const provider = props.providers.find((item) => item.id === providerId);
-    if (!provider || !isUserCreatedProvider(provider)) {
+    if (!provider) {
       return;
     }
 
@@ -139,6 +150,8 @@ export function SettingsScreen(props: SettingsScreenProps) {
           <SettingsMainScreen
             colorMode={props.colorMode}
             activeProvider={props.activeProvider}
+            scrollOffsetY={mainScrollOffsetY}
+            onScrollOffsetChange={setMainScrollOffsetY}
             onBack={props.onClose}
             onColorMode={() => push({ key: 'colorMode' })}
             onProviders={() => push({ key: 'providers' })}
@@ -193,7 +206,6 @@ export function SettingsScreen(props: SettingsScreenProps) {
           <ProviderDetailScreen
             readOnly={props.readOnly}
             provider={props.activeProvider}
-            activeModel={props.activeModel}
             activeModelId={props.activeModelId}
             addedModels={props.addedModels}
             addedModelIds={props.addedModelIds}
@@ -205,11 +217,18 @@ export function SettingsScreen(props: SettingsScreenProps) {
             candidateModelFilters={props.candidateModelFilters}
             manualModelId={props.manualModelId}
             refreshingModels={props.refreshingModels}
-            configurableModelTasks={props.configurableModelTasks}
-            configurableModelCapabilities={props.configurableModelCapabilities}
             notice={props.notice}
+            nameDraft={props.providerNameDraft}
+            kindDraft={props.providerKindDraft}
+            baseUrlDraft={props.providerBaseUrlDraft}
+            apiKeyDraft={props.providerApiKeyDraft}
+            endpointInspection={props.providerEndpointInspection}
+            hasMoreCandidates={props.hasMoreCandidates}
             onBack={pop}
-            onUpdateProvider={props.onUpdateProvider}
+            onSetNameDraft={props.onSetProviderNameDraft}
+            onChangeBindingDraft={props.onChangeProviderBindingDraft}
+            onSetApiKeyDraft={props.onSetProviderApiKeyDraft}
+            onSaveProviderDraft={props.onSaveProviderDraft}
             onRefreshModels={props.onRefreshModels}
             onSetModelSearchQuery={props.onSetModelSearchQuery}
             onSetModelCapabilityFilter={props.onSetModelCapabilityFilter}
@@ -219,10 +238,9 @@ export function SettingsScreen(props: SettingsScreenProps) {
             onAddManualModel={props.onAddManualModel}
             onSelectModel={props.onSelectModel}
             onRemoveModel={props.onRemoveModel}
-            onSetActiveModelTask={props.onSetActiveModelTask}
-            onToggleActiveModelCapability={props.onToggleActiveModelCapability}
+            onLoadMoreCandidates={props.onLoadMoreCandidates}
             onDeleteProvider={
-              isUserCreatedProvider(props.activeProvider)
+              props.providers.length > 1
                 ? () => requestDeleteProvider(props.activeProvider.id, pop)
                 : undefined
             }
@@ -250,7 +268,7 @@ export function SettingsScreen(props: SettingsScreenProps) {
         visible={Boolean(pendingProviderDeletion)}
         title="删除供应商？"
         subject={pendingProviderDeletion?.providerName}
-        description="相关配置、模型记录和 API Key 将一并移除，此操作无法撤销。"
+        description="相关配置、模型列表、本地 API Key，以及绑定 MCP 配置与授权将一并移除；历史消息仍会保留。"
         confirmLabel="删除"
         onCancel={() => setPendingProviderDeletion(null)}
         onConfirm={confirmDeleteProvider}

@@ -76,6 +76,7 @@ function createStyles(theme: KelivoTheme) {
     content: {
       paddingTop: 10,
       paddingBottom: 28,
+      paddingHorizontal: 0,
       gap: 12,
     },
   });

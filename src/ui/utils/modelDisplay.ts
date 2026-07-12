@@ -1,4 +1,5 @@
-import type { ModelTask } from '../../domain/types';
+import { inferModelTask } from '../../services/modelCapabilities';
+import type { Capability, ModelInfo, ModelTask } from '../../domain/types';
 
 export type ModelIconKey =
   | 'claude'
@@ -25,6 +26,92 @@ export const modelTaskLabel: Record<ModelTask, string> = {
   embedding: '嵌入',
   rerank: '重排',
 };
+
+/** Short capability tags used on model rows (settings / pickers). */
+export const modelCapabilityTagLabel: Partial<Record<Capability, string>> = {
+  'image-input': '视觉',
+  'video-input': '视频理解',
+  'file-input': '文件',
+  reasoning: '推理',
+  'tool-calling': '工具',
+  'web-search': '联网',
+  'image-generation': '生图',
+  'video-generation': '视频生成',
+  'speech-to-text': '转写',
+  'text-to-speech': '朗读',
+  mcp: 'MCP',
+  embedding: '嵌入',
+  rerank: '重排',
+};
+
+const capabilityTagOrder: Capability[] = [
+  'image-input',
+  'video-input',
+  'file-input',
+  'reasoning',
+  'tool-calling',
+  'web-search',
+  'image-generation',
+  'video-generation',
+  'speech-to-text',
+  'text-to-speech',
+  'mcp',
+  'embedding',
+  'rerank',
+];
+
+/**
+ * Compact tags for a model: primary task + capability chips.
+ * Replaces the old capability-matrix table for day-to-day scanning.
+ */
+export function modelCapabilityTags(model: ModelInfo, options?: { max?: number }): string[] {
+  const max = options?.max ?? 8;
+  const tags: string[] = [];
+  const seen = new Set<string>();
+
+  const push = (label: string) => {
+    if (!label || seen.has(label) || tags.length >= max) {
+      return;
+    }
+    seen.add(label);
+    tags.push(label);
+  };
+
+  const task = inferModelTask(model);
+  push(modelTaskLabel[task]);
+
+  const caps = new Set(model.capabilities ?? []);
+  for (const capability of capabilityTagOrder) {
+    if (!caps.has(capability)) {
+      continue;
+    }
+    // Task already conveys the primary generation mode — skip duplicate.
+    if (capability === 'image-generation' && task === 'image-generation') {
+      continue;
+    }
+    if (capability === 'video-generation' && task === 'video-generation') {
+      continue;
+    }
+    if (capability === 'speech-to-text' && task === 'audio-transcription') {
+      continue;
+    }
+    if (capability === 'text-to-speech' && task === 'speech-generation') {
+      continue;
+    }
+    if (capability === 'embedding' && task === 'embedding') {
+      continue;
+    }
+    if (capability === 'rerank' && task === 'rerank') {
+      continue;
+    }
+    const label = modelCapabilityTagLabel[capability];
+    if (label) {
+      push(label);
+    }
+  }
+
+  return tags;
+}
 
 export function capitalizeFirstSegment(value: string) {
   return value.replace(/^[a-z]/, (char) => char.toUpperCase());

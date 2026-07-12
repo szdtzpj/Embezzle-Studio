@@ -200,7 +200,10 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('keeps provider setup and cost limits user-funded, local, and confirmed before requests', async () => {
-    const appSource = await source('App.tsx');
+    const [appSource, providerDetailSource] = await Promise.all([
+      source('App.tsx'),
+      source('src/ui/screens/settings/ProviderDetailScreen.tsx'),
+    ]);
     const sendSource = appSource.slice(
       appSource.indexOf('async function sendMessage'),
       appSource.indexOf('function toggleSettingsScreen')
@@ -210,11 +213,14 @@ describe('Android mobile UI regressions', () => {
       appSource.indexOf('function toggleReasoning')
     );
 
-    expect(appSource).toContain('testID="provider-setup-wizard-card"');
-    expect(appSource).toContain('testID="model-capability-matrix-card"');
+    expect(providerDetailSource).toContain('testID="provider-setup-wizard-card"');
+    expect(providerDetailSource).toContain('testID="model-capability-tags-card"');
+    expect(providerDetailSource).toContain('不会使用 Embezzle Studio 的额度或服务器');
+    const tagSource = await source('src/ui/utils/modelDisplay.ts');
+    expect(tagSource).toContain('export function modelCapabilityTags');
+    expect(tagSource).toContain("'image-input': '视觉'");
     expect(appSource).toContain('testID="cost-guard-settings-card"');
     expect(appSource).toContain('Free / Trial 字样 ≠ 免费额度');
-    expect(appSource).toContain('不会使用 Embezzle Studio 的额度或服务器');
     expect(appSource).toContain('providerKeyBindingFingerprint !== finalFingerprint');
     expect(sendSource.indexOf('authorizeProviderRequestPlan')).toBeGreaterThan(-1);
     expect(sendSource.indexOf('authorizeProviderRequestPlan')).toBeLessThan(

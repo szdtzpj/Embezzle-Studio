@@ -17,7 +17,6 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { ReactNode, SetStateAction } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   AppState,
   BackHandler,
   Image,
@@ -237,7 +236,6 @@ import {
   type WorkspaceSearchResult,
 } from './src/services/workspaceSearch';
 import {
-  buildModelCapabilityMatrixRows,
   compareProviderEndpointBinding,
   inspectProviderEndpoint,
   providerEndpointFingerprint,
@@ -253,6 +251,11 @@ import {
 } from './src/services/costGuard';
 import { SettingsScreen } from './src/ui/screens/SettingsScreen';
 import { KelivoThemeProvider } from './src/ui/theme';
+import { AppDialogHost } from './src/ui/components/AppDialogHost';
+import { ConfirmDialog } from './src/ui/components/ConfirmDialog';
+import { PromptDialog } from './src/ui/components/PromptDialog';
+import { ActionSheetDialog } from './src/ui/components/ActionSheetDialog';
+import { requestConfirm, requestNotice } from './src/ui/components/dialogService';
 
 /**
  * App shell visual tokens. Light/dark are aligned with Kelivo settings chrome
@@ -435,26 +438,23 @@ type AnimatedPressableProps = PressableProps & {
   haptic?: HapticStyle;
 };
 
-function confirmDestructiveAction(title: string, message: string): Promise<boolean> {
-  if (Platform.OS === 'web' && typeof globalThis.confirm === 'function') {
-    return Promise.resolve(globalThis.confirm(`${title}\n\n${message}`));
+function confirmDestructiveAction(
+  title: string,
+  message: string,
+  options?: {
+    confirmLabel?: string;
+    cancelLabel?: string;
+    tone?: 'danger' | 'warning' | 'primary';
+    subject?: string;
   }
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (value: boolean) => {
-      if (settled) return;
-      settled = true;
-      resolve(value);
-    };
-    Alert.alert(
-      title,
-      message,
-      [
-        { text: '取消', style: 'cancel', onPress: () => finish(false) },
-        { text: '继续', style: 'destructive', onPress: () => finish(true) },
-      ],
-      { cancelable: true, onDismiss: () => finish(false) }
-    );
+): Promise<boolean> {
+  return requestConfirm({
+    title,
+    description: message,
+    subject: options?.subject,
+    confirmLabel: options?.confirmLabel ?? '继续',
+    cancelLabel: options?.cancelLabel ?? '取消',
+    tone: options?.tone ?? 'danger',
   });
 }
 
@@ -865,14 +865,16 @@ const modelTaskLabel: Record<ModelTask, string> = {
   rerank: '重排',
 };
 const configurableModelCapabilities: Array<{ key: Capability; label: string }> = [
-  { key: 'image-input', label: '图片输入' },
-  { key: 'video-input', label: '视频输入' },
-  { key: 'file-input', label: '文件输入' },
-  { key: 'reasoning', label: '深度思考' },
-  { key: 'tool-calling', label: '工具调用' },
-  { key: 'web-search', label: '联网搜索' },
-  { key: 'speech-to-text', label: '语音转写' },
-  { key: 'text-to-speech', label: '语音合成' },
+  { key: 'image-input', label: '视觉' },
+  { key: 'video-input', label: '视频理解' },
+  { key: 'file-input', label: '文件' },
+  { key: 'reasoning', label: '推理' },
+  { key: 'tool-calling', label: '工具' },
+  { key: 'web-search', label: '联网' },
+  { key: 'image-generation', label: '生图' },
+  { key: 'video-generation', label: '视频生成' },
+  { key: 'speech-to-text', label: '转写' },
+  { key: 'text-to-speech', label: '朗读' },
   { key: 'mcp', label: 'MCP' },
 ];
 const configurableModelTasks: ModelTask[] = [
@@ -1299,6 +1301,7 @@ export default function App() {
           onSetColorMode={updateColorMode}
           appearanceNotice={appearanceNotice}
         />
+        <AppDialogHost />
       </AppThemeContext.Provider>
     </KelivoThemeProvider>
   );
@@ -1306,7 +1309,6 @@ export default function App() {
 
 type SettingsToolsSection =
   | 'workspace'
-  | 'providerSetup'
   | 'comparison'
   | 'webSearch'
   | 'prompts'
@@ -1993,12 +1995,6 @@ function AppContent({
       apiKey: providerApiKeyDraft,
     }),
     [providerApiKeyDraft, providerBaseUrlDraft, providerKindDraft]
-  );
-  const capabilityMatrixRows = useMemo(
-    () => activeProvider
-      ? buildModelCapabilityMatrixRows(activeProvider, addedModels, { platform: Platform.OS })
-      : [],
-    [activeProvider, addedModels]
   );
   const activeModelTask = activeModel ? inferModelTask(activeModel) : 'chat';
   const activeModelSupportsComposer = ['chat', 'image-generation', 'video-generation'].includes(activeModelTask);
@@ -2852,18 +2848,6 @@ function AppContent({
       }
       setNotice(result.messageId ? '已打开并定位匹配消息。' : '已打开匹配对话。');
     }
-  }
-
-  function updateActiveProvider(patch: Partial<ProviderProfile>) {
-    if (!ensureWorkspaceWritable() || !activeProvider) {
-      return;
-    }
-    setWorkspace((current) => ({
-      ...current,
-      providers: current.providers.map((provider) =>
-        provider.id === activeProvider.id ? { ...provider, ...patch } : provider
-      ),
-    }));
   }
 
   function closeSettings() {
@@ -7002,415 +6986,6 @@ function AppContent({
 
           </>
         );
-      case 'providerSetup':
-        return (
-          <>
-<View style={styles.settingsCard}>
-                <Text style={styles.settingsCardTitle}>服务商</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRow}>
-                  {workspace.providers.map((provider) => (
-                    <AnimatedPressable
-                      key={provider.id}
-                      accessibilityRole="button"
-                      onPress={() => selectProvider(provider.id)}
-                      haptic="selection"
-                      style={[
-                        styles.providerChip,
-                        provider.id === activeProvider.id && styles.providerChipActive,
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.providerChipText,
-                          provider.id === activeProvider.id && styles.providerChipTextActive,
-                        ]}
-                      >
-                        {provider.name}
-                      </Text>
-                    </AnimatedPressable>
-                  ))}
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    onPress={addCustomProvider}
-                    style={styles.providerChip}
-                  >
-                    <Text style={styles.providerChipText}>+ 新增</Text>
-                  </AnimatedPressable>
-                </ScrollView>
-              </View>
-
-<View style={styles.settingsCard} testID="provider-setup-wizard-card">
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>服务商配置向导</Text>
-                  <Text style={styles.modelOverrideHint}>
-                    {providerEndpointInspection.valid ? '本地校验通过' : '等待修正'}
-                  </Text>
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  先在本机校验协议、地址和密钥绑定，再请求模型目录。模型目录请求不生成内容；不会使用 Embezzle Studio 的额度或服务器。
-                </Text>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>名称</Text>
-                   <TextInput
-                    value={providerNameDraft}
-                    editable={!workspaceReadOnly}
-                    onChangeText={setProviderNameDraft}
-                    style={styles.input}
-                  />
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>协议类型</Text>
-                  <View style={styles.toolSegmentRow}>
-                    {([
-                      ['volcengine-ark', '火山方舟'],
-                      ['bailian-compatible', '阿里百炼'],
-                      ['openai-compatible', 'OpenAI'],
-                      ['custom', '兼容接口'],
-                    ] as const).map(([kind, label]) => (
-                      <AnimatedPressable
-                        key={kind}
-                        accessibilityRole="button"
-                        onPress={() => changeProviderBindingDraft({ kind })}
-                        style={[styles.toolSegment, providerKindDraft === kind && styles.toolSegmentActive]}
-                      >
-                        <Text style={[styles.toolSegmentText, providerKindDraft === kind && styles.toolSegmentTextActive]}>
-                          {label}
-                        </Text>
-                      </AnimatedPressable>
-                    ))}
-                  </View>
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>Base URL</Text>
-                  <TextInput
-                    autoCapitalize="none"
-                    value={providerBaseUrlDraft}
-                    editable={!workspaceReadOnly}
-                    onChangeText={(baseUrl) => changeProviderBindingDraft({ baseUrl })}
-                    style={styles.input}
-                  />
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>API Key</Text>
-                  <TextInput
-                    autoCapitalize="none"
-                    secureTextEntry
-                    value={providerApiKeyDraft}
-                    editable={!workspaceReadOnly}
-                   onChangeText={(apiKey) => {
-                     setProviderApiKeyDraft(apiKey);
-                     setProviderKeyBindingFingerprint(
-                       apiKey.trim()
-                         ? providerEndpointFingerprint({
-                             kind: providerKindDraft,
-                             baseUrl: providerBaseUrlDraft,
-                           }) ?? null
-                         : null
-                     );
-                   }}
-                   style={styles.input}
-                 />
-                  {Platform.OS === 'web' ? (
-                    <Text style={styles.modelOverrideHint}>
-                      Web 端仅在当前标签页会话中保存密钥，关闭标签页后会清除；Android 使用系统安全存储。
-                    </Text>
-                  ) : null}
-                </View>
-
-                {providerEndpointInspection.errors.map((error) => (
-                  <Text key={error} style={styles.providerWizardError}>• {error}</Text>
-                ))}
-                {providerEndpointInspection.warnings.map((warning) => (
-                  <Text key={warning} style={styles.providerWizardWarning}>• {warning}</Text>
-                ))}
-
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  disabled={workspaceReadOnly}
-                  onPress={saveProviderDraft}
-                  style={[styles.secondaryButton, workspaceReadOnly && styles.buttonDisabled]}
-                >
-                  <Text style={styles.secondaryButtonText}>保存并绑定此端点</Text>
-                </AnimatedPressable>
-
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  disabled={busy || workspaceReadOnly}
-                  onPress={refreshModels}
-                  style={[styles.primaryButton, (busy || workspaceReadOnly) && styles.buttonDisabled]}
-                >
-                  <Text style={styles.primaryButtonText}>{busy ? '请求中...' : '检查连接并获取模型目录'}</Text>
-                </AnimatedPressable>
-                {workspace.providers.length > 1 ? (
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`删除服务商 ${activeProvider.name}`}
-                    disabled={busy || workspaceReadOnly}
-                    onPress={() => setDeleteConfirmProviderId(activeProvider.id)}
-                    style={[styles.providerDeleteButton, (busy || workspaceReadOnly) && styles.buttonDisabled]}
-                  >
-                    <Trash2 size={15} color={palette.danger} strokeWidth={2.2} />
-                    <Text style={styles.providerDeleteButtonText}>删除此服务商</Text>
-                  </AnimatedPressable>
-                ) : null}
-              </View>
-
-<View style={styles.settingsCard} testID="model-capability-matrix-card">
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>模型能力矩阵</Text>
-                  <Text style={styles.modelOverrideHint}>{capabilityMatrixRows.length} 个已添加模型</Text>
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  “可用”同时要求模型声明支持、端点通过检查且客户端已经实现对应协议；“服务商侧”表示模型可能支持，但当前客户端尚未开放该入口。
-                </Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.capabilityMatrixTable}>
-                  <View>
-                    <View style={styles.capabilityMatrixHeaderRow}>
-                      <Text style={[styles.capabilityMatrixModelCell, styles.capabilityMatrixHeaderText]}>模型</Text>
-                      {([
-                        ['text', '文本'],
-                        ['image-input', '图片'],
-                        ['file-input', '文件'],
-                        ['reasoning', '思考'],
-                        ['web-search', '搜索'],
-                        ['image-generation', '生图'],
-                        ['video-generation', '视频'],
-                        ['speech-to-text', '转写'],
-                        ['text-to-speech', '朗读'],
-                      ] as const).map(([capability, label]) => (
-                        <Text key={capability} style={[styles.capabilityMatrixCell, styles.capabilityMatrixHeaderText]}>{label}</Text>
-                      ))}
-                    </View>
-                    {capabilityMatrixRows.slice(0, 50).map((row) => (
-                      <View key={`matrix:${row.providerId}:${row.modelId}`} style={styles.capabilityMatrixRow}>
-                        <Text numberOfLines={1} style={styles.capabilityMatrixModelCell}>{row.modelName}</Text>
-                        {(['text', 'image-input', 'file-input', 'reasoning', 'web-search', 'image-generation', 'video-generation', 'speech-to-text', 'text-to-speech'] as const).map((capability) => {
-                          const status = row.cells[capability].status;
-                          return (
-                            <View key={capability} style={styles.capabilityMatrixCell}>
-                              {status === 'available' ? (
-                                <Check size={15} color={palette.accent} strokeWidth={2.5} />
-                              ) : (
-                                <Text style={status === 'provider-only' ? styles.capabilityMatrixProviderOnly : styles.capabilityMatrixUnavailable}>
-                                  {status === 'provider-only' ? '侧' : '—'}
-                                </Text>
-                              )}
-                            </View>
-                          );
-                        })}
-                      </View>
-                    ))}
-                  </View>
-                </ScrollView>
-                {!capabilityMatrixRows.length ? (
-                  <Text style={styles.sidebarEmpty}>完成向导并添加模型后显示能力矩阵。</Text>
-                ) : null}
-              </View>
-
-<View style={styles.settingsCard}>
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>可添加模型</Text>
-                  {modelCandidates.length ? (
-                    <AnimatedPressable
-                      accessibilityRole="button"
-                      accessibilityLabel="清空可添加模型列表"
-                      onPress={() => {
-                        if (!ensureWorkspaceWritable()) {
-                          return;
-                        }
-                        setWorkspace((current) => ({
-                          ...current,
-                          modelCandidatesByProvider: {
-                            ...current.modelCandidatesByProvider,
-                            [activeProvider.id]: [],
-                          },
-                        }));
-                        setModelSearchQuery('');
-                        setModelCapabilityFilter('all');
-                      }}
-                      style={styles.settingsCardHeaderAction}
-                    >
-                      <Trash2 size={16} color={palette.textSecondary} strokeWidth={2} />
-                    </AnimatedPressable>
-                  ) : null}
-                </View>
-                {modelCandidates.length ? (
-                  <>
-                    <View style={styles.modelSearchRow}>
-                      <TextInput
-                        testID="candidate-model-search"
-                        autoCapitalize="none"
-                        autoCorrect={false}
-                        placeholder="搜索模型名称或 ID"
-                        placeholderTextColor={palette.placeholder}
-                        value={modelSearchQuery}
-                        onChangeText={setModelSearchQuery}
-                        style={[styles.input, styles.modelSearchInput]}
-                      />
-                      {modelSearchQuery ? (
-                        <AnimatedPressable
-                          accessibilityRole="button"
-                          onPress={() => setModelSearchQuery('')}
-                          style={styles.secondaryButton}
-                        >
-                          <Text style={styles.secondaryButtonText}>清除</Text>
-                        </AnimatedPressable>
-                      ) : null}
-                    </View>
-                    <ScrollView
-                      horizontal
-                      showsHorizontalScrollIndicator={false}
-                      contentContainerStyle={styles.modelFilterTabs}
-                    >
-                      {candidateModelFilters.map((filter) => {
-                        const active = filter.key === modelCapabilityFilter;
-
-                        return (
-                          <AnimatedPressable
-                            key={filter.key}
-                            accessibilityRole="button"
-                            testID={`candidate-model-filter-${filter.key}`}
-                            onPress={() => setModelCapabilityFilter(filter.key)}
-                            style={styles.modelFilterTab}
-                          >
-                            <Text
-                              style={[
-                                styles.modelFilterTabText,
-                                active && styles.modelFilterTabTextActive,
-                              ]}
-                            >
-                              {filter.label}
-                            </Text>
-                            <View style={[styles.modelFilterTabLine, active && styles.modelFilterTabLineActive]} />
-                          </AnimatedPressable>
-                        );
-                      })}
-                    </ScrollView>
-                    <Text testID="candidate-model-search-count" style={styles.modelSearchMeta}>
-                      已显示 {renderedModelCandidates.length} / {filteredModelCandidates.length} 条匹配结果，共 {modelCandidates.length} 条
-                    </Text>
-                  </>
-                ) : null}
-                {modelCandidates.length ? (
-                  <ScrollView
-                    nestedScrollEnabled
-                    style={styles.candidateModelListFrame}
-                    contentContainerStyle={styles.modelList}
-                    showsVerticalScrollIndicator={renderedModelCandidates.length > 4}
-                  >
-                    {renderedModelCandidates.map((model) => (
-                      <CandidateModelRow
-                        key={model.id}
-                        model={model}
-                        providerName={activeProvider.name}
-                        added={addedModelIds.has(model.id)}
-                        onAdd={() => addCandidateModel(model)}
-                      />
-                    ))}
-                    {!filteredModelCandidates.length ? (
-                      <View style={styles.modelSearchEmpty}>
-                        <Text style={styles.modelSearchEmptyText}>没有匹配的模型</Text>
-                      </View>
-                    ) : null}
-                    {renderedModelCandidates.length < filteredModelCandidates.length ? (
-                      <Pressable
-                        accessibilityRole="button"
-                        accessibilityLabel="加载更多候选模型"
-                        onPress={() =>
-                          setCandidateModelRenderLimit((current) => current + candidateModelPageSize)
-                        }
-                        style={({ pressed }) => [styles.loadMoreModelsButton, pressed && styles.buttonPressed]}
-                      >
-                        <Text style={styles.loadMoreModelsButtonText}>
-                          再显示 {Math.min(candidateModelPageSize, filteredModelCandidates.length - renderedModelCandidates.length)} 条
-                        </Text>
-                      </Pressable>
-                    ) : null}
-                  </ScrollView>
-                ) : null}
-              </View>
-
-<View style={styles.settingsCard}>
-                <Text style={styles.settingsCardTitle}>已添加模型</Text>
-                <View style={styles.inlineField}>
-                  <TextInput
-                    autoCapitalize="none"
-                    placeholder="手动模型 ID"
-                    placeholderTextColor={palette.placeholder}
-                    value={manualModelId}
-                    editable={!workspaceReadOnly}
-                    onChangeText={setManualModelId}
-                    style={[styles.input, styles.inlineInput]}
-                  />
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    onPress={addManualModel}
-                    style={styles.secondaryButton}
-                  >
-                    <Text style={styles.secondaryButtonText}>添加</Text>
-                  </AnimatedPressable>
-                </View>
-                <View style={styles.modelList}>
-                  {addedModels.map((model) => (
-                    <ModelButton
-                      key={model.id}
-                      model={model}
-                      providerName={activeProvider.name}
-                      active={model.id === activeModelId}
-                      onPress={() => selectModel(model.id)}
-                      onRemove={() => removeModel(model.id)}
-                    />
-                  ))}
-                </View>
-                {activeModel ? (
-                  <View style={styles.modelOverridePanel}>
-                    <Text style={styles.fieldLabel}>当前模型用途</Text>
-                    <View style={styles.capabilityRow}>
-                      {configurableModelTasks.map((task) => {
-                        const selected = inferModelTask(activeModel) === task;
-                        return (
-                          <AnimatedPressable
-                            key={task}
-                            accessibilityRole="button"
-                            accessibilityState={{ selected }}
-                            onPress={() => setActiveModelTask(task)}
-                            style={[styles.capabilityChip, selected && styles.capabilityChipActive]}
-                          >
-                            <Text style={[styles.capabilityText, selected && styles.capabilityTextActive]}>
-                              {modelTaskLabel[task]}
-                            </Text>
-                          </AnimatedPressable>
-                        );
-                      })}
-                    </View>
-                    <Text style={styles.fieldLabel}>能力覆盖</Text>
-                    <View style={styles.capabilityRow}>
-                      {configurableModelCapabilities.map((capability) => {
-                        const selected = activeModel.capabilities.includes(capability.key);
-                        return (
-                          <AnimatedPressable
-                            key={capability.key}
-                            accessibilityRole="checkbox"
-                            accessibilityState={{ checked: selected }}
-                            onPress={() => toggleActiveModelCapability(capability.key)}
-                            style={[styles.capabilityChip, selected && styles.capabilityChipActive]}
-                          >
-                            <Text style={[styles.capabilityText, selected && styles.capabilityTextActive]}>
-                              {capability.label}
-                            </Text>
-                          </AnimatedPressable>
-                        );
-                      })}
-                    </View>
-                    <Text style={styles.modelOverrideHint}>
-                      自动识别不准确时可手动覆盖；设置会随模型保存。
-                    </Text>
-                  </View>
-                ) : null}
-              </View>
-
-          </>
-        );
       case 'comparison':
         return (
           <>
@@ -8390,7 +7965,6 @@ function toggleSettingsScreen() {
                   onClose={closeSettings}
                   providers={workspace.providers}
                   activeProvider={activeProvider}
-                  activeModel={activeModel}
                   activeModelId={activeModelId}
                   addedModels={addedModels}
                   addedModelIds={addedModelIds}
@@ -8402,17 +7976,36 @@ function toggleSettingsScreen() {
                   candidateModelFilters={candidateModelFilters}
                   manualModelId={manualModelId}
                   refreshingModels={refreshingModels}
-                  configurableModelTasks={configurableModelTasks}
-                  configurableModelCapabilities={configurableModelCapabilities}
                   checkingUpdate={checkingUpdate}
                   updateInfo={updateInfo}
                   updateNotice={updateNotice}
                   notice={[notice, appearanceNotice].filter(Boolean).join('\n')}
+                  providerNameDraft={providerNameDraft}
+                  providerKindDraft={providerKindDraft}
+                  providerBaseUrlDraft={providerBaseUrlDraft}
+                  providerApiKeyDraft={providerApiKeyDraft}
+                  providerEndpointInspection={providerEndpointInspection}
+                  hasMoreCandidates={renderedModelCandidates.length < filteredModelCandidates.length}
                   onSelectProvider={selectProvider}
                   onToggleProviderEnabled={toggleProviderEnabled}
                   onDeleteProvider={deleteProvider}
                   onAddCustomProvider={addCustomProvider}
-                  onUpdateProvider={updateActiveProvider}
+                  onSetProviderNameDraft={setProviderNameDraft}
+                  onChangeProviderBindingDraft={changeProviderBindingDraft}
+                  onSetProviderApiKeyDraft={(apiKey) => {
+                    setProviderApiKeyDraft(apiKey);
+                    setProviderKeyBindingFingerprint(
+                      apiKey.trim()
+                        ? providerEndpointFingerprint({
+                            kind: providerKindDraft,
+                            baseUrl: providerBaseUrlDraft,
+                          }) ?? null
+                        : null
+                    );
+                  }}
+                  onSaveProviderDraft={() => {
+                    saveProviderDraft();
+                  }}
                   onRefreshModels={refreshModels}
                   onSetModelSearchQuery={setModelSearchQuery}
                   onSetModelCapabilityFilter={setModelCapabilityFilter}
@@ -8435,8 +8028,9 @@ function toggleSettingsScreen() {
                   onAddManualModel={addManualModel}
                   onSelectModel={selectModel}
                   onRemoveModel={removeModel}
-                  onSetActiveModelTask={setActiveModelTask}
-                  onToggleActiveModelCapability={toggleActiveModelCapability}
+                  onLoadMoreCandidates={() => {
+                    setCandidateModelRenderLimit((current) => current + candidateModelPageSize);
+                  }}
                   onCheckUpdates={checkUpdates}
                   onOpenUpdateTarget={openUpdateTarget}
                   renderToolsSection={(section) => renderSettingsToolsSection(section)}
@@ -9173,33 +8767,47 @@ function toggleSettingsScreen() {
             haptic="medium"
             style={[styles.sidebarNewChat, workspaceReadOnly && styles.buttonDisabled]}
           >
-            <PenSquare size={18} color={palette.textOnAccent} strokeWidth={2} />
+            <PenSquare size={16} color={palette.textOnAccent} strokeWidth={2} />
             <Text style={styles.sidebarNewChatText}>新对话</Text>
           </AnimatedPressable>
 
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.sidebarProjectRow}
-            testID="project-switcher"
-          >
-            {workspace.projects.map((project) => {
-              const selected = project.id === workspace.activeProjectId;
-              return (
-                <AnimatedPressable
-                  key={project.id}
-                  accessibilityRole="button"
-                  onPress={() => selectProject(project.id)}
-                  style={[styles.sidebarProjectChip, selected && styles.sidebarProjectChipActive]}
-                >
-                  <Folder size={13} color={selected ? palette.textOnAccent : palette.textSecondary} strokeWidth={2.2} />
-                  <Text numberOfLines={1} style={[styles.sidebarProjectChipText, selected && styles.sidebarProjectChipTextActive]}>
-                    {project.name}
-                  </Text>
-                </AnimatedPressable>
-              );
-            })}
-          </ScrollView>
+          <View style={styles.sidebarProjectBlock} testID="project-switcher">
+            <Text style={styles.sidebarProjectLabel}>项目</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.sidebarProjectRow}
+            >
+              {workspace.projects.map((project) => {
+                const selected = project.id === workspace.activeProjectId;
+                return (
+                  <AnimatedPressable
+                    key={project.id}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected }}
+                    onPress={() => selectProject(project.id)}
+                    haptic="selection"
+                    style={[styles.sidebarProjectChip, selected && styles.sidebarProjectChipActive]}
+                  >
+                    <Folder
+                      size={12}
+                      color={selected ? palette.accentText : palette.textSecondary}
+                      strokeWidth={2}
+                    />
+                    <Text
+                      numberOfLines={1}
+                      style={[
+                        styles.sidebarProjectChipText,
+                        selected && styles.sidebarProjectChipTextActive,
+                      ]}
+                    >
+                      {project.name}
+                    </Text>
+                  </AnimatedPressable>
+                );
+              })}
+            </ScrollView>
+          </View>
 
           <View style={styles.sidebarSearchBox}>
             <Search size={16} color={palette.textSecondary} strokeWidth={2} />
@@ -9265,7 +8873,7 @@ function toggleSettingsScreen() {
           ) : null}
 
           <View style={[styles.sidebarSection, historySearchQuery ? { display: 'none' } : undefined]}>
-            <Text style={styles.sidebarSectionTitle}>{activeProject?.name ?? '最近'}</Text>
+            <Text style={styles.sidebarSectionTitle}>对话</Text>
             {filteredConversations.length ? (
               <ScrollView
                 style={styles.sidebarConversationList}
@@ -9411,61 +9019,21 @@ function toggleSettingsScreen() {
           ) : null}
         </SidebarDrawer>
 
-        <Modal
+        <PromptDialog
           visible={Boolean(renamingConversation)}
-          transparent
-          animationType="fade"
-          onRequestClose={() => {
+          title="编辑对话名称"
+          value={renameDraft}
+          onChangeText={setRenameDraft}
+          maxLength={60}
+          placeholder="输入对话名称"
+          confirmLabel="保存"
+          cancelLabel="取消"
+          onConfirm={saveConversationTitle}
+          onCancel={() => {
             setRenamingConversationId(null);
             setRenameDraft('');
           }}
-        >
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined}
-            keyboardVerticalOffset={0}
-            style={styles.modalKeyboard}
-          >
-            <Pressable
-              style={styles.renameDialogScrim}
-              onPress={() => {
-                setRenamingConversationId(null);
-                setRenameDraft('');
-              }}
-            >
-              <Pressable style={styles.renameDialog} onPress={(event) => event.stopPropagation()}>
-                <Text style={styles.renameDialogTitle}>编辑对话名称</Text>
-                <TextInput
-                  value={renameDraft}
-                  onChangeText={setRenameDraft}
-                  autoFocus
-                  maxLength={60}
-                  placeholder="输入对话名称"
-                  placeholderTextColor={palette.placeholder}
-                  style={styles.renameDialogInput}
-                />
-                <View style={styles.renameDialogActions}>
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    onPress={() => {
-                      setRenamingConversationId(null);
-                      setRenameDraft('');
-                    }}
-                    style={styles.renameDialogSecondaryButton}
-                  >
-                    <Text style={styles.renameDialogSecondaryText}>取消</Text>
-                  </AnimatedPressable>
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    onPress={saveConversationTitle}
-                    style={styles.renameDialogPrimaryButton}
-                  >
-                    <Text style={styles.renameDialogPrimaryText}>保存</Text>
-                  </AnimatedPressable>
-                </View>
-              </Pressable>
-            </Pressable>
-          </KeyboardAvoidingView>
-        </Modal>
+        />
 
         <McpApprovalModal
           visible={mcpApprovalView !== null}
@@ -9473,150 +9041,72 @@ function toggleSettingsScreen() {
           onDecision={resolveMcpApproval}
         />
 
-        <Modal
+        <ConfirmDialog
           visible={Boolean(costConfirmationReason)}
-          transparent
-          animationType="fade"
-          onRequestClose={() => resolveCostConfirmation(false)}
-        >
-          <Pressable style={styles.deleteConfirmScrim} onPress={() => resolveCostConfirmation(false)}>
-            <Pressable style={styles.deleteConfirmDialog} onPress={(event) => event.stopPropagation()}>
-              <View style={styles.deleteConfirmIconWrap}>
-                <ShieldCheck size={22} color={palette.warning} strokeWidth={2.3} />
-              </View>
-              <Text style={styles.deleteConfirmTitle}>确认可能产生的服务商费用</Text>
-              <Text style={styles.deleteConfirmDescription}>{costConfirmationReason}</Text>
-              <Text style={styles.modelOverrideHint}>这里只显示本机估算，真实费用与是否计费以你的服务商账单为准。</Text>
-              <View style={styles.deleteConfirmActions}>
-                <AnimatedPressable accessibilityRole="button" onPress={() => resolveCostConfirmation(false)} style={styles.deleteConfirmCancelButton}>
-                  <Text style={styles.deleteConfirmCancelText}>取消，不发送</Text>
-                </AnimatedPressable>
-                <AnimatedPressable accessibilityRole="button" onPress={() => resolveCostConfirmation(true)} style={styles.deleteConfirmDeleteButton}>
-                  <Text style={styles.deleteConfirmButtonText}>确认并继续</Text>
-                </AnimatedPressable>
-              </View>
-            </Pressable>
-          </Pressable>
-        </Modal>
+          title="确认可能产生的服务商费用"
+          description={`${costConfirmationReason ?? ''}\n\n这里只显示本机估算，真实费用与是否计费以你的服务商账单为准。`}
+          confirmLabel="确认并继续"
+          cancelLabel="取消，不发送"
+          tone="warning"
+          icon={<ShieldCheck size={22} color={palette.warning} strokeWidth={2.3} />}
+          onConfirm={() => resolveCostConfirmation(true)}
+          onCancel={() => resolveCostConfirmation(false)}
+        />
 
-        <Modal
+        <ActionSheetDialog
           visible={Boolean(moveConversationId)}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setMoveConversationId(null)}
+          title="移动到项目"
+          description="只调整本地归类，不会发送请求或移动媒体文件。"
+          icon={<Folder size={22} color={palette.text} strokeWidth={2.2} />}
+          onClose={() => setMoveConversationId(null)}
         >
-          <Pressable style={styles.deleteConfirmScrim} onPress={() => setMoveConversationId(null)}>
-            <Pressable style={styles.deleteConfirmDialog} onPress={(event) => event.stopPropagation()}>
-              <View style={styles.deleteConfirmIconWrap}>
-                <Folder size={22} color={palette.text} strokeWidth={2.2} />
-              </View>
-              <Text style={styles.deleteConfirmTitle}>移动到项目</Text>
-              <Text style={styles.deleteConfirmDescription}>只调整本地归类，不会发送请求或移动媒体文件。</Text>
-              <ScrollView style={styles.projectMoveList}>
-                {workspace.projects.map((project) => (
-                  <AnimatedPressable
-                    key={`move:${project.id}`}
-                    accessibilityRole="button"
-                    onPress={() => moveConversation(moveConversationId!, project.id)}
-                    style={styles.projectMoveRow}
-                  >
-                    <Folder size={16} color={palette.textSecondary} strokeWidth={2} />
-                    <Text numberOfLines={1} style={styles.projectMoveRowText}>{project.name}</Text>
-                    {workspace.conversations.find((conversation) => conversation.id === moveConversationId)?.projectId === project.id ? (
-                      <Check size={16} color={palette.accent} strokeWidth={2.4} />
-                    ) : null}
-                  </AnimatedPressable>
-                ))}
-              </ScrollView>
-            </Pressable>
-          </Pressable>
-        </Modal>
+          {workspace.projects.map((project) => (
+            <AnimatedPressable
+              key={`move:${project.id}`}
+              accessibilityRole="button"
+              onPress={() => moveConversation(moveConversationId!, project.id)}
+              style={styles.projectMoveRow}
+            >
+              <Folder size={16} color={palette.textSecondary} strokeWidth={2} />
+              <Text numberOfLines={1} style={styles.projectMoveRowText}>{project.name}</Text>
+              {workspace.conversations.find((conversation) => conversation.id === moveConversationId)?.projectId === project.id ? (
+                <Check size={16} color={palette.accent} strokeWidth={2.4} />
+              ) : null}
+            </AnimatedPressable>
+          ))}
+        </ActionSheetDialog>
 
-        <Modal
+        <ConfirmDialog
           visible={Boolean(deleteConfirmConversation)}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setDeleteConfirmConversationId(null)}
-        >
-          <Pressable
-            style={styles.deleteConfirmScrim}
-            onPress={() => setDeleteConfirmConversationId(null)}
-          >
-            <Pressable style={styles.deleteConfirmDialog} onPress={(event) => event.stopPropagation()}>
-              <View style={styles.deleteConfirmIconWrap}>
-                <Trash2 size={22} color={palette.danger} strokeWidth={2.4} />
-              </View>
-              <Text style={styles.deleteConfirmTitle}>删除聊天记录</Text>
-              <Text style={styles.deleteConfirmText}>
-                这会从本地移除「{deleteConfirmConversation?.title ?? '该对话'}」，并释放这条记录占用的本地存储。
-              </Text>
-              <View style={styles.renameDialogActions}>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  onPress={() => setDeleteConfirmConversationId(null)}
-                  style={styles.renameDialogSecondaryButton}
-                >
-                  <Text style={styles.renameDialogSecondaryText}>取消</Text>
-                </AnimatedPressable>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  onPress={() => {
-                    if (deleteConfirmConversation) {
-                      deleteConversation(deleteConfirmConversation.id);
-                    }
-                  }}
-                  haptic="warning"
-                  style={styles.deleteConfirmButton}
-                >
-                  <Text style={styles.deleteConfirmButtonText}>删除</Text>
-                </AnimatedPressable>
-              </View>
-            </Pressable>
-          </Pressable>
-        </Modal>
+          title="删除聊天记录"
+          subject={deleteConfirmConversation?.title}
+          description="这会从本地移除该对话，并释放这条记录占用的本地存储。"
+          confirmLabel="删除"
+          cancelLabel="取消"
+          tone="danger"
+          onConfirm={() => {
+            if (deleteConfirmConversation) {
+              deleteConversation(deleteConfirmConversation.id);
+            }
+          }}
+          onCancel={() => setDeleteConfirmConversationId(null)}
+        />
 
-        <Modal
+        <ConfirmDialog
           visible={Boolean(deleteConfirmProvider)}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setDeleteConfirmProviderId(null)}
-        >
-          <Pressable
-            style={styles.deleteConfirmScrim}
-            onPress={() => setDeleteConfirmProviderId(null)}
-          >
-            <Pressable style={styles.deleteConfirmDialog} onPress={(event) => event.stopPropagation()}>
-              <View style={styles.deleteConfirmIconWrap}>
-                <Trash2 size={22} color={palette.danger} strokeWidth={2.4} />
-              </View>
-              <Text style={styles.deleteConfirmTitle}>删除服务商</Text>
-              <Text style={styles.deleteConfirmText}>
-                这会删除「{deleteConfirmProvider?.name ?? '该服务商'}」的配置、模型列表、本地 API Key，以及所有绑定 MCP 配置与授权；历史消息仍会保留。
-              </Text>
-              <View style={styles.renameDialogActions}>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  onPress={() => setDeleteConfirmProviderId(null)}
-                  style={styles.renameDialogSecondaryButton}
-                >
-                  <Text style={styles.renameDialogSecondaryText}>取消</Text>
-                </AnimatedPressable>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  onPress={() => {
-                    if (deleteConfirmProvider) {
-                      void deleteProvider(deleteConfirmProvider.id);
-                    }
-                  }}
-                  haptic="warning"
-                  style={styles.deleteConfirmButton}
-                >
-                  <Text style={styles.deleteConfirmButtonText}>删除</Text>
-                </AnimatedPressable>
-              </View>
-            </Pressable>
-          </Pressable>
-        </Modal>
+          title="删除服务商"
+          subject={deleteConfirmProvider?.name}
+          description="这会删除该服务商的配置、模型列表、本地 API Key，以及所有绑定 MCP 配置与授权；历史消息仍会保留。"
+          confirmLabel="删除"
+          cancelLabel="取消"
+          tone="danger"
+          onConfirm={() => {
+            if (deleteConfirmProvider) {
+              void deleteProvider(deleteConfirmProvider.id);
+            }
+          }}
+          onCancel={() => setDeleteConfirmProviderId(null)}
+        />
 
         {workbenchOpen ? (
           <WorkspaceWorkbench
@@ -10777,7 +10267,11 @@ function AttachmentPreview({
       }
       throw new Error('当前设备没有可用的文件导出应用。');
     })().catch((error) => {
-      Alert.alert('无法打开附件', error instanceof Error ? error.message : '请稍后重试。');
+      void requestNotice({
+        title: '无法打开附件',
+        description: error instanceof Error ? error.message : '请稍后重试。',
+        tone: 'danger',
+      });
     });
   };
 
@@ -10785,11 +10279,19 @@ function AttachmentPreview({
     void saveAttachmentToDevice(attachment)
       .then((result) => {
         if (result.status === 'saved') {
-          Alert.alert('已保存', `“${result.name}”已保存到你选择的位置。`);
+          void requestNotice({
+            title: '已保存',
+            description: `“${result.name}”已保存到你选择的位置。`,
+            tone: 'primary',
+          });
         }
       })
       .catch((error) => {
-        Alert.alert('无法保存附件', error instanceof Error ? error.message : '请稍后重试。');
+        void requestNotice({
+          title: '无法保存附件',
+          description: error instanceof Error ? error.message : '请稍后重试。',
+          tone: 'danger',
+        });
       });
   };
 
@@ -11147,10 +10649,13 @@ function createAppStyles(palette: AppPalette) {
     fontFamily: serifFont,
   },
   settingsCard: {
-    backgroundColor: '#FFFFFF',
+    backgroundColor: palette.surfaceAlt,
     borderRadius: radii.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: palette.border,
     padding: 16,
     gap: 14,
+    marginHorizontal: 12,
   },
   settingsCardTitle: {
     color: palette.text,
@@ -12984,39 +12489,50 @@ function createAppStyles(palette: AppPalette) {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 24,
+    marginBottom: 16,
   },
   sidebarBrand: {
     color: palette.text,
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: '700',
     fontFamily: serifFont,
   },
   sidebarClose: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
   },
   sidebarNewChat: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    height: 44,
+    gap: 8,
+    height: 38,
     borderRadius: radii.pill,
     backgroundColor: palette.accent,
-    paddingHorizontal: 18,
-    alignSelf: 'flex-start',
-    marginBottom: 28,
+    paddingHorizontal: 14,
+    alignSelf: 'stretch',
+    justifyContent: 'center',
+    marginBottom: 14,
   },
   sidebarNewChatText: {
     color: palette.textOnAccent,
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '600',
   },
+  sidebarProjectBlock: {
+    marginBottom: 12,
+    gap: 6,
+  },
+  sidebarProjectLabel: {
+    color: palette.textSecondary,
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.3,
+  },
   sidebarSearchBox: {
-    height: 40,
+    height: 36,
     borderRadius: radii.md,
     borderWidth: 1,
     borderColor: palette.border,
@@ -13024,8 +12540,8 @@ function createAppStyles(palette: AppPalette) {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 12,
-    marginBottom: 22,
+    paddingHorizontal: 10,
+    marginBottom: 14,
   },
   sidebarSearchInput: {
     flex: 1,
@@ -13048,11 +12564,10 @@ function createAppStyles(palette: AppPalette) {
   },
   sidebarSectionTitle: {
     color: palette.textSecondary,
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: '600',
-    marginBottom: 12,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    marginBottom: 8,
+    letterSpacing: 0.3,
   },
   sidebarConversationList: {
     flex: 1,
@@ -13391,34 +12906,34 @@ function createAppStyles(palette: AppPalette) {
     fontSize: 14,
   },
   sidebarProjectRow: {
-    gap: 7,
-    paddingVertical: 8,
-    paddingHorizontal: 2,
+    gap: 6,
+    paddingVertical: 0,
+    paddingRight: 4,
   },
   sidebarProjectChip: {
-    maxWidth: 170,
-    minHeight: 32,
+    maxWidth: 140,
+    minHeight: 26,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 11,
+    gap: 4,
+    paddingHorizontal: 9,
     borderRadius: radii.pill,
     borderWidth: 1,
     borderColor: palette.border,
-    backgroundColor: palette.surface,
+    backgroundColor: 'transparent',
   },
   sidebarProjectChipActive: {
-    backgroundColor: palette.accent,
-    borderColor: palette.accent,
+    backgroundColor: palette.accentSoft,
+    borderColor: palette.accentBorder,
   },
   sidebarProjectChipText: {
     flexShrink: 1,
     color: palette.textSecondary,
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 11,
+    fontWeight: '600',
   },
   sidebarProjectChipTextActive: {
-    color: palette.textOnAccent,
+    color: palette.accentText,
   },
   globalSearchResultRow: {
     borderRadius: radii.md,

@@ -1,9 +1,10 @@
 import { BookOpen, Check, Clock3, Download, FilePlus2, FileText, History, Plus, RotateCcw, Save, Search, Trash2, X } from 'lucide-react-native';
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useKelivoTheme, type KelivoTheme } from '../ui/theme';
+import { requestConfirm } from '../ui/components/dialogService';
 
 import type {
   ProjectKnowledgeSource,
@@ -190,26 +191,29 @@ export function WorkspaceWorkbench({
   );
   const newKnowledgeDirty = Boolean(newKnowledgeTitle.trim() || newKnowledgeContent.trim());
 
-  function confirmDiscard(dirty: boolean, action: () => void) {
+  async function confirmDiscard(dirty: boolean, action: () => void) {
     if (!dirty) {
       action();
       return;
     }
-    const message = '继续会放弃尚未保存的本地编辑。请先保存，或确认放弃。';
-    if (Platform.OS === 'web') {
-      if (typeof globalThis.confirm === 'function' && globalThis.confirm(message)) action();
-      return;
+    const confirmed = await requestConfirm({
+      title: '放弃未保存修改？',
+      description: '继续会放弃尚未保存的本地编辑。请先保存，或确认放弃。',
+      confirmLabel: '放弃修改',
+      cancelLabel: '继续编辑',
+      tone: 'warning',
+    });
+    if (confirmed) {
+      action();
     }
-    Alert.alert('放弃未保存修改？', message, [
-      { text: '继续编辑', style: 'cancel' },
-      { text: '放弃修改', style: 'destructive', onPress: action },
-    ]);
   }
 
-  const requestClose = () => confirmDiscard(
-    artifactDirty || knowledgeDirty || newKnowledgeDirty,
-    onClose
-  );
+  const requestClose = () => {
+    void confirmDiscard(
+      artifactDirty || knowledgeDirty || newKnowledgeDirty,
+      onClose
+    );
+  };
 
   return (
     <Modal
