@@ -13,7 +13,7 @@ import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
 import * as Sharing from 'expo-sharing';
 import { VideoView, useVideoPlayer } from 'expo-video';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode, SetStateAction } from 'react';
 import {
   ActivityIndicator,
@@ -255,33 +255,122 @@ import { SettingsScreen } from './src/ui/screens/SettingsScreen';
 import { KelivoThemeProvider } from './src/ui/theme';
 
 /**
- * Anthropic / Claude 风格视觉令牌。
- * 暖色纸张底、粘土色强调、柔和圆角。仅影响外观，不改动任何业务逻辑。
+ * App shell visual tokens. Light/dark are aligned with Kelivo settings chrome
+ * so chat and settings feel like one product.
  */
-const palette = {
-  bg: '#F4F4F4',
-  surface: '#EAEAEA',
-  surfaceAlt: '#E2E2E2',
-  surfaceSunken: '#DCDCDC',
-  border: '#D9D9D9',
-  borderStrong: '#C4C4C4',
-  accent: '#0D0D0D',
-  accentPressed: '#333333',
-  accentSoft: '#EAEAEA',
-  accentBorder: '#C4C4C4',
-  accentText: '#0D0D0D',
-  text: '#0D0D0D',
-  textSecondary: '#6E6E6E',
+interface AppPalette {
+  bg: string;
+  surface: string;
+  surfaceAlt: string;
+  surfaceSunken: string;
+  border: string;
+  borderStrong: string;
+  accent: string;
+  accentPressed: string;
+  accentSoft: string;
+  accentBorder: string;
+  accentText: string;
+  text: string;
+  textSecondary: string;
+  textMuted: string;
+  textMutedSolid: string;
+  textOnAccent: string;
+  danger: string;
+  dangerBg: string;
+  dangerBorder: string;
+  warning: string;
+  edit: string;
+  success: string;
+  placeholder: string;
+  scrim: string;
+  userBubble: string;
+  userBubbleBorder: string;
+  userEditBubble: string;
+  userEditBorder: string;
+  frostedSurface: string;
+}
+
+const lightPalette: AppPalette = {
+  bg: '#F7F7F7',
+  surface: '#FFFFFF',
+  surfaceAlt: '#F0F0F0',
+  surfaceSunken: '#EFEFEF',
+  border: 'rgba(0, 0, 0, 0.10)',
+  borderStrong: 'rgba(0, 0, 0, 0.14)',
+  accent: '#4D5C92',
+  accentPressed: '#3D4B7A',
+  accentSoft: '#DCE1FF',
+  accentBorder: '#C6D0FF',
+  accentText: '#4D5C92',
+  text: '#202020',
+  textSecondary: '#646464',
   textMuted: '#9A9A9A55',
   textMutedSolid: '#9A9A9A',
   textOnAccent: '#FFFFFF',
-  danger: '#DC2626',
-  dangerBg: '#FEF2F2',
-  dangerBorder: '#FECACA',
+  danger: '#BB0947',
+  dangerBg: '#FDDADE',
+  dangerBorder: 'rgba(187, 9, 71, 0.28)',
   warning: '#D97706',
+  edit: '#2563EB',
+  success: '#16A34A',
   placeholder: '#9CA3AF',
-  scrim: 'rgba(0, 0, 0, 0.4)',
-} as const;
+  scrim: 'rgba(0, 0, 0, 0.32)',
+  userBubble: '#F3F4F6',
+  userBubbleBorder: '#E5E7EB',
+  userEditBubble: '#EEF2FF',
+  userEditBorder: '#C7D2FE',
+  frostedSurface: 'rgba(255, 255, 255, 0.72)',
+};
+
+const darkPalette: AppPalette = {
+  bg: '#101217',
+  surface: '#14161C',
+  surfaceAlt: '#1B1D24',
+  surfaceSunken: '#0E1015',
+  border: 'rgba(255, 255, 255, 0.13)',
+  borderStrong: 'rgba(255, 255, 255, 0.20)',
+  accent: '#B8C4FF',
+  accentPressed: '#CAD2FF',
+  accentSoft: '#2D375D',
+  accentBorder: '#53618D',
+  accentText: '#B8C4FF',
+  text: '#E5E7EF',
+  textSecondary: '#B8BBC6',
+  textMuted: '#878A9566',
+  textMutedSolid: '#878A95',
+  textOnAccent: '#1E2A5A',
+  danger: '#FFB1C2',
+  dangerBg: '#5B1130',
+  dangerBorder: 'rgba(255, 177, 194, 0.35)',
+  warning: '#FFB95F',
+  edit: '#93C5FD',
+  success: '#6DD58C',
+  placeholder: '#878A95',
+  scrim: 'rgba(0, 0, 0, 0.62)',
+  userBubble: '#242731',
+  userBubbleBorder: '#343844',
+  userEditBubble: '#222942',
+  userEditBorder: '#394469',
+  frostedSurface: 'rgba(17, 18, 20, 0.74)',
+};
+
+type AppStyles = ReturnType<typeof createAppStyles>;
+
+interface AppThemeContextValue {
+  palette: AppPalette;
+  styles: AppStyles;
+  isDark: boolean;
+}
+
+const AppThemeContext = createContext<AppThemeContextValue | null>(null);
+
+function useAppTheme(): AppThemeContextValue {
+  const theme = useContext(AppThemeContext);
+  if (!theme) {
+    throw new Error('App theme is unavailable.');
+  }
+  return theme;
+}
 
 const radii = {
   sm: 10,
@@ -575,6 +664,7 @@ function AnimatedMessage({
  * 切换聊天 / 配置时的柔和淡入 + 轻微缩放过渡。
  */
 function AnimatedScreenFade({ children }: { children?: ReactNode }) {
+  const { styles } = useAppTheme();
   const progress = useSharedValue(0);
 
   useEffect(() => {
@@ -593,6 +683,7 @@ function AnimatedScreenFade({ children }: { children?: ReactNode }) {
 }
 
 function ScreenFade({ children }: { children?: ReactNode }) {
+  const { styles } = useAppTheme();
   if (Platform.OS === 'android') {
     return <View style={styles.screenFade}>{children}</View>;
   }
@@ -604,6 +695,7 @@ function ScreenFade({ children }: { children?: ReactNode }) {
  * 用 moti 的 AnimatePresence 编排挂载 / 卸载，避免图标瞬间硬切。
  */
 function IconCrossfade({ swapKey, children }: { swapKey: string; children: ReactNode }) {
+  const { styles } = useAppTheme();
   return (
     <View style={styles.iconCrossfade}>
       <AnimatePresence exitBeforeEnter>
@@ -628,6 +720,7 @@ function IconCrossfade({ swapKey, children }: { swapKey: string; children: React
  * 用 pointerEvents="none" 让它不拦截任何点击，纯视觉反馈。
  */
 function Toast({ message }: { message: string | null }) {
+  const { palette, styles } = useAppTheme();
   return (
     <View pointerEvents="none" style={styles.toastRoot}>
       <AnimatePresence>
@@ -656,6 +749,7 @@ function Toast({ message }: { message: string | null }) {
  * 因此循环不会出现三个圆点那种跳动或复位感。
  */
 function ThinkingGlyph() {
+  const { styles } = useAppTheme();
   const progress = useSharedValue(0);
 
   useEffect(() => {
@@ -1156,27 +1250,6 @@ function conversationShareText(conversation: ChatConversation): string {
   return lines.join('\n').trim();
 }
 
-function formatUpdateStatusTitle(updateInfo: AppUpdateInfo | null, updateNotice: string) {
-  if (updateInfo) {
-    if (!updateInfo.installAsset) {
-      return '暂无可用的可信更新';
-    }
-    return updateInfo.updateAvailable
-      ? `可更新到 v${updateInfo.latestVersion}`
-      : `最新版本 v${updateInfo.latestVersion}`;
-  }
-
-  if (updateNotice.includes('暂未找到')) {
-    return '暂无可用 Release';
-  }
-
-  if (updateNotice) {
-    return '检查失败';
-  }
-
-  return '尚未检查';
-}
-
 export default function App() {
   const systemColorScheme = useColorScheme();
   const [colorMode, setColorMode] = useState<ColorMode>('system');
@@ -1212,16 +1285,37 @@ export default function App() {
 
   const isDark = colorMode === 'dark' || (colorMode === 'system' && systemColorScheme === 'dark');
 
+  const theme = useMemo<AppThemeContextValue>(() => ({
+    palette: isDark ? darkPalette : lightPalette,
+    styles: appStylesByMode[isDark ? 'dark' : 'light'],
+    isDark,
+  }), [isDark]);
+
   return (
     <KelivoThemeProvider scheme={isDark ? 'dark' : 'light'}>
-      <AppContent
-        colorMode={colorMode}
-        onSetColorMode={updateColorMode}
-        appearanceNotice={appearanceNotice}
-      />
+      <AppThemeContext.Provider value={theme}>
+        <AppContent
+          colorMode={colorMode}
+          onSetColorMode={updateColorMode}
+          appearanceNotice={appearanceNotice}
+        />
+      </AppThemeContext.Provider>
     </KelivoThemeProvider>
   );
 }
+
+type SettingsToolsSection =
+  | 'workspace'
+  | 'providerSetup'
+  | 'comparison'
+  | 'webSearch'
+  | 'prompts'
+  | 'costGuard'
+  | 'usage'
+  | 'media'
+  | 'backup'
+  | 'voice'
+  | 'mcp';
 
 function AppContent({
   colorMode,
@@ -1232,6 +1326,7 @@ function AppContent({
   onSetColorMode: (colorMode: ColorMode) => void;
   appearanceNotice: string;
 }) {
+  const { palette, styles } = useAppTheme();
   const voiceRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const voiceRecorderState = useAudioRecorderState(voiceRecorder, 250);
   const [workspace, setWorkspaceState] = useState<AppWorkspace>(() => createDefaultWorkspace());
@@ -6818,7 +6913,1334 @@ function AppContent({
     });
   }
 
-  function toggleSettingsScreen() {
+  
+  function renderSettingsToolsSection(section: SettingsToolsSection) {
+    switch (section) {
+      case 'workspace':
+        return (
+          <>
+<View style={styles.settingsCard} testID="project-workspace-settings-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>项目工作区</Text>
+                  <Text style={styles.modelOverrideHint}>{workspace.projects.length}/50</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  项目、分支和搜索完全在本机运行。项目系统提示只在你主动发送消息时随正常请求交给所选服务商，不会额外调用模型。
+                </Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRow}>
+                  {workspace.projects.map((project) => (
+                    <AnimatedPressable
+                      key={`settings-project:${project.id}`}
+                      accessibilityRole="button"
+                      onPress={() => selectProject(project.id)}
+                      style={[styles.providerChip, project.id === workspace.activeProjectId && styles.providerChipActive]}
+                    >
+                      <Text style={[styles.providerChipText, project.id === workspace.activeProjectId && styles.providerChipTextActive]}>
+                        {project.name}
+                      </Text>
+                    </AnimatedPressable>
+                  ))}
+                </ScrollView>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>新项目名称</Text>
+                  <TextInput
+                    value={projectNewName}
+                    editable={!workspaceReadOnly}
+                    onChangeText={setProjectNewName}
+                    placeholder="例如：产品研究"
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  disabled={workspaceReadOnly || !projectNewName.trim()}
+                  onPress={createProject}
+                  style={[styles.secondaryButton, (workspaceReadOnly || !projectNewName.trim()) && styles.buttonDisabled]}
+                >
+                  <Text style={styles.secondaryButtonText}>创建本地项目</Text>
+                </AnimatedPressable>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>当前项目名称</Text>
+                  <TextInput
+                    value={projectNameDraft}
+                    editable={!workspaceReadOnly}
+                    onChangeText={setProjectNameDraft}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>新对话系统提示（可选）</Text>
+                  <TextInput
+                    value={projectSystemPromptDraft}
+                    editable={!workspaceReadOnly}
+                    multiline
+                    onChangeText={setProjectSystemPromptDraft}
+                    placeholder="仅为之后的新对话保存一份本地快照"
+                    placeholderTextColor={palette.placeholder}
+                    style={[styles.input, styles.promptTemplateContentInput]}
+                  />
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  默认模型：{activeProject?.defaultTarget
+                    ? `${activeProject.defaultTarget.providerId} / ${activeProject.defaultTarget.modelId}`
+                    : '未设置'}
+                </Text>
+                <AnimatedPressable accessibilityRole="button" onPress={saveActiveProject} style={styles.primaryButton}>
+                  <Text style={styles.primaryButtonText}>保存当前项目</Text>
+                </AnimatedPressable>
+                <AnimatedPressable accessibilityRole="button" onPress={setProjectDefaultToCurrentModel} style={styles.secondaryButton}>
+                  <Text style={styles.secondaryButtonText}>将当前模型设为项目默认</Text>
+                </AnimatedPressable>
+                {workspace.projects.length > 1 ? (
+                  <AnimatedPressable accessibilityRole="button" onPress={removeActiveProject} style={styles.providerDeleteButton}>
+                    <Trash2 size={15} color={palette.danger} strokeWidth={2.2} />
+                    <Text style={styles.providerDeleteButtonText}>删除项目并迁移其中对话</Text>
+                  </AnimatedPressable>
+                ) : null}
+              </View>
+
+          </>
+        );
+      case 'providerSetup':
+        return (
+          <>
+<View style={styles.settingsCard}>
+                <Text style={styles.settingsCardTitle}>服务商</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRow}>
+                  {workspace.providers.map((provider) => (
+                    <AnimatedPressable
+                      key={provider.id}
+                      accessibilityRole="button"
+                      onPress={() => selectProvider(provider.id)}
+                      haptic="selection"
+                      style={[
+                        styles.providerChip,
+                        provider.id === activeProvider.id && styles.providerChipActive,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.providerChipText,
+                          provider.id === activeProvider.id && styles.providerChipTextActive,
+                        ]}
+                      >
+                        {provider.name}
+                      </Text>
+                    </AnimatedPressable>
+                  ))}
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    onPress={addCustomProvider}
+                    style={styles.providerChip}
+                  >
+                    <Text style={styles.providerChipText}>+ 新增</Text>
+                  </AnimatedPressable>
+                </ScrollView>
+              </View>
+
+<View style={styles.settingsCard} testID="provider-setup-wizard-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>服务商配置向导</Text>
+                  <Text style={styles.modelOverrideHint}>
+                    {providerEndpointInspection.valid ? '本地校验通过' : '等待修正'}
+                  </Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  先在本机校验协议、地址和密钥绑定，再请求模型目录。模型目录请求不生成内容；不会使用 Embezzle Studio 的额度或服务器。
+                </Text>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>名称</Text>
+                   <TextInput
+                    value={providerNameDraft}
+                    editable={!workspaceReadOnly}
+                    onChangeText={setProviderNameDraft}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>协议类型</Text>
+                  <View style={styles.toolSegmentRow}>
+                    {([
+                      ['volcengine-ark', '火山方舟'],
+                      ['bailian-compatible', '阿里百炼'],
+                      ['openai-compatible', 'OpenAI'],
+                      ['custom', '兼容接口'],
+                    ] as const).map(([kind, label]) => (
+                      <AnimatedPressable
+                        key={kind}
+                        accessibilityRole="button"
+                        onPress={() => changeProviderBindingDraft({ kind })}
+                        style={[styles.toolSegment, providerKindDraft === kind && styles.toolSegmentActive]}
+                      >
+                        <Text style={[styles.toolSegmentText, providerKindDraft === kind && styles.toolSegmentTextActive]}>
+                          {label}
+                        </Text>
+                      </AnimatedPressable>
+                    ))}
+                  </View>
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>Base URL</Text>
+                  <TextInput
+                    autoCapitalize="none"
+                    value={providerBaseUrlDraft}
+                    editable={!workspaceReadOnly}
+                    onChangeText={(baseUrl) => changeProviderBindingDraft({ baseUrl })}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>API Key</Text>
+                  <TextInput
+                    autoCapitalize="none"
+                    secureTextEntry
+                    value={providerApiKeyDraft}
+                    editable={!workspaceReadOnly}
+                   onChangeText={(apiKey) => {
+                     setProviderApiKeyDraft(apiKey);
+                     setProviderKeyBindingFingerprint(
+                       apiKey.trim()
+                         ? providerEndpointFingerprint({
+                             kind: providerKindDraft,
+                             baseUrl: providerBaseUrlDraft,
+                           }) ?? null
+                         : null
+                     );
+                   }}
+                   style={styles.input}
+                 />
+                  {Platform.OS === 'web' ? (
+                    <Text style={styles.modelOverrideHint}>
+                      Web 端仅在当前标签页会话中保存密钥，关闭标签页后会清除；Android 使用系统安全存储。
+                    </Text>
+                  ) : null}
+                </View>
+
+                {providerEndpointInspection.errors.map((error) => (
+                  <Text key={error} style={styles.providerWizardError}>• {error}</Text>
+                ))}
+                {providerEndpointInspection.warnings.map((warning) => (
+                  <Text key={warning} style={styles.providerWizardWarning}>• {warning}</Text>
+                ))}
+
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  disabled={workspaceReadOnly}
+                  onPress={saveProviderDraft}
+                  style={[styles.secondaryButton, workspaceReadOnly && styles.buttonDisabled]}
+                >
+                  <Text style={styles.secondaryButtonText}>保存并绑定此端点</Text>
+                </AnimatedPressable>
+
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  disabled={busy || workspaceReadOnly}
+                  onPress={refreshModels}
+                  style={[styles.primaryButton, (busy || workspaceReadOnly) && styles.buttonDisabled]}
+                >
+                  <Text style={styles.primaryButtonText}>{busy ? '请求中...' : '检查连接并获取模型目录'}</Text>
+                </AnimatedPressable>
+                {workspace.providers.length > 1 ? (
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`删除服务商 ${activeProvider.name}`}
+                    disabled={busy || workspaceReadOnly}
+                    onPress={() => setDeleteConfirmProviderId(activeProvider.id)}
+                    style={[styles.providerDeleteButton, (busy || workspaceReadOnly) && styles.buttonDisabled]}
+                  >
+                    <Trash2 size={15} color={palette.danger} strokeWidth={2.2} />
+                    <Text style={styles.providerDeleteButtonText}>删除此服务商</Text>
+                  </AnimatedPressable>
+                ) : null}
+              </View>
+
+<View style={styles.settingsCard} testID="model-capability-matrix-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>模型能力矩阵</Text>
+                  <Text style={styles.modelOverrideHint}>{capabilityMatrixRows.length} 个已添加模型</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  “可用”同时要求模型声明支持、端点通过检查且客户端已经实现对应协议；“服务商侧”表示模型可能支持，但当前客户端尚未开放该入口。
+                </Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.capabilityMatrixTable}>
+                  <View>
+                    <View style={styles.capabilityMatrixHeaderRow}>
+                      <Text style={[styles.capabilityMatrixModelCell, styles.capabilityMatrixHeaderText]}>模型</Text>
+                      {([
+                        ['text', '文本'],
+                        ['image-input', '图片'],
+                        ['file-input', '文件'],
+                        ['reasoning', '思考'],
+                        ['web-search', '搜索'],
+                        ['image-generation', '生图'],
+                        ['video-generation', '视频'],
+                        ['speech-to-text', '转写'],
+                        ['text-to-speech', '朗读'],
+                      ] as const).map(([capability, label]) => (
+                        <Text key={capability} style={[styles.capabilityMatrixCell, styles.capabilityMatrixHeaderText]}>{label}</Text>
+                      ))}
+                    </View>
+                    {capabilityMatrixRows.slice(0, 50).map((row) => (
+                      <View key={`matrix:${row.providerId}:${row.modelId}`} style={styles.capabilityMatrixRow}>
+                        <Text numberOfLines={1} style={styles.capabilityMatrixModelCell}>{row.modelName}</Text>
+                        {(['text', 'image-input', 'file-input', 'reasoning', 'web-search', 'image-generation', 'video-generation', 'speech-to-text', 'text-to-speech'] as const).map((capability) => {
+                          const status = row.cells[capability].status;
+                          return (
+                            <View key={capability} style={styles.capabilityMatrixCell}>
+                              {status === 'available' ? (
+                                <Check size={15} color={palette.accent} strokeWidth={2.5} />
+                              ) : (
+                                <Text style={status === 'provider-only' ? styles.capabilityMatrixProviderOnly : styles.capabilityMatrixUnavailable}>
+                                  {status === 'provider-only' ? '侧' : '—'}
+                                </Text>
+                              )}
+                            </View>
+                          );
+                        })}
+                      </View>
+                    ))}
+                  </View>
+                </ScrollView>
+                {!capabilityMatrixRows.length ? (
+                  <Text style={styles.sidebarEmpty}>完成向导并添加模型后显示能力矩阵。</Text>
+                ) : null}
+              </View>
+
+<View style={styles.settingsCard}>
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>可添加模型</Text>
+                  {modelCandidates.length ? (
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      accessibilityLabel="清空可添加模型列表"
+                      onPress={() => {
+                        if (!ensureWorkspaceWritable()) {
+                          return;
+                        }
+                        setWorkspace((current) => ({
+                          ...current,
+                          modelCandidatesByProvider: {
+                            ...current.modelCandidatesByProvider,
+                            [activeProvider.id]: [],
+                          },
+                        }));
+                        setModelSearchQuery('');
+                        setModelCapabilityFilter('all');
+                      }}
+                      style={styles.settingsCardHeaderAction}
+                    >
+                      <Trash2 size={16} color={palette.textSecondary} strokeWidth={2} />
+                    </AnimatedPressable>
+                  ) : null}
+                </View>
+                {modelCandidates.length ? (
+                  <>
+                    <View style={styles.modelSearchRow}>
+                      <TextInput
+                        testID="candidate-model-search"
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        placeholder="搜索模型名称或 ID"
+                        placeholderTextColor={palette.placeholder}
+                        value={modelSearchQuery}
+                        onChangeText={setModelSearchQuery}
+                        style={[styles.input, styles.modelSearchInput]}
+                      />
+                      {modelSearchQuery ? (
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          onPress={() => setModelSearchQuery('')}
+                          style={styles.secondaryButton}
+                        >
+                          <Text style={styles.secondaryButtonText}>清除</Text>
+                        </AnimatedPressable>
+                      ) : null}
+                    </View>
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={styles.modelFilterTabs}
+                    >
+                      {candidateModelFilters.map((filter) => {
+                        const active = filter.key === modelCapabilityFilter;
+
+                        return (
+                          <AnimatedPressable
+                            key={filter.key}
+                            accessibilityRole="button"
+                            testID={`candidate-model-filter-${filter.key}`}
+                            onPress={() => setModelCapabilityFilter(filter.key)}
+                            style={styles.modelFilterTab}
+                          >
+                            <Text
+                              style={[
+                                styles.modelFilterTabText,
+                                active && styles.modelFilterTabTextActive,
+                              ]}
+                            >
+                              {filter.label}
+                            </Text>
+                            <View style={[styles.modelFilterTabLine, active && styles.modelFilterTabLineActive]} />
+                          </AnimatedPressable>
+                        );
+                      })}
+                    </ScrollView>
+                    <Text testID="candidate-model-search-count" style={styles.modelSearchMeta}>
+                      已显示 {renderedModelCandidates.length} / {filteredModelCandidates.length} 条匹配结果，共 {modelCandidates.length} 条
+                    </Text>
+                  </>
+                ) : null}
+                {modelCandidates.length ? (
+                  <ScrollView
+                    nestedScrollEnabled
+                    style={styles.candidateModelListFrame}
+                    contentContainerStyle={styles.modelList}
+                    showsVerticalScrollIndicator={renderedModelCandidates.length > 4}
+                  >
+                    {renderedModelCandidates.map((model) => (
+                      <CandidateModelRow
+                        key={model.id}
+                        model={model}
+                        providerName={activeProvider.name}
+                        added={addedModelIds.has(model.id)}
+                        onAdd={() => addCandidateModel(model)}
+                      />
+                    ))}
+                    {!filteredModelCandidates.length ? (
+                      <View style={styles.modelSearchEmpty}>
+                        <Text style={styles.modelSearchEmptyText}>没有匹配的模型</Text>
+                      </View>
+                    ) : null}
+                    {renderedModelCandidates.length < filteredModelCandidates.length ? (
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel="加载更多候选模型"
+                        onPress={() =>
+                          setCandidateModelRenderLimit((current) => current + candidateModelPageSize)
+                        }
+                        style={({ pressed }) => [styles.loadMoreModelsButton, pressed && styles.buttonPressed]}
+                      >
+                        <Text style={styles.loadMoreModelsButtonText}>
+                          再显示 {Math.min(candidateModelPageSize, filteredModelCandidates.length - renderedModelCandidates.length)} 条
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                  </ScrollView>
+                ) : null}
+              </View>
+
+<View style={styles.settingsCard}>
+                <Text style={styles.settingsCardTitle}>已添加模型</Text>
+                <View style={styles.inlineField}>
+                  <TextInput
+                    autoCapitalize="none"
+                    placeholder="手动模型 ID"
+                    placeholderTextColor={palette.placeholder}
+                    value={manualModelId}
+                    editable={!workspaceReadOnly}
+                    onChangeText={setManualModelId}
+                    style={[styles.input, styles.inlineInput]}
+                  />
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    onPress={addManualModel}
+                    style={styles.secondaryButton}
+                  >
+                    <Text style={styles.secondaryButtonText}>添加</Text>
+                  </AnimatedPressable>
+                </View>
+                <View style={styles.modelList}>
+                  {addedModels.map((model) => (
+                    <ModelButton
+                      key={model.id}
+                      model={model}
+                      providerName={activeProvider.name}
+                      active={model.id === activeModelId}
+                      onPress={() => selectModel(model.id)}
+                      onRemove={() => removeModel(model.id)}
+                    />
+                  ))}
+                </View>
+                {activeModel ? (
+                  <View style={styles.modelOverridePanel}>
+                    <Text style={styles.fieldLabel}>当前模型用途</Text>
+                    <View style={styles.capabilityRow}>
+                      {configurableModelTasks.map((task) => {
+                        const selected = inferModelTask(activeModel) === task;
+                        return (
+                          <AnimatedPressable
+                            key={task}
+                            accessibilityRole="button"
+                            accessibilityState={{ selected }}
+                            onPress={() => setActiveModelTask(task)}
+                            style={[styles.capabilityChip, selected && styles.capabilityChipActive]}
+                          >
+                            <Text style={[styles.capabilityText, selected && styles.capabilityTextActive]}>
+                              {modelTaskLabel[task]}
+                            </Text>
+                          </AnimatedPressable>
+                        );
+                      })}
+                    </View>
+                    <Text style={styles.fieldLabel}>能力覆盖</Text>
+                    <View style={styles.capabilityRow}>
+                      {configurableModelCapabilities.map((capability) => {
+                        const selected = activeModel.capabilities.includes(capability.key);
+                        return (
+                          <AnimatedPressable
+                            key={capability.key}
+                            accessibilityRole="checkbox"
+                            accessibilityState={{ checked: selected }}
+                            onPress={() => toggleActiveModelCapability(capability.key)}
+                            style={[styles.capabilityChip, selected && styles.capabilityChipActive]}
+                          >
+                            <Text style={[styles.capabilityText, selected && styles.capabilityTextActive]}>
+                              {capability.label}
+                            </Text>
+                          </AnimatedPressable>
+                        );
+                      })}
+                    </View>
+                    <Text style={styles.modelOverrideHint}>
+                      自动识别不准确时可手动覆盖；设置会随模型保存。
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+
+          </>
+        );
+      case 'comparison':
+        return (
+          <>
+<View style={styles.settingsCard} testID="comparison-settings-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>多模型同问对比</Text>
+                  <Text style={styles.modelOverrideHint}>{workspace.comparisonTargets.length}/{comparisonTargetLimit}</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  在各服务商标签间切换并选择 2–{comparisonTargetLimit} 个聊天模型。发送一次会产生同等数量的独立调用，费用由你的服务商账户结算。
+                </Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.providerRow}
+                >
+                  {getSelectableModels(activeProvider)
+                    .filter((model) => inferModelTask(model) === 'chat')
+                    .map((model) => {
+                      const selected = workspace.comparisonTargets.some(
+                        (target) => target.providerId === activeProvider.id && target.modelId === model.id
+                      );
+                      return (
+                        <AnimatedPressable
+                          key={`compare:${activeProvider.id}:${model.id}`}
+                          accessibilityRole="checkbox"
+                          accessibilityState={{ checked: selected }}
+                          onPress={() => toggleComparisonTarget(activeProvider.id, model.id)}
+                          style={[styles.providerChip, selected && styles.providerChipActive]}
+                        >
+                          <Text
+                            numberOfLines={1}
+                            style={[styles.providerChipText, selected && styles.providerChipTextActive]}
+                          >
+                            {formatCompactModelName(model.id, activeProvider.name)}
+                          </Text>
+                        </AnimatedPressable>
+                      );
+                    })}
+                </ScrollView>
+                <AnimatedPressable
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: comparisonActive }}
+                  disabled={comparisonRuntimes.length < 2 || workspaceReadOnly}
+                  onPress={() => setComparisonEnabled(!comparisonActive)}
+                  style={[
+                    styles.primaryButton,
+                    (comparisonRuntimes.length < 2 || workspaceReadOnly) && styles.buttonDisabled,
+                  ]}
+                >
+                  <Text style={styles.primaryButtonText}>
+                    {comparisonActive ? '关闭对比模式' : '开启对比模式'}
+                  </Text>
+                </AnimatedPressable>
+              </View>
+
+          </>
+        );
+      case 'webSearch':
+        return (
+          <>
+<View style={styles.settingsCard} testID="web-search-settings-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>服务商联网搜索</Text>
+                  <Text style={styles.modelOverrideHint}>{webSearchReady ? '当前可用' : '条件未满足'}</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  仅调用 OpenAI、火山方舟或阿里百炼的官方 Responses 搜索协议；必须使用你自己的 Key，可能产生的搜索费用由对应服务商从你的账户结算。只有响应提供搜索调用或引用证据时才会标记为已联网。
+                </Text>
+                {webSearchContextSizeApplies ? (
+                  <View style={styles.toolSegmentRow}>
+                    {(['low', 'medium', 'high'] as const).map((size) => {
+                      const selected = workspace.webSearch.searchContextSize === size;
+                      return (
+                        <AnimatedPressable
+                          key={size}
+                          accessibilityRole="button"
+                          disabled={workspaceReadOnly}
+                          onPress={() => {
+                            if (!ensureWorkspaceWritable()) return;
+                            setWorkspace((current) => ({
+                              ...current,
+                              webSearch: { ...current.webSearch, searchContextSize: size },
+                            }));
+                          }}
+                          style={[styles.toolSegment, selected && styles.toolSegmentActive]}
+                        >
+                          <Text style={[styles.toolSegmentText, selected && styles.toolSegmentTextActive]}>
+                            {size === 'low' ? '精简' : size === 'medium' ? '均衡' : '深入'}
+                          </Text>
+                        </AnimatedPressable>
+                      );
+                    })}
+                  </View>
+                ) : (
+                  <Text style={styles.modelOverrideHint}>
+                    搜索范围档位仅适用于全部目标都是 OpenAI 官方协议时；火山方舟使用安全固定上限，百炼使用服务商协议默认值。
+                  </Text>
+                )}
+                <AnimatedPressable
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: workspace.webSearch.enabled, disabled: !webSearchReady }}
+                  disabled={!webSearchReady && !workspace.webSearch.enabled}
+                  onPress={() => setWebSearchEnabled(!workspace.webSearch.enabled)}
+                  style={[
+                    styles.primaryButton,
+                    (!webSearchReady && !workspace.webSearch.enabled) && styles.buttonDisabled,
+                  ]}
+                >
+                  <Text style={styles.primaryButtonText}>
+                    {workspace.webSearch.enabled ? '关闭联网搜索' : '开启联网搜索'}
+                  </Text>
+                </AnimatedPressable>
+              </View>
+
+          </>
+        );
+      case 'prompts':
+        return (
+          <>
+<View style={styles.settingsCard} testID="prompt-library-settings-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>本地提示词与角色模板</Text>
+                  <Text style={styles.modelOverrideHint}>{workspace.promptTemplates.length}/100</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  仅保存在本机。输入模板插入草稿但不会自动发送；会话指令作为 system 消息加入当前对话。
+                </Text>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>模板名称</Text>
+                  <TextInput
+                    value={promptTemplateName}
+                    editable={!workspaceReadOnly}
+                    onChangeText={setPromptTemplateName}
+                    placeholder="例如：代码审查"
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.toolSegmentRow}>
+                  {(['composer', 'system'] as const).map((mode) => {
+                    const selected = promptTemplateMode === mode;
+                    return (
+                      <AnimatedPressable
+                        key={mode}
+                        accessibilityRole="button"
+                        onPress={() => setPromptTemplateMode(mode)}
+                        style={[styles.toolSegment, selected && styles.toolSegmentActive]}
+                      >
+                        <Text style={[styles.toolSegmentText, selected && styles.toolSegmentTextActive]}>
+                          {mode === 'composer' ? '插入输入框' : '会话指令'}
+                        </Text>
+                      </AnimatedPressable>
+                    );
+                  })}
+                </View>
+                <TextInput
+                  value={promptTemplateContent}
+                  editable={!workspaceReadOnly}
+                  multiline
+                  onChangeText={setPromptTemplateContent}
+                  placeholder="填写模板正文；可保留 {{变量}} 供发送前编辑"
+                  placeholderTextColor={palette.placeholder}
+                  style={[styles.input, styles.promptTemplateContentInput]}
+                />
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  disabled={workspaceReadOnly}
+                  onPress={savePromptTemplate}
+                  style={[styles.primaryButton, workspaceReadOnly && styles.buttonDisabled]}
+                >
+                  <Text style={styles.primaryButtonText}>保存模板</Text>
+                </AnimatedPressable>
+                {workspace.promptTemplates.map((template) => (
+                  <View key={template.id} style={styles.promptTemplateRow}>
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      onPress={() => applyPromptTemplate(template.id)}
+                      style={styles.promptTemplateMain}
+                    >
+                      <BookOpen size={16} color={palette.text} strokeWidth={2} />
+                      <View style={styles.promptTemplateTextBlock}>
+                        <Text numberOfLines={1} style={styles.promptTemplateName}>{template.name}</Text>
+                        <Text numberOfLines={1} style={styles.modelOverrideHint}>
+                          {template.mode === 'system' ? '会话指令' : '输入模板'} · {template.content}
+                        </Text>
+                      </View>
+                    </AnimatedPressable>
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      accessibilityLabel={template.pinnedAt ? '取消置顶模板' : '置顶模板'}
+                      onPress={() => togglePromptTemplatePinned(template.id, Boolean(template.pinnedAt))}
+                      style={styles.iconButton}
+                    >
+                      <Pin
+                        size={15}
+                        color={template.pinnedAt ? palette.accent : palette.textSecondary}
+                        fill={template.pinnedAt ? palette.accent : 'transparent'}
+                        strokeWidth={2}
+                      />
+                    </AnimatedPressable>
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      accessibilityLabel="删除提示词模板"
+                      onPress={() => removePromptTemplate(template.id)}
+                      style={styles.iconButton}
+                    >
+                      <Trash2 size={15} color={palette.danger} strokeWidth={2} />
+                    </AnimatedPressable>
+                  </View>
+                ))}
+              </View>
+
+          </>
+        );
+      case 'costGuard':
+        return (
+          <>
+<View style={styles.settingsCard} testID="cost-guard-settings-card">
+                <View style={styles.settingsCardHeader}>
+                  <View style={styles.costGuardTitleRow}>
+                    <ShieldCheck size={18} color={palette.text} strokeWidth={2.2} />
+                    <Text style={styles.settingsCardTitle}>费用保险丝</Text>
+                  </View>
+                  <Text style={styles.modelOverrideHint}>{workspace.costGuard.enabled ? '已开启' : '未开启'}</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  只依据本机请求台账和用户填写的价格进行提醒或阻断，不是服务商账单，也无法覆盖其他设备、控制台调用或服务商未返回的费用。未知费用永远不会按 0 处理。
+                </Text>
+                <AnimatedPressable
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: workspace.costGuard.enabled }}
+                  onPress={() => setWorkspace((current) => ({
+                    ...current,
+                    costGuard: { ...current.costGuard, enabled: !current.costGuard.enabled },
+                  }))}
+                  style={styles.primaryButton}
+                >
+                  <Text style={styles.primaryButtonText}>{workspace.costGuard.enabled ? '关闭费用保险丝' : '开启费用保险丝'}</Text>
+                </AnimatedPressable>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>单次最大输出 Token</Text>
+                  <TextInput value={costMaxOutputDraft} onChangeText={setCostMaxOutputDraft} keyboardType="numeric" style={styles.input} />
+                  <Text style={styles.modelOverrideHint}>聊天/Responses 会按官方协议发送对应上限；推理模型的思考 Token 也可能占用上限。图片和视频生成不受该 Token 字段保护。</Text>
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>每日本机请求次数（0 为关闭）</Text>
+                  <TextInput value={costDailyRequestDraft} onChangeText={setCostDailyRequestDraft} keyboardType="numeric" style={styles.input} />
+                </View>
+                <View style={styles.usagePricingGrid}>
+                  <View style={styles.usagePricingField}>
+                    <Text style={styles.fieldLabel}>每日 CNY 已知累计阈值（0 关闭）</Text>
+                    <TextInput value={costDailyCnyDraft} onChangeText={setCostDailyCnyDraft} keyboardType="decimal-pad" style={styles.input} />
+                  </View>
+                  <View style={styles.usagePricingField}>
+                    <Text style={styles.fieldLabel}>每日 USD 已知累计阈值（0 关闭）</Text>
+                    <TextInput value={costDailyUsdDraft} onChangeText={setCostDailyUsdDraft} keyboardType="decimal-pad" style={styles.input} />
+                  </View>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  本机无法可靠预测本次输入、输出和工具的最终费用；CNY/USD 阈值只会在已完成请求的已知累计达到后，对下一次请求提醒或阻断。
+                </Text>
+                <Text style={styles.fieldLabel}>最多对比模型</Text>
+                <View style={styles.toolSegmentRow}>
+                  {([2, 3, 4] as const).map((count) => (
+                    <AnimatedPressable
+                      key={`guard-compare:${count}`}
+                      accessibilityRole="button"
+                      onPress={() => setWorkspace((current) => ({
+                        ...current,
+                        costGuard: { ...current.costGuard, maxComparisonTargets: count },
+                      }))}
+                      style={[styles.toolSegment, workspace.costGuard.maxComparisonTargets === count && styles.toolSegmentActive]}
+                    >
+                      <Text style={[styles.toolSegmentText, workspace.costGuard.maxComparisonTargets === count && styles.toolSegmentTextActive]}>{count}</Text>
+                    </AnimatedPressable>
+                  ))}
+                </View>
+                <Text style={styles.fieldLabel}>达到次数或已知预算时</Text>
+                <View style={styles.toolSegmentRow}>
+                  {(['warn', 'block'] as const).map((action) => (
+                    <AnimatedPressable
+                      key={`limit-action:${action}`}
+                      accessibilityRole="button"
+                      onPress={() => setWorkspace((current) => ({
+                        ...current,
+                        costGuard: { ...current.costGuard, limitAction: action },
+                      }))}
+                      style={[styles.toolSegment, workspace.costGuard.limitAction === action && styles.toolSegmentActive]}
+                    >
+                      <Text style={[styles.toolSegmentText, workspace.costGuard.limitAction === action && styles.toolSegmentTextActive]}>{action === 'warn' ? '提醒确认' : '直接阻断'}</Text>
+                    </AnimatedPressable>
+                  ))}
+                </View>
+                <Text style={styles.fieldLabel}>存在未知费用时</Text>
+                <View style={styles.toolSegmentRow}>
+                  {(['warn', 'block'] as const).map((action) => (
+                    <AnimatedPressable
+                      key={`unknown-action:${action}`}
+                      accessibilityRole="button"
+                      onPress={() => setWorkspace((current) => ({
+                        ...current,
+                        costGuard: { ...current.costGuard, unknownCostAction: action },
+                      }))}
+                      style={[styles.toolSegment, workspace.costGuard.unknownCostAction === action && styles.toolSegmentActive]}
+                    >
+                      <Text style={[styles.toolSegmentText, workspace.costGuard.unknownCostAction === action && styles.toolSegmentTextActive]}>{action === 'warn' ? '提醒确认' : '直接阻断'}</Text>
+                    </AnimatedPressable>
+                  ))}
+                </View>
+                <AnimatedPressable
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: workspace.costGuard.confirmPotentialMultipleCharges }}
+                  onPress={() => setWorkspace((current) => ({
+                    ...current,
+                    costGuard: {
+                      ...current.costGuard,
+                      confirmPotentialMultipleCharges: !current.costGuard.confirmPotentialMultipleCharges,
+                    },
+                  }))}
+                  style={styles.secondaryButton}
+                >
+                  <Text style={styles.secondaryButtonText}>
+                    {workspace.costGuard.confirmPotentialMultipleCharges ? '多项潜在计费：发送前确认' : '多项潜在计费：不额外确认'}
+                  </Text>
+                </AnimatedPressable>
+                <View style={styles.costGuardTodayRow}>
+                  <Text style={styles.modelOverrideHint}>今日 {costGuardToday.requestCount} 次请求</Text>
+                  <Text style={styles.modelOverrideHint}>CNY {costGuardToday.knownCostByCurrency.CNY.toFixed(6)}</Text>
+                  <Text style={styles.modelOverrideHint}>USD {costGuardToday.knownCostByCurrency.USD.toFixed(6)}</Text>
+                  <Text style={styles.modelOverrideHint}>未知 {costGuardToday.unknownEventCount} 次</Text>
+                </View>
+                <AnimatedPressable accessibilityRole="button" onPress={saveCostGuardDrafts} style={styles.primaryButton}>
+                  <Text style={styles.primaryButtonText}>保存保险丝数值</Text>
+                </AnimatedPressable>
+              </View>
+
+          </>
+        );
+      case 'usage':
+        return (
+          <>
+<View style={styles.settingsCard} testID="usage-dashboard-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>本机用量与费用估算</Text>
+                  <Text style={styles.modelOverrideHint}>当前保留对话</Text>
+                </View>
+                <View style={styles.usageSummaryGrid}>
+                  <View style={styles.usageSummaryItem}>
+                    <Text style={styles.usageSummaryValue}>{usageAggregation.totals.requestCount}</Text>
+                    <Text style={styles.usageSummaryLabel}>请求</Text>
+                  </View>
+                  <View style={styles.usageSummaryItem}>
+                    <Text style={styles.usageSummaryValue}>
+                      {formatTokenCount(usageAggregation.totals.totalTokens || undefined)}
+                    </Text>
+                    <Text style={styles.usageSummaryLabel}>Token</Text>
+                  </View>
+                  <View style={styles.usageSummaryItem}>
+                    <Text style={styles.usageSummaryValue}>
+                      {usageAggregation.totals.averageDurationMs !== undefined
+                        ? `${(usageAggregation.totals.averageDurationMs / 1000).toFixed(1)}s`
+                        : '—'}
+                    </Text>
+                    <Text style={styles.usageSummaryLabel}>平均耗时</Text>
+                  </View>
+                </View>
+                <View style={styles.usageCostRow}>
+                  <Text style={styles.modelOverrideHint}>
+                    {usageAggregation.totals.costSampleCountByCurrency.CNY > 0
+                      ? `CNY 已知小计 ¥${usageAggregation.totals.costByCurrency.CNY.toFixed(6)}`
+                      : 'CNY 费用未知'}
+                  </Text>
+                  <Text style={styles.modelOverrideHint}>
+                    {usageAggregation.totals.costSampleCountByCurrency.USD > 0
+                      ? `USD 已知小计 $${usageAggregation.totals.costByCurrency.USD.toFixed(6)}`
+                      : 'USD 费用未知'}
+                  </Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  已知费用覆盖 {knownCostRequestCount}/{usageAggregation.totals.requestCount} 次请求；其余 {usageAggregation.totals.unknown.cost} 次未知。价格完全由你本地填写，不调用价格或汇率服务；推理 Token 不重复计费。
+                </Text>
+                <Text style={styles.modelOverrideHint}>
+                  小计不包含联网搜索工具费、语音、媒体任务或服务商其他附加费，最终账单以你的服务商控制台为准。
+                </Text>
+                {activeModelId ? (
+                  <>
+                    <Text style={styles.fieldLabel}>
+                      {formatCompactModelName(activeModelId, activeProvider.name)} · 每百万 Token
+                    </Text>
+                    <View style={styles.toolSegmentRow}>
+                      {(['CNY', 'USD'] as const).map((currency) => {
+                        const selected = (activeModelPricing?.currency ?? 'CNY') === currency;
+                        return (
+                          <AnimatedPressable
+                            key={currency}
+                            accessibilityRole="button"
+                            onPress={() => setActivePricingCurrency(currency)}
+                            style={[styles.toolSegment, selected && styles.toolSegmentActive]}
+                          >
+                            <Text style={[styles.toolSegmentText, selected && styles.toolSegmentTextActive]}>
+                              {currency}
+                            </Text>
+                          </AnimatedPressable>
+                        );
+                      })}
+                    </View>
+                    <View style={styles.pricingInputRow}>
+                      <View style={styles.pricingInputGroup}>
+                        <Text style={styles.usageSummaryLabel}>输入</Text>
+                        <TextInput
+                          value={pricingInputDraft}
+                          onChangeText={setPricingInputDraft}
+                          onBlur={() => updatePricingText('inputPerMillion', pricingInputDraft)}
+                          keyboardType="decimal-pad"
+                          placeholder="未设置"
+                          placeholderTextColor={palette.placeholder}
+                          style={styles.input}
+                        />
+                      </View>
+                      <View style={styles.pricingInputGroup}>
+                        <Text style={styles.usageSummaryLabel}>缓存输入</Text>
+                        <TextInput
+                          value={pricingCachedDraft}
+                          onChangeText={setPricingCachedDraft}
+                          onBlur={() => updatePricingText('cachedInputPerMillion', pricingCachedDraft)}
+                          keyboardType="decimal-pad"
+                          placeholder="同输入价"
+                          placeholderTextColor={palette.placeholder}
+                          style={styles.input}
+                        />
+                      </View>
+                      <View style={styles.pricingInputGroup}>
+                        <Text style={styles.usageSummaryLabel}>输出</Text>
+                        <TextInput
+                          value={pricingOutputDraft}
+                          onChangeText={setPricingOutputDraft}
+                          onBlur={() => updatePricingText('outputPerMillion', pricingOutputDraft)}
+                          keyboardType="decimal-pad"
+                          placeholder="未设置"
+                          placeholderTextColor={palette.placeholder}
+                          style={styles.input}
+                        />
+                      </View>
+                    </View>
+                  </>
+                ) : null}
+              </View>
+
+          </>
+        );
+      case 'media':
+        return (
+          <>
+<View style={styles.settingsCard} testID="media-task-center-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>媒体任务中心</Text>
+                  <Text style={styles.modelOverrideHint}>{generationTasks.length} 项</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  任务直接从本机对话记录派生，不上传到我们的服务器；只在你点击刷新时查询对应服务商。
+                </Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRow}>
+                  {(['all', 'active', 'completed', 'failed'] as const).map((filter) => {
+                    const selected = generationTaskFilter === filter;
+                    return (
+                      <AnimatedPressable
+                        key={filter}
+                        accessibilityRole="button"
+                        onPress={() => setGenerationTaskFilter(filter)}
+                        style={[styles.providerChip, selected && styles.providerChipActive]}
+                      >
+                        <Text style={[styles.providerChipText, selected && styles.providerChipTextActive]}>
+                          {filter === 'all' ? '全部' : filter === 'active' ? '进行中' : filter === 'completed' ? '已完成' : '失败'}
+                        </Text>
+                      </AnimatedPressable>
+                    );
+                  })}
+                </ScrollView>
+                {visibleGenerationTasks.length ? (
+                  visibleGenerationTasks.slice(0, 20).map((item) => (
+                    <View key={item.key} style={styles.mediaTaskRow}>
+                      <View style={styles.mediaTaskInfo}>
+                        <Text numberOfLines={1} style={styles.promptTemplateName}>{item.title}</Text>
+                        <Text numberOfLines={1} style={styles.modelOverrideHint}>
+                          {item.task.modelId} · {item.task.status ?? 'submitted'}
+                        </Text>
+                      </View>
+                      <Text
+                        style={[
+                          styles.mediaTaskState,
+                          item.state === 'failed' && styles.messageErrorText,
+                        ]}
+                      >
+                        {item.state === 'active' ? '进行中' : item.state === 'completed' ? '已完成' : '失败'}
+                      </Text>
+                      {item.attachment ? (
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          accessibilityLabel="导出媒体任务结果"
+                          onPress={() => void exportTaskCenterAttachment(item.attachment!)}
+                          style={styles.iconButton}
+                        >
+                          <Download size={15} color={palette.text} strokeWidth={2} />
+                        </AnimatedPressable>
+                      ) : item.state === 'active' ? (
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          accessibilityLabel="刷新媒体任务"
+                          disabled={Boolean(queryingTaskByMessageId[item.messageId])}
+                          onPress={() => refreshTaskCenterItem(item.conversationId, item.messageId)}
+                          style={styles.iconButton}
+                        >
+                          <RefreshCw size={15} color={palette.text} strokeWidth={2} />
+                        </AnimatedPressable>
+                      ) : null}
+                      <AnimatedPressable
+                        accessibilityRole="button"
+                        accessibilityLabel="打开任务所在对话"
+                        onPress={() => {
+                          selectConversation(item.conversationId);
+                          setSettingsOpen(false);
+                        }}
+                        style={styles.iconButton}
+                      >
+                        <MessageSquare size={15} color={palette.text} strokeWidth={2} />
+                      </AnimatedPressable>
+                    </View>
+                  ))
+                ) : (
+                  <Text style={styles.modelOverrideHint}>当前筛选下暂无媒体任务。</Text>
+                )}
+              </View>
+
+          </>
+        );
+      case 'backup':
+        return (
+          <>
+<View style={styles.settingsCard} testID="encrypted-backup-card">
+                <Text style={styles.settingsCardTitle}>本地加密备份</Text>
+                <Text style={styles.modelOverrideHint}>
+                  使用密码在本机完成认证加密。专用 API Key/MCP 授权字段、媒体文件、本机费用账本和 MCP 活动摘要不会导出；普通对话、提示词和错误文字会原样备份，请勿在其中粘贴密钥。
+                </Text>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>备份密码（至少 8 个字符）</Text>
+                  <TextInput
+                    value={backupPassword}
+                    editable={!backupBusy && !workspaceReadOnly}
+                    onChangeText={setBackupPassword}
+                    secureTextEntry
+                    autoCapitalize="none"
+                    placeholder="密码不会保存，遗失后无法找回"
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.updateActionRow}>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    disabled={backupBusy || workspaceReadOnly}
+                    onPress={() => void exportEncryptedBackup()}
+                    style={[styles.secondaryButton, styles.updateActionButton, (backupBusy || workspaceReadOnly) && styles.buttonDisabled]}
+                  >
+                    <Download size={16} color={palette.text} strokeWidth={2} />
+                    <Text style={styles.secondaryButtonText}>{backupBusy ? '处理中' : '导出备份'}</Text>
+                  </AnimatedPressable>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    disabled={backupBusy || workspaceReadOnly}
+                    onPress={() => void importEncryptedBackup()}
+                    style={[styles.primaryButton, styles.updateActionButton, (backupBusy || workspaceReadOnly) && styles.buttonDisabled]}
+                  >
+                    <FileText size={16} color={palette.textOnAccent} strokeWidth={2} />
+                    <Text style={styles.primaryButtonText}>{backupBusy ? '处理中' : '验证并导入'}</Text>
+                  </AnimatedPressable>
+                </View>
+              </View>
+
+          </>
+        );
+      case 'voice':
+        return (
+          <>
+<View style={styles.settingsCard} testID="voice-settings-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>用户服务商语音</Text>
+                  <Text style={styles.modelOverrideHint}>Android 请求式 · BYOK</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  录音和朗读仅调用你配置的 OpenAI 或阿里百炼账号，可能产生的费用由对应服务商从你的账户结算；我们不提供语音 API、不设中转服务器。正式 Web 端保持关闭。
+                </Text>
+                <View style={styles.voiceTargetRow}>
+                  <View style={styles.mediaTaskInfo}>
+                    <Text style={styles.fieldLabel}>语音输入转写</Text>
+                    <Text numberOfLines={1} style={styles.modelOverrideHint}>
+                      {workspace.voice.transcriptionTarget
+                        ? `${workspace.voice.transcriptionTarget.providerId} · ${workspace.voice.transcriptionTarget.modelId}${configuredTranscriptionTarget ? '' : '（已失效）'}`
+                        : '未配置'}
+                    </Text>
+                  </View>
+                  {workspace.voice.transcriptionTarget ? (
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      onPress={() => clearVoiceTarget('transcription')}
+                      style={styles.iconButton}
+                    >
+                      <X size={15} color={palette.textSecondary} strokeWidth={2} />
+                    </AnimatedPressable>
+                  ) : null}
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    disabled={!canSetActiveTranscriptionTarget}
+                    onPress={() => setVoiceTarget('transcription')}
+                    style={[
+                      styles.providerChip,
+                      !canSetActiveTranscriptionTarget && styles.buttonDisabled,
+                    ]}
+                  >
+                    <Text style={styles.providerChipText}>使用当前模型</Text>
+                  </AnimatedPressable>
+                </View>
+                <View style={styles.voiceTargetRow}>
+                  <View style={styles.mediaTaskInfo}>
+                    <Text style={styles.fieldLabel}>回答朗读</Text>
+                    <Text numberOfLines={1} style={styles.modelOverrideHint}>
+                      {workspace.voice.speechTarget
+                        ? `${workspace.voice.speechTarget.providerId} · ${workspace.voice.speechTarget.modelId}${configuredSpeechTarget ? '' : '（已失效）'}`
+                        : '未配置'}
+                    </Text>
+                  </View>
+                  {workspace.voice.speechTarget ? (
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      onPress={() => clearVoiceTarget('speech')}
+                      style={styles.iconButton}
+                    >
+                      <X size={15} color={palette.textSecondary} strokeWidth={2} />
+                    </AnimatedPressable>
+                  ) : null}
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    disabled={!canSetActiveSpeechTarget}
+                    onPress={() => setVoiceTarget('speech')}
+                    style={[
+                      styles.providerChip,
+                      !canSetActiveSpeechTarget && styles.buttonDisabled,
+                    ]}
+                  >
+                    <Text style={styles.providerChipText}>使用当前模型</Text>
+                  </AnimatedPressable>
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>服务商 Voice ID</Text>
+                  <TextInput
+                    value={workspace.voice.speechVoice}
+                    editable={!workspaceReadOnly}
+                    onChangeText={(speechVoice) => {
+                      if (!ensureWorkspaceWritable()) return;
+                      setWorkspace((current) => ({
+                        ...current,
+                        voice: { ...current.voice, speechVoice },
+                      }));
+                    }}
+                    autoCapitalize="none"
+                    placeholder="alloy / Cherry / 服务商音色 ID"
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                {configuredSpeechProtocol === 'bailian-compatible' ? (
+                  <Text style={styles.modelOverrideHint}>
+                    百炼语音格式由服务商响应决定；上方格式选项只适用于 OpenAI 官方语音接口。
+                  </Text>
+                ) : (
+                  <View style={styles.toolSegmentRow}>
+                    {(['mp3', 'aac', 'wav', 'opus'] as const).map((format) => {
+                      const selected = workspace.voice.speechFormat === format;
+                      return (
+                        <AnimatedPressable
+                          key={format}
+                          accessibilityRole="button"
+                          disabled={workspaceReadOnly}
+                          onPress={() => {
+                            if (!ensureWorkspaceWritable()) return;
+                            setWorkspace((current) => ({
+                              ...current,
+                              voice: { ...current.voice, speechFormat: format },
+                            }));
+                          }}
+                          style={[styles.toolSegment, selected && styles.toolSegmentActive]}
+                        >
+                          <Text style={[styles.toolSegmentText, selected && styles.toolSegmentTextActive]}>
+                            {format.toUpperCase()}
+                          </Text>
+                        </AnimatedPressable>
+                      );
+                    })}
+                  </View>
+                )}
+                <Text style={styles.modelOverrideHint}>朗读音频为 AI 合成语音，并非真人录音。</Text>
+              </View>
+
+          </>
+        );
+      case 'mcp':
+        return (
+          <>
+<View style={styles.settingsCard} testID="mcp-tool-center-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>MCP 工具中心</Text>
+                  <Text style={styles.modelOverrideHint}>默认关闭 · 逐次审批</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  v1.4 仅对官方 OpenAI Responses 开放真实执行，并强制非空工具白名单与逐次审批。火山方舟等待真实账号验证无存储续接，百炼 Responses 缺少执行前审批，因此两者仍只保存配置。
+                </Text>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>服务名称</Text>
+                  <TextInput
+                    value={mcpName}
+                    onChangeText={setMcpName}
+                    placeholder="例如：我的知识库"
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>HTTPS Endpoint</Text>
+                  <TextInput
+                    value={mcpEndpoint}
+                    onChangeText={setMcpEndpoint}
+                    autoCapitalize="none"
+                    placeholder="https://mcp.example.com/mcp"
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>服务描述（可选）</Text>
+                  <TextInput
+                    value={mcpDescription}
+                    onChangeText={setMcpDescription}
+                    multiline
+                    placeholder="这台 MCP 服务的用途与信任来源"
+                    placeholderTextColor={palette.placeholder}
+                    style={[styles.input, styles.multilineInput]}
+                  />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>允许的精确工具名</Text>
+                  <TextInput
+                    testID="mcp-allowed-tools-input"
+                    value={mcpAllowedTools}
+                    onChangeText={setMcpAllowedTools}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    multiline
+                    placeholder={'例如：search_docs, get_page\n使用逗号或换行分隔'}
+                    placeholderTextColor={palette.placeholder}
+                    style={[styles.input, styles.multilineInput]}
+                  />
+                  <Text style={styles.modelOverrideHint}>必须至少填写一个工具名；不支持 *、自动导入全部工具或模糊匹配。</Text>
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>Authorization（可选）</Text>
+                  <TextInput
+                    value={mcpAuthorization}
+                    onChangeText={setMcpAuthorization}
+                    autoCapitalize="none"
+                    secureTextEntry
+                    placeholder={
+                      Platform.OS === 'web'
+                        ? 'Web 仅当前标签页保存；不进入备份'
+                        : 'Android 系统安全存储；不进入备份'
+                    }
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  disabled={workspaceReadOnly}
+                  onPress={addRemoteMcpServer}
+                  style={[styles.primaryButton, workspaceReadOnly && styles.buttonDisabled]}
+                >
+                  <Wrench size={16} color={palette.textOnAccent} strokeWidth={2} />
+                  <Text style={styles.primaryButtonText}>添加为关闭状态</Text>
+                </AnimatedPressable>
+                {workspace.plugins.filter((plugin) => plugin.type === 'remote-mcp').map((plugin) => (
+                  <View key={plugin.id} style={styles.mediaTaskRow}>
+                    <Wrench size={16} color={palette.text} strokeWidth={2} />
+                    <View style={styles.mediaTaskInfo}>
+                      <Text numberOfLines={1} style={styles.promptTemplateName}>{plugin.name}</Text>
+                      <Text numberOfLines={1} style={styles.modelOverrideHint}>{plugin.endpoint}</Text>
+                      <Text numberOfLines={2} style={styles.modelOverrideHint}>
+                        工具：{plugin.allowedTools.length ? plugin.allowedTools.join(', ') : '未配置（不可执行）'}
+                      </Text>
+                    </View>
+                    <AnimatedPressable
+                      accessibilityRole="switch"
+                      accessibilityState={{ checked: plugin.enabled === true }}
+                      onPress={() => void toggleRemoteMcpServer(plugin.id, plugin.enabled !== true)}
+                      style={[styles.providerChip, plugin.enabled && styles.providerChipActive]}
+                    >
+                      <Text style={[styles.providerChipText, plugin.enabled && styles.providerChipTextActive]}>
+                        {plugin.enabled ? '已授权' : '关闭'}
+                      </Text>
+                    </AnimatedPressable>
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      accessibilityLabel="删除 MCP 配置"
+                      onPress={() => removeRemoteMcpServer(plugin.id)}
+                      style={styles.iconButton}
+                    >
+                      <Trash2 size={15} color={palette.danger} strokeWidth={2} />
+                    </AnimatedPressable>
+                  </View>
+                ))}
+              </View>
+
+              {notice ? <Text style={styles.settingsNotice}>{notice}</Text> : null}
+
+          </>
+        );
+      default:
+        return null;
+    }
+  }
+
+function toggleSettingsScreen() {
     Keyboard.dismiss();
     setAttachMenuOpen(false);
     setReasoningMenuOpen(false);
@@ -7017,1335 +8439,7 @@ function AppContent({
                   onToggleActiveModelCapability={toggleActiveModelCapability}
                   onCheckUpdates={checkUpdates}
                   onOpenUpdateTarget={openUpdateTarget}
-                  renderToolsPanel={() => (
-                    <>
-
-
-              <View style={styles.settingsCard} testID="project-workspace-settings-card">
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>项目工作区</Text>
-                  <Text style={styles.modelOverrideHint}>{workspace.projects.length}/50</Text>
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  项目、分支和搜索完全在本机运行。项目系统提示只在你主动发送消息时随正常请求交给所选服务商，不会额外调用模型。
-                </Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRow}>
-                  {workspace.projects.map((project) => (
-                    <AnimatedPressable
-                      key={`settings-project:${project.id}`}
-                      accessibilityRole="button"
-                      onPress={() => selectProject(project.id)}
-                      style={[styles.providerChip, project.id === workspace.activeProjectId && styles.providerChipActive]}
-                    >
-                      <Text style={[styles.providerChipText, project.id === workspace.activeProjectId && styles.providerChipTextActive]}>
-                        {project.name}
-                      </Text>
-                    </AnimatedPressable>
-                  ))}
-                </ScrollView>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>新项目名称</Text>
-                  <TextInput
-                    value={projectNewName}
-                    editable={!workspaceReadOnly}
-                    onChangeText={setProjectNewName}
-                    placeholder="例如：产品研究"
-                    placeholderTextColor={palette.placeholder}
-                    style={styles.input}
-                  />
-                </View>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  disabled={workspaceReadOnly || !projectNewName.trim()}
-                  onPress={createProject}
-                  style={[styles.secondaryButton, (workspaceReadOnly || !projectNewName.trim()) && styles.buttonDisabled]}
-                >
-                  <Text style={styles.secondaryButtonText}>创建本地项目</Text>
-                </AnimatedPressable>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>当前项目名称</Text>
-                  <TextInput
-                    value={projectNameDraft}
-                    editable={!workspaceReadOnly}
-                    onChangeText={setProjectNameDraft}
-                    style={styles.input}
-                  />
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>新对话系统提示（可选）</Text>
-                  <TextInput
-                    value={projectSystemPromptDraft}
-                    editable={!workspaceReadOnly}
-                    multiline
-                    onChangeText={setProjectSystemPromptDraft}
-                    placeholder="仅为之后的新对话保存一份本地快照"
-                    placeholderTextColor={palette.placeholder}
-                    style={[styles.input, styles.promptTemplateContentInput]}
-                  />
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  默认模型：{activeProject?.defaultTarget
-                    ? `${activeProject.defaultTarget.providerId} / ${activeProject.defaultTarget.modelId}`
-                    : '未设置'}
-                </Text>
-                <AnimatedPressable accessibilityRole="button" onPress={saveActiveProject} style={styles.primaryButton}>
-                  <Text style={styles.primaryButtonText}>保存当前项目</Text>
-                </AnimatedPressable>
-                <AnimatedPressable accessibilityRole="button" onPress={setProjectDefaultToCurrentModel} style={styles.secondaryButton}>
-                  <Text style={styles.secondaryButtonText}>将当前模型设为项目默认</Text>
-                </AnimatedPressable>
-                {workspace.projects.length > 1 ? (
-                  <AnimatedPressable accessibilityRole="button" onPress={removeActiveProject} style={styles.providerDeleteButton}>
-                    <Trash2 size={15} color={palette.danger} strokeWidth={2.2} />
-                    <Text style={styles.providerDeleteButtonText}>删除项目并迁移其中对话</Text>
-                  </AnimatedPressable>
-                ) : null}
-              </View>
-
-              <View style={styles.settingsCard}>
-                <Text style={styles.settingsCardTitle}>服务商</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRow}>
-                  {workspace.providers.map((provider) => (
-                    <AnimatedPressable
-                      key={provider.id}
-                      accessibilityRole="button"
-                      onPress={() => selectProvider(provider.id)}
-                      haptic="selection"
-                      style={[
-                        styles.providerChip,
-                        provider.id === activeProvider.id && styles.providerChipActive,
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.providerChipText,
-                          provider.id === activeProvider.id && styles.providerChipTextActive,
-                        ]}
-                      >
-                        {provider.name}
-                      </Text>
-                    </AnimatedPressable>
-                  ))}
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    onPress={addCustomProvider}
-                    style={styles.providerChip}
-                  >
-                    <Text style={styles.providerChipText}>+ 新增</Text>
-                  </AnimatedPressable>
-                </ScrollView>
-              </View>
-
-              <View style={styles.settingsCard} testID="provider-setup-wizard-card">
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>服务商配置向导</Text>
-                  <Text style={styles.modelOverrideHint}>
-                    {providerEndpointInspection.valid ? '本地校验通过' : '等待修正'}
-                  </Text>
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  先在本机校验协议、地址和密钥绑定，再请求模型目录。模型目录请求不生成内容；不会使用 Embezzle Studio 的额度或服务器。
-                </Text>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>名称</Text>
-                   <TextInput
-                    value={providerNameDraft}
-                    editable={!workspaceReadOnly}
-                    onChangeText={setProviderNameDraft}
-                    style={styles.input}
-                  />
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>协议类型</Text>
-                  <View style={styles.toolSegmentRow}>
-                    {([
-                      ['volcengine-ark', '火山方舟'],
-                      ['bailian-compatible', '阿里百炼'],
-                      ['openai-compatible', 'OpenAI'],
-                      ['custom', '兼容接口'],
-                    ] as const).map(([kind, label]) => (
-                      <AnimatedPressable
-                        key={kind}
-                        accessibilityRole="button"
-                        onPress={() => changeProviderBindingDraft({ kind })}
-                        style={[styles.toolSegment, providerKindDraft === kind && styles.toolSegmentActive]}
-                      >
-                        <Text style={[styles.toolSegmentText, providerKindDraft === kind && styles.toolSegmentTextActive]}>
-                          {label}
-                        </Text>
-                      </AnimatedPressable>
-                    ))}
-                  </View>
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>Base URL</Text>
-                  <TextInput
-                    autoCapitalize="none"
-                    value={providerBaseUrlDraft}
-                    editable={!workspaceReadOnly}
-                    onChangeText={(baseUrl) => changeProviderBindingDraft({ baseUrl })}
-                    style={styles.input}
-                  />
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>API Key</Text>
-                  <TextInput
-                    autoCapitalize="none"
-                    secureTextEntry
-                    value={providerApiKeyDraft}
-                    editable={!workspaceReadOnly}
-                   onChangeText={(apiKey) => {
-                     setProviderApiKeyDraft(apiKey);
-                     setProviderKeyBindingFingerprint(
-                       apiKey.trim()
-                         ? providerEndpointFingerprint({
-                             kind: providerKindDraft,
-                             baseUrl: providerBaseUrlDraft,
-                           }) ?? null
-                         : null
-                     );
-                   }}
-                   style={styles.input}
-                 />
-                  {Platform.OS === 'web' ? (
-                    <Text style={styles.modelOverrideHint}>
-                      Web 端仅在当前标签页会话中保存密钥，关闭标签页后会清除；Android 使用系统安全存储。
-                    </Text>
-                  ) : null}
-                </View>
-
-                {providerEndpointInspection.errors.map((error) => (
-                  <Text key={error} style={styles.providerWizardError}>• {error}</Text>
-                ))}
-                {providerEndpointInspection.warnings.map((warning) => (
-                  <Text key={warning} style={styles.providerWizardWarning}>• {warning}</Text>
-                ))}
-
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  disabled={workspaceReadOnly}
-                  onPress={saveProviderDraft}
-                  style={[styles.secondaryButton, workspaceReadOnly && styles.buttonDisabled]}
-                >
-                  <Text style={styles.secondaryButtonText}>保存并绑定此端点</Text>
-                </AnimatedPressable>
-
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  disabled={busy || workspaceReadOnly}
-                  onPress={refreshModels}
-                  style={[styles.primaryButton, (busy || workspaceReadOnly) && styles.buttonDisabled]}
-                >
-                  <Text style={styles.primaryButtonText}>{busy ? '请求中...' : '检查连接并获取模型目录'}</Text>
-                </AnimatedPressable>
-                {workspace.providers.length > 1 ? (
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`删除服务商 ${activeProvider.name}`}
-                    disabled={busy || workspaceReadOnly}
-                    onPress={() => setDeleteConfirmProviderId(activeProvider.id)}
-                    style={[styles.providerDeleteButton, (busy || workspaceReadOnly) && styles.buttonDisabled]}
-                  >
-                    <Trash2 size={15} color={palette.danger} strokeWidth={2.2} />
-                    <Text style={styles.providerDeleteButtonText}>删除此服务商</Text>
-                  </AnimatedPressable>
-                ) : null}
-              </View>
-
-              <View style={styles.settingsCard} testID="model-capability-matrix-card">
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>模型能力矩阵</Text>
-                  <Text style={styles.modelOverrideHint}>{capabilityMatrixRows.length} 个已添加模型</Text>
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  “可用”同时要求模型声明支持、端点通过检查且客户端已经实现对应协议；“服务商侧”表示模型可能支持，但当前客户端尚未开放该入口。
-                </Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.capabilityMatrixTable}>
-                  <View>
-                    <View style={styles.capabilityMatrixHeaderRow}>
-                      <Text style={[styles.capabilityMatrixModelCell, styles.capabilityMatrixHeaderText]}>模型</Text>
-                      {([
-                        ['text', '文本'],
-                        ['image-input', '图片'],
-                        ['file-input', '文件'],
-                        ['reasoning', '思考'],
-                        ['web-search', '搜索'],
-                        ['image-generation', '生图'],
-                        ['video-generation', '视频'],
-                        ['speech-to-text', '转写'],
-                        ['text-to-speech', '朗读'],
-                      ] as const).map(([capability, label]) => (
-                        <Text key={capability} style={[styles.capabilityMatrixCell, styles.capabilityMatrixHeaderText]}>{label}</Text>
-                      ))}
-                    </View>
-                    {capabilityMatrixRows.slice(0, 50).map((row) => (
-                      <View key={`matrix:${row.providerId}:${row.modelId}`} style={styles.capabilityMatrixRow}>
-                        <Text numberOfLines={1} style={styles.capabilityMatrixModelCell}>{row.modelName}</Text>
-                        {(['text', 'image-input', 'file-input', 'reasoning', 'web-search', 'image-generation', 'video-generation', 'speech-to-text', 'text-to-speech'] as const).map((capability) => {
-                          const status = row.cells[capability].status;
-                          return (
-                            <View key={capability} style={styles.capabilityMatrixCell}>
-                              {status === 'available' ? (
-                                <Check size={15} color={palette.accent} strokeWidth={2.5} />
-                              ) : (
-                                <Text style={status === 'provider-only' ? styles.capabilityMatrixProviderOnly : styles.capabilityMatrixUnavailable}>
-                                  {status === 'provider-only' ? '侧' : '—'}
-                                </Text>
-                              )}
-                            </View>
-                          );
-                        })}
-                      </View>
-                    ))}
-                  </View>
-                </ScrollView>
-                {!capabilityMatrixRows.length ? (
-                  <Text style={styles.sidebarEmpty}>完成向导并添加模型后显示能力矩阵。</Text>
-                ) : null}
-              </View>
-
-              <View style={styles.settingsCard} testID="comparison-settings-card">
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>多模型同问对比</Text>
-                  <Text style={styles.modelOverrideHint}>{workspace.comparisonTargets.length}/{comparisonTargetLimit}</Text>
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  在各服务商标签间切换并选择 2–{comparisonTargetLimit} 个聊天模型。发送一次会产生同等数量的独立调用，费用由你的服务商账户结算。
-                </Text>
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.providerRow}
-                >
-                  {getSelectableModels(activeProvider)
-                    .filter((model) => inferModelTask(model) === 'chat')
-                    .map((model) => {
-                      const selected = workspace.comparisonTargets.some(
-                        (target) => target.providerId === activeProvider.id && target.modelId === model.id
-                      );
-                      return (
-                        <AnimatedPressable
-                          key={`compare:${activeProvider.id}:${model.id}`}
-                          accessibilityRole="checkbox"
-                          accessibilityState={{ checked: selected }}
-                          onPress={() => toggleComparisonTarget(activeProvider.id, model.id)}
-                          style={[styles.providerChip, selected && styles.providerChipActive]}
-                        >
-                          <Text
-                            numberOfLines={1}
-                            style={[styles.providerChipText, selected && styles.providerChipTextActive]}
-                          >
-                            {formatCompactModelName(model.id, activeProvider.name)}
-                          </Text>
-                        </AnimatedPressable>
-                      );
-                    })}
-                </ScrollView>
-                <AnimatedPressable
-                  accessibilityRole="switch"
-                  accessibilityState={{ checked: comparisonActive }}
-                  disabled={comparisonRuntimes.length < 2 || workspaceReadOnly}
-                  onPress={() => setComparisonEnabled(!comparisonActive)}
-                  style={[
-                    styles.primaryButton,
-                    (comparisonRuntimes.length < 2 || workspaceReadOnly) && styles.buttonDisabled,
-                  ]}
-                >
-                  <Text style={styles.primaryButtonText}>
-                    {comparisonActive ? '关闭对比模式' : '开启对比模式'}
-                  </Text>
-                </AnimatedPressable>
-              </View>
-
-              <View style={styles.settingsCard} testID="web-search-settings-card">
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>服务商联网搜索</Text>
-                  <Text style={styles.modelOverrideHint}>{webSearchReady ? '当前可用' : '条件未满足'}</Text>
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  仅调用 OpenAI、火山方舟或阿里百炼的官方 Responses 搜索协议；必须使用你自己的 Key，可能产生的搜索费用由对应服务商从你的账户结算。只有响应提供搜索调用或引用证据时才会标记为已联网。
-                </Text>
-                {webSearchContextSizeApplies ? (
-                  <View style={styles.toolSegmentRow}>
-                    {(['low', 'medium', 'high'] as const).map((size) => {
-                      const selected = workspace.webSearch.searchContextSize === size;
-                      return (
-                        <AnimatedPressable
-                          key={size}
-                          accessibilityRole="button"
-                          disabled={workspaceReadOnly}
-                          onPress={() => {
-                            if (!ensureWorkspaceWritable()) return;
-                            setWorkspace((current) => ({
-                              ...current,
-                              webSearch: { ...current.webSearch, searchContextSize: size },
-                            }));
-                          }}
-                          style={[styles.toolSegment, selected && styles.toolSegmentActive]}
-                        >
-                          <Text style={[styles.toolSegmentText, selected && styles.toolSegmentTextActive]}>
-                            {size === 'low' ? '精简' : size === 'medium' ? '均衡' : '深入'}
-                          </Text>
-                        </AnimatedPressable>
-                      );
-                    })}
-                  </View>
-                ) : (
-                  <Text style={styles.modelOverrideHint}>
-                    搜索范围档位仅适用于全部目标都是 OpenAI 官方协议时；火山方舟使用安全固定上限，百炼使用服务商协议默认值。
-                  </Text>
-                )}
-                <AnimatedPressable
-                  accessibilityRole="switch"
-                  accessibilityState={{ checked: workspace.webSearch.enabled, disabled: !webSearchReady }}
-                  disabled={!webSearchReady && !workspace.webSearch.enabled}
-                  onPress={() => setWebSearchEnabled(!workspace.webSearch.enabled)}
-                  style={[
-                    styles.primaryButton,
-                    (!webSearchReady && !workspace.webSearch.enabled) && styles.buttonDisabled,
-                  ]}
-                >
-                  <Text style={styles.primaryButtonText}>
-                    {workspace.webSearch.enabled ? '关闭联网搜索' : '开启联网搜索'}
-                  </Text>
-                </AnimatedPressable>
-              </View>
-
-              <View style={styles.settingsCard} testID="prompt-library-settings-card">
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>本地提示词与角色模板</Text>
-                  <Text style={styles.modelOverrideHint}>{workspace.promptTemplates.length}/100</Text>
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  仅保存在本机。输入模板插入草稿但不会自动发送；会话指令作为 system 消息加入当前对话。
-                </Text>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>模板名称</Text>
-                  <TextInput
-                    value={promptTemplateName}
-                    editable={!workspaceReadOnly}
-                    onChangeText={setPromptTemplateName}
-                    placeholder="例如：代码审查"
-                    placeholderTextColor={palette.placeholder}
-                    style={styles.input}
-                  />
-                </View>
-                <View style={styles.toolSegmentRow}>
-                  {(['composer', 'system'] as const).map((mode) => {
-                    const selected = promptTemplateMode === mode;
-                    return (
-                      <AnimatedPressable
-                        key={mode}
-                        accessibilityRole="button"
-                        onPress={() => setPromptTemplateMode(mode)}
-                        style={[styles.toolSegment, selected && styles.toolSegmentActive]}
-                      >
-                        <Text style={[styles.toolSegmentText, selected && styles.toolSegmentTextActive]}>
-                          {mode === 'composer' ? '插入输入框' : '会话指令'}
-                        </Text>
-                      </AnimatedPressable>
-                    );
-                  })}
-                </View>
-                <TextInput
-                  value={promptTemplateContent}
-                  editable={!workspaceReadOnly}
-                  multiline
-                  onChangeText={setPromptTemplateContent}
-                  placeholder="填写模板正文；可保留 {{变量}} 供发送前编辑"
-                  placeholderTextColor={palette.placeholder}
-                  style={[styles.input, styles.promptTemplateContentInput]}
-                />
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  disabled={workspaceReadOnly}
-                  onPress={savePromptTemplate}
-                  style={[styles.primaryButton, workspaceReadOnly && styles.buttonDisabled]}
-                >
-                  <Text style={styles.primaryButtonText}>保存模板</Text>
-                </AnimatedPressable>
-                {workspace.promptTemplates.map((template) => (
-                  <View key={template.id} style={styles.promptTemplateRow}>
-                    <AnimatedPressable
-                      accessibilityRole="button"
-                      onPress={() => applyPromptTemplate(template.id)}
-                      style={styles.promptTemplateMain}
-                    >
-                      <BookOpen size={16} color={palette.text} strokeWidth={2} />
-                      <View style={styles.promptTemplateTextBlock}>
-                        <Text numberOfLines={1} style={styles.promptTemplateName}>{template.name}</Text>
-                        <Text numberOfLines={1} style={styles.modelOverrideHint}>
-                          {template.mode === 'system' ? '会话指令' : '输入模板'} · {template.content}
-                        </Text>
-                      </View>
-                    </AnimatedPressable>
-                    <AnimatedPressable
-                      accessibilityRole="button"
-                      accessibilityLabel={template.pinnedAt ? '取消置顶模板' : '置顶模板'}
-                      onPress={() => togglePromptTemplatePinned(template.id, Boolean(template.pinnedAt))}
-                      style={styles.iconButton}
-                    >
-                      <Pin
-                        size={15}
-                        color={template.pinnedAt ? palette.accent : palette.textSecondary}
-                        fill={template.pinnedAt ? palette.accent : 'transparent'}
-                        strokeWidth={2}
-                      />
-                    </AnimatedPressable>
-                    <AnimatedPressable
-                      accessibilityRole="button"
-                      accessibilityLabel="删除提示词模板"
-                      onPress={() => removePromptTemplate(template.id)}
-                      style={styles.iconButton}
-                    >
-                      <Trash2 size={15} color={palette.danger} strokeWidth={2} />
-                    </AnimatedPressable>
-                  </View>
-                ))}
-              </View>
-
-              <View style={styles.settingsCard} testID="cost-guard-settings-card">
-                <View style={styles.settingsCardHeader}>
-                  <View style={styles.costGuardTitleRow}>
-                    <ShieldCheck size={18} color={palette.text} strokeWidth={2.2} />
-                    <Text style={styles.settingsCardTitle}>费用保险丝</Text>
-                  </View>
-                  <Text style={styles.modelOverrideHint}>{workspace.costGuard.enabled ? '已开启' : '未开启'}</Text>
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  只依据本机请求台账和用户填写的价格进行提醒或阻断，不是服务商账单，也无法覆盖其他设备、控制台调用或服务商未返回的费用。未知费用永远不会按 0 处理。
-                </Text>
-                <AnimatedPressable
-                  accessibilityRole="switch"
-                  accessibilityState={{ checked: workspace.costGuard.enabled }}
-                  onPress={() => setWorkspace((current) => ({
-                    ...current,
-                    costGuard: { ...current.costGuard, enabled: !current.costGuard.enabled },
-                  }))}
-                  style={styles.primaryButton}
-                >
-                  <Text style={styles.primaryButtonText}>{workspace.costGuard.enabled ? '关闭费用保险丝' : '开启费用保险丝'}</Text>
-                </AnimatedPressable>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>单次最大输出 Token</Text>
-                  <TextInput value={costMaxOutputDraft} onChangeText={setCostMaxOutputDraft} keyboardType="numeric" style={styles.input} />
-                  <Text style={styles.modelOverrideHint}>聊天/Responses 会按官方协议发送对应上限；推理模型的思考 Token 也可能占用上限。图片和视频生成不受该 Token 字段保护。</Text>
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>每日本机请求次数（0 为关闭）</Text>
-                  <TextInput value={costDailyRequestDraft} onChangeText={setCostDailyRequestDraft} keyboardType="numeric" style={styles.input} />
-                </View>
-                <View style={styles.usagePricingGrid}>
-                  <View style={styles.usagePricingField}>
-                    <Text style={styles.fieldLabel}>每日 CNY 已知累计阈值（0 关闭）</Text>
-                    <TextInput value={costDailyCnyDraft} onChangeText={setCostDailyCnyDraft} keyboardType="decimal-pad" style={styles.input} />
-                  </View>
-                  <View style={styles.usagePricingField}>
-                    <Text style={styles.fieldLabel}>每日 USD 已知累计阈值（0 关闭）</Text>
-                    <TextInput value={costDailyUsdDraft} onChangeText={setCostDailyUsdDraft} keyboardType="decimal-pad" style={styles.input} />
-                  </View>
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  本机无法可靠预测本次输入、输出和工具的最终费用；CNY/USD 阈值只会在已完成请求的已知累计达到后，对下一次请求提醒或阻断。
-                </Text>
-                <Text style={styles.fieldLabel}>最多对比模型</Text>
-                <View style={styles.toolSegmentRow}>
-                  {([2, 3, 4] as const).map((count) => (
-                    <AnimatedPressable
-                      key={`guard-compare:${count}`}
-                      accessibilityRole="button"
-                      onPress={() => setWorkspace((current) => ({
-                        ...current,
-                        costGuard: { ...current.costGuard, maxComparisonTargets: count },
-                      }))}
-                      style={[styles.toolSegment, workspace.costGuard.maxComparisonTargets === count && styles.toolSegmentActive]}
-                    >
-                      <Text style={[styles.toolSegmentText, workspace.costGuard.maxComparisonTargets === count && styles.toolSegmentTextActive]}>{count}</Text>
-                    </AnimatedPressable>
-                  ))}
-                </View>
-                <Text style={styles.fieldLabel}>达到次数或已知预算时</Text>
-                <View style={styles.toolSegmentRow}>
-                  {(['warn', 'block'] as const).map((action) => (
-                    <AnimatedPressable
-                      key={`limit-action:${action}`}
-                      accessibilityRole="button"
-                      onPress={() => setWorkspace((current) => ({
-                        ...current,
-                        costGuard: { ...current.costGuard, limitAction: action },
-                      }))}
-                      style={[styles.toolSegment, workspace.costGuard.limitAction === action && styles.toolSegmentActive]}
-                    >
-                      <Text style={[styles.toolSegmentText, workspace.costGuard.limitAction === action && styles.toolSegmentTextActive]}>{action === 'warn' ? '提醒确认' : '直接阻断'}</Text>
-                    </AnimatedPressable>
-                  ))}
-                </View>
-                <Text style={styles.fieldLabel}>存在未知费用时</Text>
-                <View style={styles.toolSegmentRow}>
-                  {(['warn', 'block'] as const).map((action) => (
-                    <AnimatedPressable
-                      key={`unknown-action:${action}`}
-                      accessibilityRole="button"
-                      onPress={() => setWorkspace((current) => ({
-                        ...current,
-                        costGuard: { ...current.costGuard, unknownCostAction: action },
-                      }))}
-                      style={[styles.toolSegment, workspace.costGuard.unknownCostAction === action && styles.toolSegmentActive]}
-                    >
-                      <Text style={[styles.toolSegmentText, workspace.costGuard.unknownCostAction === action && styles.toolSegmentTextActive]}>{action === 'warn' ? '提醒确认' : '直接阻断'}</Text>
-                    </AnimatedPressable>
-                  ))}
-                </View>
-                <AnimatedPressable
-                  accessibilityRole="switch"
-                  accessibilityState={{ checked: workspace.costGuard.confirmPotentialMultipleCharges }}
-                  onPress={() => setWorkspace((current) => ({
-                    ...current,
-                    costGuard: {
-                      ...current.costGuard,
-                      confirmPotentialMultipleCharges: !current.costGuard.confirmPotentialMultipleCharges,
-                    },
-                  }))}
-                  style={styles.secondaryButton}
-                >
-                  <Text style={styles.secondaryButtonText}>
-                    {workspace.costGuard.confirmPotentialMultipleCharges ? '多项潜在计费：发送前确认' : '多项潜在计费：不额外确认'}
-                  </Text>
-                </AnimatedPressable>
-                <View style={styles.costGuardTodayRow}>
-                  <Text style={styles.modelOverrideHint}>今日 {costGuardToday.requestCount} 次请求</Text>
-                  <Text style={styles.modelOverrideHint}>CNY {costGuardToday.knownCostByCurrency.CNY.toFixed(6)}</Text>
-                  <Text style={styles.modelOverrideHint}>USD {costGuardToday.knownCostByCurrency.USD.toFixed(6)}</Text>
-                  <Text style={styles.modelOverrideHint}>未知 {costGuardToday.unknownEventCount} 次</Text>
-                </View>
-                <AnimatedPressable accessibilityRole="button" onPress={saveCostGuardDrafts} style={styles.primaryButton}>
-                  <Text style={styles.primaryButtonText}>保存保险丝数值</Text>
-                </AnimatedPressable>
-              </View>
-
-              <View style={styles.settingsCard} testID="usage-dashboard-card">
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>本机用量与费用估算</Text>
-                  <Text style={styles.modelOverrideHint}>当前保留对话</Text>
-                </View>
-                <View style={styles.usageSummaryGrid}>
-                  <View style={styles.usageSummaryItem}>
-                    <Text style={styles.usageSummaryValue}>{usageAggregation.totals.requestCount}</Text>
-                    <Text style={styles.usageSummaryLabel}>请求</Text>
-                  </View>
-                  <View style={styles.usageSummaryItem}>
-                    <Text style={styles.usageSummaryValue}>
-                      {formatTokenCount(usageAggregation.totals.totalTokens || undefined)}
-                    </Text>
-                    <Text style={styles.usageSummaryLabel}>Token</Text>
-                  </View>
-                  <View style={styles.usageSummaryItem}>
-                    <Text style={styles.usageSummaryValue}>
-                      {usageAggregation.totals.averageDurationMs !== undefined
-                        ? `${(usageAggregation.totals.averageDurationMs / 1000).toFixed(1)}s`
-                        : '—'}
-                    </Text>
-                    <Text style={styles.usageSummaryLabel}>平均耗时</Text>
-                  </View>
-                </View>
-                <View style={styles.usageCostRow}>
-                  <Text style={styles.modelOverrideHint}>
-                    {usageAggregation.totals.costSampleCountByCurrency.CNY > 0
-                      ? `CNY 已知小计 ¥${usageAggregation.totals.costByCurrency.CNY.toFixed(6)}`
-                      : 'CNY 费用未知'}
-                  </Text>
-                  <Text style={styles.modelOverrideHint}>
-                    {usageAggregation.totals.costSampleCountByCurrency.USD > 0
-                      ? `USD 已知小计 $${usageAggregation.totals.costByCurrency.USD.toFixed(6)}`
-                      : 'USD 费用未知'}
-                  </Text>
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  已知费用覆盖 {knownCostRequestCount}/{usageAggregation.totals.requestCount} 次请求；其余 {usageAggregation.totals.unknown.cost} 次未知。价格完全由你本地填写，不调用价格或汇率服务；推理 Token 不重复计费。
-                </Text>
-                <Text style={styles.modelOverrideHint}>
-                  小计不包含联网搜索工具费、语音、媒体任务或服务商其他附加费，最终账单以你的服务商控制台为准。
-                </Text>
-                {activeModelId ? (
-                  <>
-                    <Text style={styles.fieldLabel}>
-                      {formatCompactModelName(activeModelId, activeProvider.name)} · 每百万 Token
-                    </Text>
-                    <View style={styles.toolSegmentRow}>
-                      {(['CNY', 'USD'] as const).map((currency) => {
-                        const selected = (activeModelPricing?.currency ?? 'CNY') === currency;
-                        return (
-                          <AnimatedPressable
-                            key={currency}
-                            accessibilityRole="button"
-                            onPress={() => setActivePricingCurrency(currency)}
-                            style={[styles.toolSegment, selected && styles.toolSegmentActive]}
-                          >
-                            <Text style={[styles.toolSegmentText, selected && styles.toolSegmentTextActive]}>
-                              {currency}
-                            </Text>
-                          </AnimatedPressable>
-                        );
-                      })}
-                    </View>
-                    <View style={styles.pricingInputRow}>
-                      <View style={styles.pricingInputGroup}>
-                        <Text style={styles.usageSummaryLabel}>输入</Text>
-                        <TextInput
-                          value={pricingInputDraft}
-                          onChangeText={setPricingInputDraft}
-                          onBlur={() => updatePricingText('inputPerMillion', pricingInputDraft)}
-                          keyboardType="decimal-pad"
-                          placeholder="未设置"
-                          placeholderTextColor={palette.placeholder}
-                          style={styles.input}
-                        />
-                      </View>
-                      <View style={styles.pricingInputGroup}>
-                        <Text style={styles.usageSummaryLabel}>缓存输入</Text>
-                        <TextInput
-                          value={pricingCachedDraft}
-                          onChangeText={setPricingCachedDraft}
-                          onBlur={() => updatePricingText('cachedInputPerMillion', pricingCachedDraft)}
-                          keyboardType="decimal-pad"
-                          placeholder="同输入价"
-                          placeholderTextColor={palette.placeholder}
-                          style={styles.input}
-                        />
-                      </View>
-                      <View style={styles.pricingInputGroup}>
-                        <Text style={styles.usageSummaryLabel}>输出</Text>
-                        <TextInput
-                          value={pricingOutputDraft}
-                          onChangeText={setPricingOutputDraft}
-                          onBlur={() => updatePricingText('outputPerMillion', pricingOutputDraft)}
-                          keyboardType="decimal-pad"
-                          placeholder="未设置"
-                          placeholderTextColor={palette.placeholder}
-                          style={styles.input}
-                        />
-                      </View>
-                    </View>
-                  </>
-                ) : null}
-              </View>
-
-              <View style={styles.settingsCard} testID="media-task-center-card">
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>媒体任务中心</Text>
-                  <Text style={styles.modelOverrideHint}>{generationTasks.length} 项</Text>
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  任务直接从本机对话记录派生，不上传到我们的服务器；只在你点击刷新时查询对应服务商。
-                </Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRow}>
-                  {(['all', 'active', 'completed', 'failed'] as const).map((filter) => {
-                    const selected = generationTaskFilter === filter;
-                    return (
-                      <AnimatedPressable
-                        key={filter}
-                        accessibilityRole="button"
-                        onPress={() => setGenerationTaskFilter(filter)}
-                        style={[styles.providerChip, selected && styles.providerChipActive]}
-                      >
-                        <Text style={[styles.providerChipText, selected && styles.providerChipTextActive]}>
-                          {filter === 'all' ? '全部' : filter === 'active' ? '进行中' : filter === 'completed' ? '已完成' : '失败'}
-                        </Text>
-                      </AnimatedPressable>
-                    );
-                  })}
-                </ScrollView>
-                {visibleGenerationTasks.length ? (
-                  visibleGenerationTasks.slice(0, 20).map((item) => (
-                    <View key={item.key} style={styles.mediaTaskRow}>
-                      <View style={styles.mediaTaskInfo}>
-                        <Text numberOfLines={1} style={styles.promptTemplateName}>{item.title}</Text>
-                        <Text numberOfLines={1} style={styles.modelOverrideHint}>
-                          {item.task.modelId} · {item.task.status ?? 'submitted'}
-                        </Text>
-                      </View>
-                      <Text
-                        style={[
-                          styles.mediaTaskState,
-                          item.state === 'failed' && styles.messageErrorText,
-                        ]}
-                      >
-                        {item.state === 'active' ? '进行中' : item.state === 'completed' ? '已完成' : '失败'}
-                      </Text>
-                      {item.attachment ? (
-                        <AnimatedPressable
-                          accessibilityRole="button"
-                          accessibilityLabel="导出媒体任务结果"
-                          onPress={() => void exportTaskCenterAttachment(item.attachment!)}
-                          style={styles.iconButton}
-                        >
-                          <Download size={15} color={palette.text} strokeWidth={2} />
-                        </AnimatedPressable>
-                      ) : item.state === 'active' ? (
-                        <AnimatedPressable
-                          accessibilityRole="button"
-                          accessibilityLabel="刷新媒体任务"
-                          disabled={Boolean(queryingTaskByMessageId[item.messageId])}
-                          onPress={() => refreshTaskCenterItem(item.conversationId, item.messageId)}
-                          style={styles.iconButton}
-                        >
-                          <RefreshCw size={15} color={palette.text} strokeWidth={2} />
-                        </AnimatedPressable>
-                      ) : null}
-                      <AnimatedPressable
-                        accessibilityRole="button"
-                        accessibilityLabel="打开任务所在对话"
-                        onPress={() => {
-                          selectConversation(item.conversationId);
-                          setSettingsOpen(false);
-                        }}
-                        style={styles.iconButton}
-                      >
-                        <MessageSquare size={15} color={palette.text} strokeWidth={2} />
-                      </AnimatedPressable>
-                    </View>
-                  ))
-                ) : (
-                  <Text style={styles.modelOverrideHint}>当前筛选下暂无媒体任务。</Text>
-                )}
-              </View>
-
-              <View style={styles.settingsCard} testID="encrypted-backup-card">
-                <Text style={styles.settingsCardTitle}>本地加密备份</Text>
-                <Text style={styles.modelOverrideHint}>
-                  使用密码在本机完成认证加密。专用 API Key/MCP 授权字段、媒体文件、本机费用账本和 MCP 活动摘要不会导出；普通对话、提示词和错误文字会原样备份，请勿在其中粘贴密钥。
-                </Text>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>备份密码（至少 8 个字符）</Text>
-                  <TextInput
-                    value={backupPassword}
-                    editable={!backupBusy && !workspaceReadOnly}
-                    onChangeText={setBackupPassword}
-                    secureTextEntry
-                    autoCapitalize="none"
-                    placeholder="密码不会保存，遗失后无法找回"
-                    placeholderTextColor={palette.placeholder}
-                    style={styles.input}
-                  />
-                </View>
-                <View style={styles.updateActionRow}>
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    disabled={backupBusy || workspaceReadOnly}
-                    onPress={() => void exportEncryptedBackup()}
-                    style={[styles.secondaryButton, styles.updateActionButton, (backupBusy || workspaceReadOnly) && styles.buttonDisabled]}
-                  >
-                    <Download size={16} color={palette.text} strokeWidth={2} />
-                    <Text style={styles.secondaryButtonText}>{backupBusy ? '处理中' : '导出备份'}</Text>
-                  </AnimatedPressable>
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    disabled={backupBusy || workspaceReadOnly}
-                    onPress={() => void importEncryptedBackup()}
-                    style={[styles.primaryButton, styles.updateActionButton, (backupBusy || workspaceReadOnly) && styles.buttonDisabled]}
-                  >
-                    <FileText size={16} color={palette.textOnAccent} strokeWidth={2} />
-                    <Text style={styles.primaryButtonText}>{backupBusy ? '处理中' : '验证并导入'}</Text>
-                  </AnimatedPressable>
-                </View>
-              </View>
-
-              <View style={styles.settingsCard} testID="voice-settings-card">
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>用户服务商语音</Text>
-                  <Text style={styles.modelOverrideHint}>Android 请求式 · BYOK</Text>
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  录音和朗读仅调用你配置的 OpenAI 或阿里百炼账号，可能产生的费用由对应服务商从你的账户结算；我们不提供语音 API、不设中转服务器。正式 Web 端保持关闭。
-                </Text>
-                <View style={styles.voiceTargetRow}>
-                  <View style={styles.mediaTaskInfo}>
-                    <Text style={styles.fieldLabel}>语音输入转写</Text>
-                    <Text numberOfLines={1} style={styles.modelOverrideHint}>
-                      {workspace.voice.transcriptionTarget
-                        ? `${workspace.voice.transcriptionTarget.providerId} · ${workspace.voice.transcriptionTarget.modelId}${configuredTranscriptionTarget ? '' : '（已失效）'}`
-                        : '未配置'}
-                    </Text>
-                  </View>
-                  {workspace.voice.transcriptionTarget ? (
-                    <AnimatedPressable
-                      accessibilityRole="button"
-                      onPress={() => clearVoiceTarget('transcription')}
-                      style={styles.iconButton}
-                    >
-                      <X size={15} color={palette.textSecondary} strokeWidth={2} />
-                    </AnimatedPressable>
-                  ) : null}
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    disabled={!canSetActiveTranscriptionTarget}
-                    onPress={() => setVoiceTarget('transcription')}
-                    style={[
-                      styles.providerChip,
-                      !canSetActiveTranscriptionTarget && styles.buttonDisabled,
-                    ]}
-                  >
-                    <Text style={styles.providerChipText}>使用当前模型</Text>
-                  </AnimatedPressable>
-                </View>
-                <View style={styles.voiceTargetRow}>
-                  <View style={styles.mediaTaskInfo}>
-                    <Text style={styles.fieldLabel}>回答朗读</Text>
-                    <Text numberOfLines={1} style={styles.modelOverrideHint}>
-                      {workspace.voice.speechTarget
-                        ? `${workspace.voice.speechTarget.providerId} · ${workspace.voice.speechTarget.modelId}${configuredSpeechTarget ? '' : '（已失效）'}`
-                        : '未配置'}
-                    </Text>
-                  </View>
-                  {workspace.voice.speechTarget ? (
-                    <AnimatedPressable
-                      accessibilityRole="button"
-                      onPress={() => clearVoiceTarget('speech')}
-                      style={styles.iconButton}
-                    >
-                      <X size={15} color={palette.textSecondary} strokeWidth={2} />
-                    </AnimatedPressable>
-                  ) : null}
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    disabled={!canSetActiveSpeechTarget}
-                    onPress={() => setVoiceTarget('speech')}
-                    style={[
-                      styles.providerChip,
-                      !canSetActiveSpeechTarget && styles.buttonDisabled,
-                    ]}
-                  >
-                    <Text style={styles.providerChipText}>使用当前模型</Text>
-                  </AnimatedPressable>
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>服务商 Voice ID</Text>
-                  <TextInput
-                    value={workspace.voice.speechVoice}
-                    editable={!workspaceReadOnly}
-                    onChangeText={(speechVoice) => {
-                      if (!ensureWorkspaceWritable()) return;
-                      setWorkspace((current) => ({
-                        ...current,
-                        voice: { ...current.voice, speechVoice },
-                      }));
-                    }}
-                    autoCapitalize="none"
-                    placeholder="alloy / Cherry / 服务商音色 ID"
-                    placeholderTextColor={palette.placeholder}
-                    style={styles.input}
-                  />
-                </View>
-                {configuredSpeechProtocol === 'bailian-compatible' ? (
-                  <Text style={styles.modelOverrideHint}>
-                    百炼语音格式由服务商响应决定；上方格式选项只适用于 OpenAI 官方语音接口。
-                  </Text>
-                ) : (
-                  <View style={styles.toolSegmentRow}>
-                    {(['mp3', 'aac', 'wav', 'opus'] as const).map((format) => {
-                      const selected = workspace.voice.speechFormat === format;
-                      return (
-                        <AnimatedPressable
-                          key={format}
-                          accessibilityRole="button"
-                          disabled={workspaceReadOnly}
-                          onPress={() => {
-                            if (!ensureWorkspaceWritable()) return;
-                            setWorkspace((current) => ({
-                              ...current,
-                              voice: { ...current.voice, speechFormat: format },
-                            }));
-                          }}
-                          style={[styles.toolSegment, selected && styles.toolSegmentActive]}
-                        >
-                          <Text style={[styles.toolSegmentText, selected && styles.toolSegmentTextActive]}>
-                            {format.toUpperCase()}
-                          </Text>
-                        </AnimatedPressable>
-                      );
-                    })}
-                  </View>
-                )}
-                <Text style={styles.modelOverrideHint}>朗读音频为 AI 合成语音，并非真人录音。</Text>
-              </View>
-
-              <View style={styles.settingsCard} testID="mcp-tool-center-card">
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>MCP 工具中心</Text>
-                  <Text style={styles.modelOverrideHint}>默认关闭 · 逐次审批</Text>
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  v1.4 仅对官方 OpenAI Responses 开放真实执行，并强制非空工具白名单与逐次审批。火山方舟等待真实账号验证无存储续接，百炼 Responses 缺少执行前审批，因此两者仍只保存配置。
-                </Text>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>服务名称</Text>
-                  <TextInput
-                    value={mcpName}
-                    onChangeText={setMcpName}
-                    placeholder="例如：我的知识库"
-                    placeholderTextColor={palette.placeholder}
-                    style={styles.input}
-                  />
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>HTTPS Endpoint</Text>
-                  <TextInput
-                    value={mcpEndpoint}
-                    onChangeText={setMcpEndpoint}
-                    autoCapitalize="none"
-                    placeholder="https://mcp.example.com/mcp"
-                    placeholderTextColor={palette.placeholder}
-                    style={styles.input}
-                  />
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>服务描述（可选）</Text>
-                  <TextInput
-                    value={mcpDescription}
-                    onChangeText={setMcpDescription}
-                    multiline
-                    placeholder="这台 MCP 服务的用途与信任来源"
-                    placeholderTextColor={palette.placeholder}
-                    style={[styles.input, styles.multilineInput]}
-                  />
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>允许的精确工具名</Text>
-                  <TextInput
-                    testID="mcp-allowed-tools-input"
-                    value={mcpAllowedTools}
-                    onChangeText={setMcpAllowedTools}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    multiline
-                    placeholder={'例如：search_docs, get_page\n使用逗号或换行分隔'}
-                    placeholderTextColor={palette.placeholder}
-                    style={[styles.input, styles.multilineInput]}
-                  />
-                  <Text style={styles.modelOverrideHint}>必须至少填写一个工具名；不支持 *、自动导入全部工具或模糊匹配。</Text>
-                </View>
-                <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>Authorization（可选）</Text>
-                  <TextInput
-                    value={mcpAuthorization}
-                    onChangeText={setMcpAuthorization}
-                    autoCapitalize="none"
-                    secureTextEntry
-                    placeholder={
-                      Platform.OS === 'web'
-                        ? 'Web 仅当前标签页保存；不进入备份'
-                        : 'Android 系统安全存储；不进入备份'
-                    }
-                    placeholderTextColor={palette.placeholder}
-                    style={styles.input}
-                  />
-                </View>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  disabled={workspaceReadOnly}
-                  onPress={addRemoteMcpServer}
-                  style={[styles.primaryButton, workspaceReadOnly && styles.buttonDisabled]}
-                >
-                  <Wrench size={16} color={palette.textOnAccent} strokeWidth={2} />
-                  <Text style={styles.primaryButtonText}>添加为关闭状态</Text>
-                </AnimatedPressable>
-                {workspace.plugins.filter((plugin) => plugin.type === 'remote-mcp').map((plugin) => (
-                  <View key={plugin.id} style={styles.mediaTaskRow}>
-                    <Wrench size={16} color={palette.text} strokeWidth={2} />
-                    <View style={styles.mediaTaskInfo}>
-                      <Text numberOfLines={1} style={styles.promptTemplateName}>{plugin.name}</Text>
-                      <Text numberOfLines={1} style={styles.modelOverrideHint}>{plugin.endpoint}</Text>
-                      <Text numberOfLines={2} style={styles.modelOverrideHint}>
-                        工具：{plugin.allowedTools.length ? plugin.allowedTools.join(', ') : '未配置（不可执行）'}
-                      </Text>
-                    </View>
-                    <AnimatedPressable
-                      accessibilityRole="switch"
-                      accessibilityState={{ checked: plugin.enabled === true }}
-                      onPress={() => void toggleRemoteMcpServer(plugin.id, plugin.enabled !== true)}
-                      style={[styles.providerChip, plugin.enabled && styles.providerChipActive]}
-                    >
-                      <Text style={[styles.providerChipText, plugin.enabled && styles.providerChipTextActive]}>
-                        {plugin.enabled ? '已授权' : '关闭'}
-                      </Text>
-                    </AnimatedPressable>
-                    <AnimatedPressable
-                      accessibilityRole="button"
-                      accessibilityLabel="删除 MCP 配置"
-                      onPress={() => removeRemoteMcpServer(plugin.id)}
-                      style={styles.iconButton}
-                    >
-                      <Trash2 size={15} color={palette.danger} strokeWidth={2} />
-                    </AnimatedPressable>
-                  </View>
-                ))}
-              </View>
-
-              {notice ? <Text style={styles.settingsNotice}>{notice}</Text> : null}
-
-              <View style={styles.settingsCard}>
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>可添加模型</Text>
-                  {modelCandidates.length ? (
-                    <AnimatedPressable
-                      accessibilityRole="button"
-                      accessibilityLabel="清空可添加模型列表"
-                      onPress={() => {
-                        if (!ensureWorkspaceWritable()) {
-                          return;
-                        }
-                        setWorkspace((current) => ({
-                          ...current,
-                          modelCandidatesByProvider: {
-                            ...current.modelCandidatesByProvider,
-                            [activeProvider.id]: [],
-                          },
-                        }));
-                        setModelSearchQuery('');
-                        setModelCapabilityFilter('all');
-                      }}
-                      style={styles.settingsCardHeaderAction}
-                    >
-                      <Trash2 size={16} color={palette.textSecondary} strokeWidth={2} />
-                    </AnimatedPressable>
-                  ) : null}
-                </View>
-                {modelCandidates.length ? (
-                  <>
-                    <View style={styles.modelSearchRow}>
-                      <TextInput
-                        testID="candidate-model-search"
-                        autoCapitalize="none"
-                        autoCorrect={false}
-                        placeholder="搜索模型名称或 ID"
-                        placeholderTextColor={palette.placeholder}
-                        value={modelSearchQuery}
-                        onChangeText={setModelSearchQuery}
-                        style={[styles.input, styles.modelSearchInput]}
-                      />
-                      {modelSearchQuery ? (
-                        <AnimatedPressable
-                          accessibilityRole="button"
-                          onPress={() => setModelSearchQuery('')}
-                          style={styles.secondaryButton}
-                        >
-                          <Text style={styles.secondaryButtonText}>清除</Text>
-                        </AnimatedPressable>
-                      ) : null}
-                    </View>
-                    <ScrollView
-                      horizontal
-                      showsHorizontalScrollIndicator={false}
-                      contentContainerStyle={styles.modelFilterTabs}
-                    >
-                      {candidateModelFilters.map((filter) => {
-                        const active = filter.key === modelCapabilityFilter;
-
-                        return (
-                          <AnimatedPressable
-                            key={filter.key}
-                            accessibilityRole="button"
-                            testID={`candidate-model-filter-${filter.key}`}
-                            onPress={() => setModelCapabilityFilter(filter.key)}
-                            style={styles.modelFilterTab}
-                          >
-                            <Text
-                              style={[
-                                styles.modelFilterTabText,
-                                active && styles.modelFilterTabTextActive,
-                              ]}
-                            >
-                              {filter.label}
-                            </Text>
-                            <View style={[styles.modelFilterTabLine, active && styles.modelFilterTabLineActive]} />
-                          </AnimatedPressable>
-                        );
-                      })}
-                    </ScrollView>
-                    <Text testID="candidate-model-search-count" style={styles.modelSearchMeta}>
-                      已显示 {renderedModelCandidates.length} / {filteredModelCandidates.length} 条匹配结果，共 {modelCandidates.length} 条
-                    </Text>
-                  </>
-                ) : null}
-                {modelCandidates.length ? (
-                  <ScrollView
-                    nestedScrollEnabled
-                    style={styles.candidateModelListFrame}
-                    contentContainerStyle={styles.modelList}
-                    showsVerticalScrollIndicator={renderedModelCandidates.length > 4}
-                  >
-                    {renderedModelCandidates.map((model) => (
-                      <CandidateModelRow
-                        key={model.id}
-                        model={model}
-                        providerName={activeProvider.name}
-                        added={addedModelIds.has(model.id)}
-                        onAdd={() => addCandidateModel(model)}
-                      />
-                    ))}
-                    {!filteredModelCandidates.length ? (
-                      <View style={styles.modelSearchEmpty}>
-                        <Text style={styles.modelSearchEmptyText}>没有匹配的模型</Text>
-                      </View>
-                    ) : null}
-                    {renderedModelCandidates.length < filteredModelCandidates.length ? (
-                      <Pressable
-                        accessibilityRole="button"
-                        accessibilityLabel="加载更多候选模型"
-                        onPress={() =>
-                          setCandidateModelRenderLimit((current) => current + candidateModelPageSize)
-                        }
-                        style={({ pressed }) => [styles.loadMoreModelsButton, pressed && styles.buttonPressed]}
-                      >
-                        <Text style={styles.loadMoreModelsButtonText}>
-                          再显示 {Math.min(candidateModelPageSize, filteredModelCandidates.length - renderedModelCandidates.length)} 条
-                        </Text>
-                      </Pressable>
-                    ) : null}
-                  </ScrollView>
-                ) : null}
-              </View>
-
-              <View style={styles.settingsCard}>
-                <Text style={styles.settingsCardTitle}>已添加模型</Text>
-                <View style={styles.inlineField}>
-                  <TextInput
-                    autoCapitalize="none"
-                    placeholder="手动模型 ID"
-                    placeholderTextColor={palette.placeholder}
-                    value={manualModelId}
-                    editable={!workspaceReadOnly}
-                    onChangeText={setManualModelId}
-                    style={[styles.input, styles.inlineInput]}
-                  />
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    onPress={addManualModel}
-                    style={styles.secondaryButton}
-                  >
-                    <Text style={styles.secondaryButtonText}>添加</Text>
-                  </AnimatedPressable>
-                </View>
-                <View style={styles.modelList}>
-                  {addedModels.map((model) => (
-                    <ModelButton
-                      key={model.id}
-                      model={model}
-                      providerName={activeProvider.name}
-                      active={model.id === activeModelId}
-                      onPress={() => selectModel(model.id)}
-                      onRemove={() => removeModel(model.id)}
-                    />
-                  ))}
-                </View>
-                {activeModel ? (
-                  <View style={styles.modelOverridePanel}>
-                    <Text style={styles.fieldLabel}>当前模型用途</Text>
-                    <View style={styles.capabilityRow}>
-                      {configurableModelTasks.map((task) => {
-                        const selected = inferModelTask(activeModel) === task;
-                        return (
-                          <AnimatedPressable
-                            key={task}
-                            accessibilityRole="button"
-                            accessibilityState={{ selected }}
-                            onPress={() => setActiveModelTask(task)}
-                            style={[styles.capabilityChip, selected && styles.capabilityChipActive]}
-                          >
-                            <Text style={[styles.capabilityText, selected && styles.capabilityTextActive]}>
-                              {modelTaskLabel[task]}
-                            </Text>
-                          </AnimatedPressable>
-                        );
-                      })}
-                    </View>
-                    <Text style={styles.fieldLabel}>能力覆盖</Text>
-                    <View style={styles.capabilityRow}>
-                      {configurableModelCapabilities.map((capability) => {
-                        const selected = activeModel.capabilities.includes(capability.key);
-                        return (
-                          <AnimatedPressable
-                            key={capability.key}
-                            accessibilityRole="checkbox"
-                            accessibilityState={{ checked: selected }}
-                            onPress={() => toggleActiveModelCapability(capability.key)}
-                            style={[styles.capabilityChip, selected && styles.capabilityChipActive]}
-                          >
-                            <Text style={[styles.capabilityText, selected && styles.capabilityTextActive]}>
-                              {capability.label}
-                            </Text>
-                          </AnimatedPressable>
-                        );
-                      })}
-                    </View>
-                    <Text style={styles.modelOverrideHint}>
-                      自动识别不准确时可手动覆盖；设置会随模型保存。
-                    </Text>
-                  </View>
-                ) : null}
-              </View>
-
-              <View style={styles.settingsCard}>
-                <View style={styles.updateHeaderRow}>
-                  <View style={styles.updateTitleBlock}>
-                    <Text style={styles.settingsCardTitle}>版本更新</Text>
-                    <Text style={styles.updateVersionText}>当前 v{appInfo.version}</Text>
-                  </View>
-                  <Text style={styles.updateSourceBadge}>可信公开更新源</Text>
-                </View>
-
-                <View style={styles.updateStatusPanel}>
-                  <Text style={styles.updateStatusTitle}>
-                    {formatUpdateStatusTitle(updateInfo, updateNotice)}
-                  </Text>
-                  {updateInfo?.publishedAt ? (
-                    <Text style={styles.updateStatusMeta}>
-                      发布于 {new Date(updateInfo.publishedAt).toLocaleDateString('zh-CN')}
-                    </Text>
-                  ) : null}
-                  {updateInfo?.installAsset ? (
-                    <>
-                      <Text numberOfLines={1} style={styles.updateStatusMeta}>
-                        安装包 {updateInfo.installAsset.name}
-                      </Text>
-                      <Text numberOfLines={1} style={styles.updateStatusMeta}>
-                        SHA-256 {updateInfo.installAsset.sha256}
-                      </Text>
-                    </>
-                  ) : null}
-                  {updateNotice ? <Text style={styles.updateNotice}>{updateNotice}</Text> : null}
-                </View>
-
-                <View style={styles.updateActionRow}>
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    disabled={checkingUpdate}
-                    onPress={checkUpdates}
-                    style={[styles.secondaryButton, styles.updateActionButton, checkingUpdate && styles.buttonDisabled]}
-                  >
-                    <RefreshCw size={16} color={palette.text} strokeWidth={2} />
-                    <Text style={styles.secondaryButtonText}>{checkingUpdate ? '检查中' : '检查更新'}</Text>
-                  </AnimatedPressable>
-                  <AnimatedPressable
-                    accessibilityRole="button"
-                    onPress={openUpdateTarget}
-                    style={[styles.primaryButton, styles.updateActionButton]}
-                  >
-                    {updateInfo?.updateAvailable ? (
-                      <Download size={16} color={palette.textOnAccent} strokeWidth={2} />
-                    ) : (
-                      <ExternalLink size={16} color={palette.textOnAccent} strokeWidth={2} />
-                    )}
-                    <Text style={styles.primaryButtonText}>
-                      {updateInfo?.installAsset ? '前往发布页' : '查看发布状态'}
-                    </Text>
-                  </AnimatedPressable>
-                </View>
-              </View>
-
-
-                    </>
-                  )}
+                  renderToolsSection={(section) => renderSettingsToolsSection(section)}
                 />
               </ScreenFade>
             </View>
@@ -9715,6 +9809,7 @@ function ModelAvatar({
   size?: number;
   containerSize?: number;
 }) {
+  const { palette, styles } = useAppTheme();
   const iconKey = modelIconKey(modelId, providerName);
 
   return (
@@ -9746,6 +9841,7 @@ function AssistantMessageHeader({
   providerName: string;
   createdAt: number;
 }) {
+  const { styles } = useAppTheme();
   return (
     <View style={styles.assistantMetaRow}>
       <ModelAvatar modelId={modelId} providerName={providerName} />
@@ -9778,6 +9874,7 @@ function MessageActions({
   onShare: () => void;
   onMore: () => void;
 }) {
+  const { palette, styles } = useAppTheme();
   return (
     <View style={[styles.messageActions, role === 'user' && styles.userMessageActions]}>
       <AnimatedPressable
@@ -9833,6 +9930,7 @@ function MessageInlineEditor({
   onCancel: () => void;
   onSave: () => void;
 }) {
+  const { palette, styles } = useAppTheme();
   return (
     <View style={styles.messageInlineEditor}>
       <TextInput
@@ -9885,6 +9983,7 @@ function MessageActionMenu({
   onBranch: () => void;
   onDelete: () => void;
 }) {
+  const { palette, styles } = useAppTheme();
   return (
     <View style={[styles.messageActionMenu, role === 'user' && styles.userMessageActionMenu]}>
       {role === 'user' ? (
@@ -9923,6 +10022,7 @@ function MessageActionMenu({
 }
 
 function WebCitationList({ citations }: { citations: WebCitation[] }) {
+  const { palette, styles } = useAppTheme();
   return (
     <View style={styles.webCitationPanel}>
       <Text style={styles.webCitationTitle}>联网来源</Text>
@@ -9948,6 +10048,7 @@ function WebCitationList({ citations }: { citations: WebCitation[] }) {
 }
 
 function McpActivityPanel({ activity }: { activity: McpActivitySummary }) {
+  const { palette, styles } = useAppTheme();
   const hasUnknownOutcome = activity.calls.some((call) => call.outcome === 'unknown');
   return (
     <View style={styles.mcpActivityPanel} testID="mcp-activity-panel">
@@ -10002,6 +10103,7 @@ function McpActivityPanel({ activity }: { activity: McpActivitySummary }) {
 }
 
 function TokenUsageLine({ usage }: { usage: ChatTokenUsage }) {
+  const { palette, styles } = useAppTheme();
   const total =
     usage.totalTokens ??
     [usage.inputTokens, usage.outputTokens, usage.reasoningTokens]
@@ -10032,6 +10134,7 @@ function GenerationTaskPanel({
   busy: boolean;
   onRefresh: () => void;
 }) {
+  const { styles } = useAppTheme();
   return (
     <View style={styles.generationTaskPanel}>
       <View style={styles.generationTaskInfo}>
@@ -10068,6 +10171,7 @@ function ParameterSlider({
   step: number;
   onChange: (value: number) => void;
 }) {
+  const { styles } = useAppTheme();
   const trackWidth = useRef(0);
   const currentValue = useRef(value);
   currentValue.current = value;
@@ -10144,6 +10248,7 @@ function ParameterControl({
   value: number;
   onChange: (value: number) => void;
 }) {
+  const { styles } = useAppTheme();
   const [draft, setDraft] = useState(formatParameterValue(value));
 
   useEffect(() => {
@@ -10209,6 +10314,7 @@ function ModelPickerModal({
   onClose,
   onSelect,
 }: ModelPickerModalProps) {
+  const { styles } = useAppTheme();
   const [mounted, setMounted] = useState(visible);
   const unmountTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const insets = useSafeAreaInsets();
@@ -10364,6 +10470,7 @@ function SidebarDrawer({
   onPanelLayout?: (height: number) => void;
   children: ReactNode;
 }) {
+  const { styles } = useAppTheme();
   const { width } = useWindowDimensions();
   const panelWidth = Math.min(320, Math.round(width * 0.8));
   const [mounted, setMounted] = useState(open);
@@ -10447,6 +10554,7 @@ interface ModelButtonProps {
 }
 
 function ModelTaskBadge({ model }: { model: ModelInfo }) {
+  const { styles } = useAppTheme();
   const task = inferModelTask(model);
 
   return (
@@ -10457,6 +10565,7 @@ function ModelTaskBadge({ model }: { model: ModelInfo }) {
 }
 
 function ModelButton({ model, providerName, active, onPress, onRemove }: ModelButtonProps) {
+  const { styles } = useAppTheme();
   return (
     <View style={[styles.modelButton, active && styles.modelButtonActive]}>
       <AnimatedPressable accessibilityRole="button" onPress={onPress} style={styles.modelSelectArea}>
@@ -10486,6 +10595,7 @@ interface CandidateModelRowProps {
 }
 
 function CandidateModelRow({ model, providerName, added, onAdd }: CandidateModelRowProps) {
+  const { styles } = useAppTheme();
   return (
     <View style={styles.candidateRow}>
       <ModelAvatar modelId={model.id} providerName={providerName} size={17} containerSize={26} />
@@ -10555,6 +10665,7 @@ function PendingAttachmentPreview({
   attachment: MediaAttachment;
   onRemove: () => void;
 }) {
+  const { palette, styles } = useAppTheme();
   const { displayUri, displayError } = useAttachmentDisplayUri(attachment);
 
   return (
@@ -10600,6 +10711,7 @@ function PendingAttachmentPreview({
 }
 
 function VideoAttachmentSurface({ uri }: { uri: string }) {
+  const { palette, styles } = useAppTheme();
   const player = useVideoPlayer(uri, (createdPlayer) => {
     createdPlayer.loop = false;
     createdPlayer.staysActiveInBackground = false;
@@ -10640,6 +10752,7 @@ function AttachmentPreview({
   videoActive?: boolean;
   onToggleVideo?: () => void;
 }) {
+  const { palette, styles } = useAppTheme();
   const { displayUri, displayError } = useAttachmentDisplayUri(attachment);
 
   const openOrExport = () => {
@@ -10787,7 +10900,8 @@ function AttachmentPreview({
   );
 }
 
-const styles = StyleSheet.create({
+function createAppStyles(palette: AppPalette) {
+  return StyleSheet.create({
   root: {
     flex: 1,
   },
@@ -11781,9 +11895,9 @@ const styles = StyleSheet.create({
   },
   userBubble: {
     maxWidth: '86%',
-    backgroundColor: '#E8F8EF',
+    backgroundColor: palette.userBubble,
     borderWidth: 1,
-    borderColor: '#BEEBD1',
+    borderColor: palette.userBubbleBorder,
     borderRadius: radii.lg,
     borderTopRightRadius: radii.sm,
     paddingHorizontal: 12,
@@ -13034,7 +13148,7 @@ const styles = StyleSheet.create({
     left: 0,
     zIndex: 30,
     elevation: 30,
-    backgroundColor: 'rgba(255, 255, 255, 0.64)',
+    backgroundColor: palette.frostedSurface,
     ...(Platform.OS === 'web'
       ? ({
           backdropFilter: 'blur(14px)',
@@ -13407,4 +13521,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 12,
   },
-});
+  });
+}
+
+const appStylesByMode = {
+  light: createAppStyles(lightPalette),
+  dark: createAppStyles(darkPalette),
+} as const;
+

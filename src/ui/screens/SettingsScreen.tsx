@@ -6,6 +6,10 @@ import { ProviderListScreen } from './settings/ProviderListScreen';
 import { ProviderDetailScreen } from './settings/ProviderDetailScreen';
 import { AboutScreen } from './settings/AboutScreen';
 import { ToolsPanelScreen } from './settings/ToolsPanelScreen';
+import {
+  settingsToolsSectionTitles,
+  type SettingsToolsSection,
+} from './settings/toolsSections';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { MotionSwitch } from '../components/Motion';
 import { useKelivoTheme, type KelivoTheme } from '../theme';
@@ -13,6 +17,8 @@ import { isUserCreatedProvider } from '../../data/providerCatalog';
 import type { AppUpdateInfo } from '../../services/updateChecker';
 import type { Capability, ModelInfo, ModelTask, ProviderProfile } from '../../domain/types';
 import type { ModelCapabilityFilter } from '../../services/modelCapabilities';
+
+export type { SettingsToolsSection } from './settings/toolsSections';
 
 export interface SettingsScreenProps {
   readOnly: boolean;
@@ -39,8 +45,8 @@ export interface SettingsScreenProps {
   updateInfo: AppUpdateInfo | null;
   updateNotice: string;
   notice: string;
-  /** Main-branch feature cards (projects/MCP/backup/etc.) rendered inside tools chrome. */
-  renderToolsPanel?: () => ReactNode;
+  /** Main-branch feature cards, keyed by settings section. */
+  renderToolsSection?: (section: SettingsToolsSection) => ReactNode;
   onSelectProvider: (providerId: string) => void;
   onToggleProviderEnabled: (providerId: string) => void;
   onDeleteProvider: (providerId: string, onDeleted?: () => void) => void;
@@ -66,7 +72,7 @@ type ScreenState =
   | { key: 'colorMode' }
   | { key: 'providers' }
   | { key: 'providerDetail' }
-  | { key: 'tools' }
+  | { key: 'tools'; section: SettingsToolsSection }
   | { key: 'about' };
 
 type PendingProviderDeletion = {
@@ -83,11 +89,11 @@ export function SettingsScreen(props: SettingsScreenProps) {
     useState<PendingProviderDeletion | null>(null);
   const [navigationDirection, setNavigationDirection] =
     useState<'forward' | 'backward' | 'none'>('none');
-  const current = stack[stack.length - 1].key;
+  const current = stack[stack.length - 1];
 
-  const push = (key: Exclude<ScreenState['key'], 'main'>) => {
+  const push = (screen: Exclude<ScreenState, { key: 'main' }>) => {
     setNavigationDirection('forward');
-    setStack((s) => [...s, { key }]);
+    setStack((s) => [...s, screen]);
   };
 
   const pop = () => {
@@ -97,7 +103,7 @@ export function SettingsScreen(props: SettingsScreenProps) {
 
   const navigateToProviderDetail = (providerId: string) => {
     props.onSelectProvider(providerId);
-    push('providerDetail');
+    push({ key: 'providerDetail' });
   };
 
   const requestDeleteProvider = (providerId: string, onDeleted?: () => void) => {
@@ -127,17 +133,17 @@ export function SettingsScreen(props: SettingsScreenProps) {
   };
 
   const renderScreen = () => {
-    switch (current) {
+    switch (current.key) {
       case 'main':
         return (
           <SettingsMainScreen
             colorMode={props.colorMode}
             activeProvider={props.activeProvider}
             onBack={props.onClose}
-            onColorMode={() => push('colorMode')}
-            onProviders={() => push('providers')}
-            onTools={() => push('tools')}
-            onAbout={() => push('about')}
+            onColorMode={() => push({ key: 'colorMode' })}
+            onProviders={() => push({ key: 'providers' })}
+            onToolsSection={(section) => push({ key: 'tools', section })}
+            onAbout={() => push({ key: 'about' })}
           />
         );
       case 'about':
@@ -162,8 +168,11 @@ export function SettingsScreen(props: SettingsScreenProps) {
         );
       case 'tools':
         return (
-          <ToolsPanelScreen onBack={pop}>
-            {props.renderToolsPanel?.() ?? null}
+          <ToolsPanelScreen
+            title={settingsToolsSectionTitles[current.section]}
+            onBack={pop}
+          >
+            {props.renderToolsSection?.(current.section) ?? null}
           </ToolsPanelScreen>
         );
       case 'providers':
@@ -224,12 +233,15 @@ export function SettingsScreen(props: SettingsScreenProps) {
     }
   };
 
+  const motionKey =
+    current.key === 'tools' ? `tools:${current.section}` : current.key;
+
   return (
     <View style={styles.container}>
-      <MotionSwitch motionKey={current} direction={navigationDirection}>
+      <MotionSwitch motionKey={motionKey} direction={navigationDirection}>
         {renderScreen()}
       </MotionSwitch>
-      {props.notice && current !== 'providerDetail' ? (
+      {props.notice && current.key !== 'providerDetail' ? (
         <View style={styles.noticeBanner}>
           <Text style={styles.noticeText}>{props.notice}</Text>
         </View>
