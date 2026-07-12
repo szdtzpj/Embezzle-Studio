@@ -87,8 +87,12 @@ Ark 官方协议已经提供 `require_approval: "always"`、`allowed_tools.tool_
 - 安全 MCP 首版与 provider-hosted web search 互斥。联网搜索已经是独立的 Responses 工具路由；首版不在同一轮混合搜索与 MCP，以免参数、引用、工具费用和审批状态相互混淆。
 - 图片/视频生成、语音、嵌入、重排和其他专用任务不启用 MCP。只有通过能力矩阵、协议检查和上述安全门的普通对话模型可以进入 OpenAI MCP 路由。
 
-## 发布门槛
+## 发布结果与剩余验收门槛
 
-把 v1.4 作为正式版发布前，自动化测试至少需要覆盖批准、拒绝、取消、多审批、白名单外工具、畸形参数、未知输出项、列表失败、调用失败、重复/过期审批 ID、认证脱敏、`store: false` 完整手动续接、comparison/web-search 互斥，以及应用重启后不得重放审批。本机协议、纯生命周期 helper 与静态界面回归已经覆盖这些可自动化边界；仍必须用用户自己的真实 OpenAI 账号和可信测试 MCP Server 在真机完成一次只读调用、一次明确拒绝和一次可观察但可逆的写操作。
+v1.4 的自动化发布门槛已经完成：41 个测试文件 / 749 个测试覆盖批准、拒绝、取消、多审批、白名单外工具、畸形参数、未知输出项、列表失败、调用失败、重复/过期审批 ID、认证脱敏、`store: false` 完整手动续接、comparison/web-search 互斥，以及应用重启后不得重放审批。PR #15 的 head 为 `1176df7964712078d58c5eade50d781a8245d52e`，合并后的 `main` 与 tag `v1.4.0` 均为 `f83cea7fae36fcbaa0bff361fac2113c3edfb3d7`；PR Quality `29182946741`、main Quality `29183001171`、tag 前 Pages `29183001176`、production Android `29183097617` 和发布后 Pages `29183525831` 均成功。
 
-Ark 与百炼的配置界面可以保留，但在各自门槛满足前，能力矩阵、按钮状态、文档和错误提示都必须继续明确显示“仅保存配置，工具执行关闭”。
+正式 [`v1.4.0` Release](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.4.0) 是 stable Latest、immutable、非 prerelease，并含 3 个由 `github-actions[bot]` 上传且通过 attestation 的资产。正式 APK 位于 `D:\EmbezzleStudio-Releases\v1.4.0`，大小 97,518,039 字节，SHA-256 `c650e142e221821f8da91e37fefd76dad0e7ad94c0348a3d7749b69f14fc67eb`；它与同大小但 SHA-256 为 `683eb6e98efec3e301594e59c627b3698b410c2a58f841b3c3c3642b1a2a20ed` 的本机 candidate 不同。正式 APK 的包名/版本/code 为 `com.szdtzpj.embezzlestudio` / 1.4.0 / 10，min/target 24/36，`allowBackup=false`，有意 `RECORD_AUDIO`，无 CAMERA/`SYSTEM_ALERT_WINDOW`，只有证书 SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02` 的单一 signer；v2/v3 与 zipalign 通过。
+
+发布后 Pages manifest、`release.html`、APK `HEAD` 和完整 APK 下载均可匿名 HTTP 200 访问并与 Release 字节一致；完整公网复核副本位于 `D:\EmbezzleStudio-Releases\v1.4.0-pages-public-verify-20260712-150424`。GitHub 发布链路已经完成，不再是待办项。
+
+`adb devices -l` 仍为空，因此仍必须用用户自己的真实 OpenAI 账号和可信测试 MCP Server 在真机完成一次只读调用、一次明确拒绝、一次取消和一次可观察但可逆的写操作，并对照服务商日志与账单。Ark 与百炼的配置界面可以保留，但在各自门槛满足前，能力矩阵、按钮状态、文档和错误提示都必须继续明确显示“仅保存配置，工具执行关闭”。
