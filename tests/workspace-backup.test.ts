@@ -53,12 +53,16 @@ function plugin(overrides: Partial<PluginManifest> = {}): PluginManifest {
   return {
     id: 'plugin-shared',
     name: 'Shared MCP',
+    description: 'Portable MCP server',
     version: '1.0.0',
     type: 'remote-mcp',
     permissions: ['network', 'tools'],
+    allowedTools: ['search', 'fetch'],
     transport: 'streamable-http',
     endpoint: 'https://mcp.example.com/rpc',
     enabled: true,
+    serverLabel: 'shared_mcp',
+    providerId: 'volcengine-ark',
     approvalPolicy: 'always',
     ...overrides,
   };
@@ -96,6 +100,12 @@ function generatedMessage(): ChatMessage {
       taskId: 'cgt-task-123',
       kind: 'video',
       status: 'running',
+    },
+    mcpActivity: {
+      serverLabel: 'portable_server',
+      providerRequestCount: 3,
+      approvals: [{ toolName: 'search.docs', decision: 'approve' }],
+      calls: [{ toolName: 'search.docs', outcome: 'completed' }],
     },
     modelId: 'seedance-1-0-pro',
     providerId: 'volcengine-ark',
@@ -164,6 +174,7 @@ function populatedWorkspace(): AppWorkspace {
       plugin({
         id: 'plugin-new',
         name: 'New MCP',
+        serverLabel: 'new_mcp',
         endpoint: 'https://new-mcp.example.com/rpc',
         authorization: 'NEW-PLUGIN-AUTHORIZATION',
       }),
@@ -182,6 +193,7 @@ function populatedWorkspace(): AppWorkspace {
       id: 'source-device-ledger-event',
       kind: 'chat',
       status: 'succeeded',
+      providerRequestCount: 1,
       providerId: primary.id,
       modelId: 'source-model',
       createdAt: 100,
@@ -206,6 +218,7 @@ function currentWorkspaceWithLocalSecrets(): AppWorkspace {
       plugin({
         id: 'plugin-new',
         name: 'New MCP',
+        serverLabel: 'new_mcp',
         endpoint: 'https://new-mcp.example.com/rpc',
         authorization: 'CURRENT-DEVICE-MATCHING-PLUGIN-AUTH',
       }),
@@ -214,6 +227,7 @@ function currentWorkspaceWithLocalSecrets(): AppWorkspace {
       id: 'current-device-ledger-event',
       kind: 'chat',
       status: 'succeeded',
+      providerRequestCount: 1,
       providerId: current.providers[0].id,
       modelId: 'current-model',
       createdAt: 200,
@@ -378,7 +392,24 @@ function envelopeWithValidBranch(): WorkspaceBackupEnvelope {
 
 describe('workspace backup sanitization', () => {
   it('removes every structured secret and all attachment data while retaining text and task metadata', () => {
-    const safe = sanitizeWorkspaceForBackup(populatedWorkspace());
+    const workspace = populatedWorkspace();
+    Object.assign(workspace.messages[0].mcpActivity!, {
+      authorization: 'RAW-BACKUP-MCP-AUTHORIZATION',
+      requestId: 'RAW-BACKUP-MCP-REQUEST-ID',
+    });
+    Object.assign(workspace.messages[0].mcpActivity!.approvals[0], {
+      arguments: 'RAW-BACKUP-MCP-ARGUMENTS',
+      approvalId: 'RAW-BACKUP-MCP-APPROVAL-ID',
+    });
+    Object.assign(workspace.messages[0].mcpActivity!.calls[0], {
+      output: 'RAW-BACKUP-MCP-OUTPUT',
+      callId: 'RAW-BACKUP-MCP-CALL-ID',
+    });
+    Object.assign(workspace.plugins[1], {
+      lastToolArguments: 'RAW-BACKUP-TOOL-ARGUMENTS',
+      lastToolOutput: 'RAW-BACKUP-TOOL-OUTPUT',
+    });
+    const safe = sanitizeWorkspaceForBackup(workspace);
     const serialized = JSON.stringify(safe);
 
     expect(serialized).not.toContain('BACKUP-PROVIDER-API-KEY');
@@ -393,6 +424,15 @@ describe('workspace backup sanitization', () => {
     expect(serialized).not.toContain('"attachments":');
     expect(serialized).not.toContain('providerUsageEvents');
     expect(serialized).not.toContain('source-device-ledger-event');
+    expect(serialized).not.toContain('RAW-BACKUP-TOOL-ARGUMENTS');
+    expect(serialized).not.toContain('RAW-BACKUP-TOOL-OUTPUT');
+    expect(serialized).not.toContain('"mcpActivity"');
+    expect(serialized).not.toContain('RAW-BACKUP-MCP-AUTHORIZATION');
+    expect(serialized).not.toContain('RAW-BACKUP-MCP-REQUEST-ID');
+    expect(serialized).not.toContain('RAW-BACKUP-MCP-ARGUMENTS');
+    expect(serialized).not.toContain('RAW-BACKUP-MCP-APPROVAL-ID');
+    expect(serialized).not.toContain('RAW-BACKUP-MCP-OUTPUT');
+    expect(serialized).not.toContain('RAW-BACKUP-MCP-CALL-ID');
 
     const message = safe.conversations[0].messages[0];
     expect(message.content).toBe('视频生成任务已提交');
@@ -403,6 +443,21 @@ describe('workspace backup sanitization', () => {
     expect(safe.conversations[0].knowledgeSourceIds).toEqual(['knowledge-portable']);
     expect(safe.plugins[0].endpoint).toBeUndefined();
     expect(safe.plugins[1].endpoint).toBe('https://new-mcp.example.com/rpc');
+    expect(safe.plugins[1]).toMatchObject({
+      description: 'Portable MCP server',
+      allowedTools: ['search', 'fetch'],
+      serverLabel: 'new_mcp',
+      providerId: 'volcengine-ark',
+    });
+  });
+
+  it('deduplicates the bounded allowlist before it enters a portable backup', () => {
+    const workspace = populatedWorkspace();
+    workspace.plugins[1].allowedTools = ['search', 'search', 'fetch'];
+
+    const safe = sanitizeWorkspaceForBackup(workspace);
+
+    expect(safe.plugins[1].allowedTools).toEqual(['search', 'fetch']);
   });
 
   it('rejects a provider endpoint with structured secrets before randomness or encryption', async () => {
@@ -487,8 +542,15 @@ describe('encrypted workspace backup round trip', () => {
       expect(imported.providers.find((item) => item.id === 'provider-new')).not.toHaveProperty('apiKey');
       expect(imported.plugins.find((item) => item.id === 'plugin-shared')).not.toHaveProperty('authorization');
       expect(imported.plugins.find((item) => item.id === 'plugin-new')?.authorization).toBe('CURRENT-DEVICE-MATCHING-PLUGIN-AUTH');
+      expect(imported.plugins.filter((item) => item.type === 'remote-mcp')).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 'plugin-shared', enabled: false }),
+          expect.objectContaining({ id: 'plugin-new', enabled: false }),
+        ])
+      );
       expect(imported.messages[0]).not.toHaveProperty('attachments');
       expect(imported.messages[0].generationTask).toMatchObject({ taskId: 'cgt-task-123' });
+      expect(imported.messages[0]).not.toHaveProperty('mcpActivity');
       expect(imported.messages[0].pinnedForContext).toBe(true);
       expect(imported.artifacts[0].revisions[0].content).toBe('# Portable artifact text');
       expect(imported.knowledgeSources[0].content).toBe('# Portable knowledge text');
@@ -525,6 +587,98 @@ describe('encrypted workspace backup round trip', () => {
 
     expect(imported.providers[0]).not.toHaveProperty('apiKey');
     expect(imported.plugins.find((item) => item.id === 'plugin-shared')).not.toHaveProperty('authorization');
+    expect(imported.plugins.find((item) => item.id === 'plugin-new')).not.toHaveProperty(
+      'authorization'
+    );
+  }, 20_000);
+
+  it.each([
+    ['Base URL', () => {
+      const source = populatedWorkspace();
+      const current = currentWorkspaceWithLocalSecrets();
+      source.providers[0] = {
+        ...source.providers[0],
+        baseUrl: 'https://ark.cn-beijing.volcengineapi.com/api/v3',
+      };
+      return { source, current };
+    }],
+    ['kind', () => {
+      const source = populatedWorkspace();
+      const current = currentWorkspaceWithLocalSecrets();
+      const baseUrl = 'https://relay.example.com/v1';
+      source.providers[0] = {
+        ...source.providers[0],
+        kind: 'openai-compatible',
+        baseUrl,
+      };
+      current.providers[0] = {
+        ...current.providers[0],
+        kind: 'custom',
+        baseUrl,
+      };
+      return { source, current };
+    }],
+  ] as const)(
+    'does not inherit MCP authorization when the same provider ID changes %s',
+    async (_kind, setup) => {
+      const { source, current } = setup();
+      const encrypted = await exportEncryptedWorkspaceBackup(source, password, {
+        randomBytes: deterministicRandom(19),
+      });
+
+      const imported = await importEncryptedWorkspaceBackup(encrypted, password, current);
+
+      expect(imported.plugins.find((item) => item.id === 'plugin-new')).not.toHaveProperty(
+        'authorization'
+      );
+    },
+    20_000
+  );
+
+  it.each([
+    ['allowlist', (source: AppWorkspace) => {
+      source.plugins[1].allowedTools = ['search'];
+    }],
+    ['provider binding', (source: AppWorkspace) => {
+      source.plugins[1].providerId = 'provider-new';
+    }],
+  ] as const)('does not inherit local MCP authorization after a %s change', async (_kind, mutate) => {
+    const source = populatedWorkspace();
+    mutate(source);
+    const encrypted = await exportEncryptedWorkspaceBackup(source, password, {
+      randomBytes: deterministicRandom(23),
+    });
+
+    const imported = await importEncryptedWorkspaceBackup(
+      encrypted,
+      password,
+      currentWorkspaceWithLocalSecrets()
+    );
+
+    expect(imported.plugins.find((item) => item.id === 'plugin-new')).not.toHaveProperty(
+      'authorization'
+    );
+  }, 20_000);
+
+  it('imports an old backup without an MCP allowlist as disabled and without local authorization', async () => {
+    const envelope = createWorkspaceBackupEnvelope(populatedWorkspace(), 1_700_000_000_000);
+    const legacyPlugin = envelope.workspace.plugins.find((item) => item.id === 'plugin-new')!;
+    delete (legacyPlugin as Partial<PluginManifest>).allowedTools;
+    const encrypted = await encryptPlainEnvelope(envelope);
+
+    const imported = await importEncryptedWorkspaceBackup(
+      encrypted,
+      password,
+      currentWorkspaceWithLocalSecrets()
+    );
+
+    expect(imported.plugins.find((item) => item.id === 'plugin-new')).toMatchObject({
+      allowedTools: [],
+      enabled: false,
+    });
+    expect(imported.plugins.find((item) => item.id === 'plugin-new')).not.toHaveProperty(
+      'authorization'
+    );
   }, 20_000);
 
   it('imports an older v1 backup without project or cost-guard fields and retains the device ledger', async () => {
@@ -826,6 +980,17 @@ describe('strict backup validation', () => {
     const unsafeEndpoint = structuredClone(base) as WorkspaceBackupEnvelope;
     unsafeEndpoint.workspace.plugins[1].endpoint = 'https://example.com/rpc?token=secret';
     expect(() => validateWorkspaceBackupEnvelope(unsafeEndpoint)).toThrow(/endpoint/);
+
+    const activitySummary = structuredClone(base) as WorkspaceBackupEnvelope;
+    Object.assign(activitySummary.workspace.conversations[0].messages[0], {
+      mcpActivity: {
+        serverLabel: 'must_not_be_portable',
+        providerRequestCount: 1,
+        approvals: [],
+        calls: [],
+      },
+    });
+    expect(() => validateWorkspaceBackupEnvelope(activitySummary)).toThrow(/mcpActivity/);
   });
 
   it.each([
@@ -982,5 +1147,31 @@ describe('strict backup validation', () => {
     envelope.workspace.plugins[1].endpoint = endpoint;
 
     expect(() => validateWorkspaceBackupEnvelope(envelope)).toThrow(/endpoint/);
+  });
+
+  it.each([
+    ['duplicate server label', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.plugins[1].serverLabel = envelope.workspace.plugins[0].serverLabel;
+    }],
+    ['missing provider binding', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.plugins[1].providerId = 'missing-provider';
+    }],
+    ['too many allowed tools', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.plugins[1].allowedTools = Array.from(
+        { length: 65 },
+        (_, index) => `tool_${index}`
+      );
+    }],
+    ['invalid allowed tool name', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.plugins[1].allowedTools = ['invalid tool name'];
+    }],
+    ['oversized description', (envelope: WorkspaceBackupEnvelope) => {
+      envelope.workspace.plugins[1].description = 'x'.repeat(2_049);
+    }],
+  ] as const)('rejects MCP plugin metadata with %s', (_kind, mutate) => {
+    const envelope = createWorkspaceBackupEnvelope(populatedWorkspace(), 1_700_000_000_000);
+    mutate(envelope);
+
+    expect(() => validateWorkspaceBackupEnvelope(envelope)).toThrow(WorkspaceBackupError);
   });
 });

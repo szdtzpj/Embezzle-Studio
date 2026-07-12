@@ -1,7 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createDefaultWorkspace } from '../src/data/providerCatalog';
-import type { AppWorkspace, ChatMessage } from '../src/domain/types';
+import type {
+  AppWorkspace,
+  ChatMessage,
+  McpActivitySummary,
+  PluginManifest,
+  ProviderUsageEvent,
+} from '../src/domain/types';
+import {
+  normalizeMcpAuthorization,
+  normalizeMcpToolName,
+  normalizeRemoteMcpEndpoint,
+} from '../src/plugins/contracts';
 import { createPromptTemplate } from '../src/services/promptTemplates';
 import {
   buildProjectKnowledgeContext,
@@ -19,11 +30,35 @@ const V2_WORKSPACE_KEY = '@embezzle-studio/workspace-v2';
 const V2_WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v2.backup';
 const V3_WORKSPACE_KEY = '@embezzle-studio/workspace-v3';
 const V4_WORKSPACE_KEY = '@embezzle-studio/workspace-v4';
-const WORKSPACE_KEY = '@embezzle-studio/workspace-v5';
-const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v5.backup';
-const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v5';
+const V5_WORKSPACE_KEY = '@embezzle-studio/workspace-v5';
+const V5_WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v5.backup';
+const WORKSPACE_KEY = '@embezzle-studio/workspace-v6';
+const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v6.backup';
+const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v6';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
 const PLUGIN_SECRET_PREFIX = 'embezzle-studio.plugin-authorization';
+const DEFAULT_PROVIDER_BINDING =
+  'volcengine-ark::https://ark.cn-beijing.volces.com/api/v3';
+
+function mcpBindingFingerprint(options: {
+  transport: 'streamable-http' | 'sse';
+  endpoint: string;
+  serverLabel: string;
+  providerId: string;
+  providerBinding?: string;
+  allowedTools?: string[];
+}): string {
+  return JSON.stringify([
+    'remote-mcp-v3',
+    options.transport,
+    options.endpoint,
+    options.serverLabel,
+    options.providerId,
+    options.providerBinding ?? DEFAULT_PROVIDER_BINDING,
+    [...(options.allowedTools ?? ['search'])].sort(),
+    'always',
+  ]);
+}
 
 const mocks = vi.hoisted(() => ({
   values: new Map<string, string>(),
@@ -108,6 +143,13 @@ function v4Envelope(workspace: AppWorkspace, revision = 1) {
   };
 }
 
+function v5Envelope(workspace: AppWorkspace, revision = 1) {
+  return {
+    ...v4Envelope(workspace, revision),
+    schemaVersion: 5,
+  };
+}
+
 function workspaceWithTitle(title: string): AppWorkspace {
   const workspace = createDefaultWorkspace();
   return {
@@ -117,6 +159,32 @@ function workspaceWithTitle(title: string): AppWorkspace {
     ),
   };
 }
+
+describe('MCP storage contract boundaries', () => {
+  it('accepts a 128-character tool name and rejects 129 characters, slash, and colon', () => {
+    expect(normalizeMcpToolName('a'.repeat(128))).toBe('a'.repeat(128));
+    expect(normalizeMcpToolName('a'.repeat(129))).toBeUndefined();
+    expect(normalizeMcpToolName('files/read')).toBeUndefined();
+    expect(normalizeMcpToolName('files:read')).toBeUndefined();
+  });
+
+  it('accepts an exact 2048-character public endpoint and rejects 2049 characters', () => {
+    const prefix = 'https://mcp.example.com/';
+    const exact = `${prefix}${'a'.repeat(2_048 - prefix.length)}`;
+    const oversized = `${exact}a`;
+
+    expect(normalizeRemoteMcpEndpoint(exact)).toBe(exact);
+    expect(normalizeRemoteMcpEndpoint(oversized)).toBeUndefined();
+  });
+
+  it('allows printable ASCII authorization only', () => {
+    expect(normalizeMcpAuthorization('  Bearer printable-ASCII_123  ')).toBe(
+      'Bearer printable-ASCII_123'
+    );
+    expect(normalizeMcpAuthorization('Bearer 密钥')).toBeUndefined();
+    expect(normalizeMcpAuthorization('Bearer first\nsecond')).toBeUndefined();
+  });
+});
 
 async function subject() {
   return import('../src/services/storage');
@@ -206,7 +274,7 @@ describe('workspace save commit-stage signaling', () => {
 });
 
 describe('workspace storage migrations and recovery', () => {
-  it('loads a v2 envelope from the previous key and writes the next save as v5', async () => {
+  it('loads a v2 envelope from the previous key and writes the next save as v6', async () => {
     const workspace = workspaceWithTitle('v2 migration');
     mocks.values.set(V2_WORKSPACE_KEY, JSON.stringify(v2Envelope(workspace, 4)));
     const { loadWorkspace, saveWorkspace } = await subject();
@@ -215,13 +283,13 @@ describe('workspace storage migrations and recovery', () => {
     expect(loaded?.conversations[0].title).toBe('v2 migration');
     await saveWorkspace(loaded!);
 
-    const v5 = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
-    expect(v5.schemaVersion).toBe(5);
-    expect(v5.revision).toBe(5);
+    const v6 = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
+    expect(v6.schemaVersion).toBe(6);
+    expect(v6.revision).toBe(5);
     expect(mocks.values.has(V2_WORKSPACE_KEY)).toBe(true);
   });
 
-  it('loads a v3 envelope, creates the default project, and writes the next save as v5', async () => {
+  it('loads a v3 envelope, creates the default project, and writes the next save as v6', async () => {
     const workspace = workspaceWithTitle('v3 migration');
     const legacy = v3Envelope(workspace, 9);
     delete (legacy.workspace as Partial<AppWorkspace>).projects;
@@ -248,9 +316,9 @@ describe('workspace storage migrations and recovery', () => {
     expect(loaded?.providerUsageEvents).toEqual([]);
 
     await saveWorkspace(loaded!);
-    const v5 = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
-    expect(v5).toMatchObject({ schemaVersion: 5, revision: 10 });
-    expect(v5.workspace.projects).toHaveLength(1);
+    const v6 = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
+    expect(v6).toMatchObject({ schemaVersion: 6, revision: 10 });
+    expect(v6.workspace.projects).toHaveLength(1);
     expect(mocks.values.has(V3_WORKSPACE_KEY)).toBe(true);
   });
 
@@ -270,11 +338,45 @@ describe('workspace storage migrations and recovery', () => {
     await saveWorkspace(loaded!);
 
     expect(JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}')).toMatchObject({
-      schemaVersion: 5,
+      schemaVersion: 6,
       revision: 15,
       workspace: { artifacts: [], knowledgeSources: [] },
     });
     expect(mocks.values.get(V4_WORKSPACE_KEY)).toBe(JSON.stringify(legacy));
+  });
+
+  it('loads the previous v5 key, writes v6, and preserves the v5 snapshot', async () => {
+    const workspace = workspaceWithTitle('v5 migration');
+    const legacy = v5Envelope(workspace, 20);
+    const legacyRaw = JSON.stringify(legacy);
+    mocks.values.set(V5_WORKSPACE_KEY, legacyRaw);
+    const { loadWorkspace, saveWorkspace } = await subject();
+
+    const loaded = await loadWorkspace();
+    expect(loaded?.conversations[0].title).toBe('v5 migration');
+    await saveWorkspace(loaded!);
+
+    expect(JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}')).toMatchObject({
+      schemaVersion: 6,
+      revision: 21,
+    });
+    expect(mocks.values.get(V5_WORKSPACE_KEY)).toBe(legacyRaw);
+  });
+
+  it('recovers a corrupt v5 primary from its v5 backup during migration', async () => {
+    const backupWorkspace = workspaceWithTitle('v5 backup recovery');
+    mocks.values.set(V5_WORKSPACE_KEY, '{broken-v5');
+    mocks.values.set(
+      V5_WORKSPACE_BACKUP_KEY,
+      JSON.stringify(v5Envelope(backupWorkspace, 22))
+    );
+    const { consumeStorageRecoveryNotice, loadWorkspace } = await subject();
+
+    const loaded = await loadWorkspace();
+
+    expect(loaded?.conversations[0].title).toBe('v5 backup recovery');
+    expect(consumeStorageRecoveryNotice()).toMatch(/自动从最近备份恢复/);
+    expect(mocks.values.get(V5_WORKSPACE_KEY)).toBe('{broken-v5');
   });
 
   it('can recover a corrupt v2 primary from its v2 backup during migration', async () => {
@@ -406,6 +508,7 @@ describe('workspace storage migrations and recovery', () => {
       id: 'migrated-assistant-original',
       kind: 'web-search',
       status: 'succeeded',
+      providerRequestCount: 1,
       messageId: 'assistant-original',
       unknownCostComponents: ['input-tokens', 'output-tokens', 'web-search-tool'],
     });
@@ -496,6 +599,7 @@ describe('workspace storage migrations and recovery', () => {
       id: 'usage-1',
       kind: 'chat',
       status: 'succeeded',
+      providerRequestCount: 1,
       providerId,
       modelId: 'chat-model',
       createdAt,
@@ -503,6 +607,8 @@ describe('workspace storage migrations and recovery', () => {
       unknownCostComponents: ['input-tokens', 'input-tokens'],
     }];
     const raw = v4Envelope(workspace, 12);
+    delete (raw.workspace.providerUsageEvents[0] as Partial<ProviderUsageEvent>)
+      .providerRequestCount;
     (raw.workspace.providerUsageEvents[0] as unknown as Record<string, unknown>).status = 'unexpected';
     (raw.workspace.providerUsageEvents[0] as unknown as Record<string, unknown>).unknownCostComponents = [
       'input-tokens', 'input-tokens', 'not-a-component',
@@ -543,10 +649,37 @@ describe('workspace storage migrations and recovery', () => {
     expect(loaded?.providerUsageEvents[0]).toMatchObject({
       id: 'usage-1',
       status: 'failed',
+      providerRequestCount: 1,
       localDateKey: expectedDateKey,
       unknownCostComponents: ['input-tokens'],
     });
   });
+
+  it.each([0, -2, 1.5])(
+    'rejects persisted providerRequestCount=%s instead of undercounting it',
+    async (providerRequestCount) => {
+      const workspace = createDefaultWorkspace();
+      workspace.providerUsageEvents = [{
+        id: 'invalid-request-count',
+        kind: 'chat',
+        status: 'started',
+        providerRequestCount: 1,
+        providerId: workspace.providers[0].id,
+        modelId: 'model-a',
+        createdAt: 1,
+        localDateKey: '2026-07-11',
+        unknownCostComponents: [],
+      }];
+      const persisted = v4Envelope(workspace);
+      persisted.workspace.providerUsageEvents[0].providerRequestCount = providerRequestCount;
+      const raw = JSON.stringify(persisted);
+      mocks.values.set(V4_WORKSPACE_KEY, raw);
+      const { loadWorkspace } = await subject();
+
+      await expect(loadWorkspace()).rejects.toThrow(/providerRequestCount.*正安全整数/);
+      expect(mocks.values.get(V4_WORKSPACE_KEY)).toBe(raw);
+    }
+  );
 
   it('quarantines corrupt JSON and blocks the App autosave path from replacing it with defaults', async () => {
     const corruptRaw = '{not-json';
@@ -589,6 +722,77 @@ describe('workspace storage migrations and recovery', () => {
 });
 
 describe('secret storage policy', () => {
+  it.each([
+    [
+      'Volcengine Ark',
+      { kind: 'volcengine-ark' as const, baseUrl: 'https://ark.cn-beijing.volces.com/api/v3' },
+    ],
+    [
+      'Alibaba Bailian',
+      { kind: 'bailian-compatible' as const, baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
+    ],
+    [
+      'a custom provider pointed at OpenAI',
+      { kind: 'custom' as const, baseUrl: 'https://api.openai.com/v1' },
+    ],
+  ])('persists and loads remote MCP as disabled for %s', async (_label, binding) => {
+    const workspace = createDefaultWorkspace();
+    const provider = { ...workspace.providers[0], ...binding };
+    workspace.providers[0] = provider;
+    workspace.plugins = [{
+      id: 'disabled-non-openai-mcp',
+      name: 'Disabled non-OpenAI MCP',
+      version: '1.0.0',
+      type: 'remote-mcp',
+      permissions: ['network', 'tools'],
+      allowedTools: ['search'],
+      transport: 'streamable-http',
+      endpoint: 'https://mcp.example.com/mcp',
+      serverLabel: 'disabled_non_openai_mcp',
+      providerId: provider.id,
+      approvalPolicy: 'always',
+      enabled: true,
+    }];
+    const storage = await subject();
+
+    await storage.saveWorkspace(workspace);
+
+    const persisted = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
+    expect(persisted.workspace.plugins[0].enabled).toBe(false);
+    const loaded = await storage.loadWorkspace();
+    expect(loaded?.plugins[0].enabled).toBe(false);
+  });
+
+  it('retains enabled only for the exact OpenAI protocol kind and canonical official base', async () => {
+    const workspace = createDefaultWorkspace();
+    const provider = {
+      ...workspace.providers[0],
+      kind: 'openai-compatible' as const,
+      baseUrl: 'https://api.openai.com/v1',
+    };
+    workspace.providers[0] = provider;
+    workspace.plugins = [{
+      id: 'exact-openai-mcp',
+      name: 'Exact OpenAI MCP',
+      version: '1.0.0',
+      type: 'remote-mcp',
+      permissions: ['network', 'tools'],
+      allowedTools: ['search'],
+      transport: 'streamable-http',
+      endpoint: 'https://mcp.example.com/mcp',
+      serverLabel: 'exact_openai_mcp',
+      providerId: provider.id,
+      approvalPolicy: 'always',
+      enabled: true,
+    }];
+    const storage = await subject();
+
+    await storage.saveWorkspace(workspace);
+    const loaded = await storage.loadWorkspace();
+
+    expect(loaded?.plugins[0].enabled).toBe(true);
+  });
+
   it('migrates a legacy persistent Web key to the exact current binding and removes plaintext storage', async () => {
     const workspace = createDefaultWorkspace();
     const providerId = workspace.providers[0].id;
@@ -613,11 +817,19 @@ describe('secret storage policy', () => {
       version: '1.0.0',
       type: 'remote-mcp',
       permissions: ['network', 'tools'],
+      allowedTools: ['search'],
       transport: 'streamable-http',
       endpoint: 'https://mcp.example.com/mcp',
+      serverLabel: 'bound_mcp',
+      providerId: provider.id,
+      approvalPolicy: 'always',
       authorization: 'Bearer mcp-roundtrip-secret',
       enabled: true,
     }];
+    Object.assign(workspace.plugins[0], {
+      lastToolArguments: 'RAW-TOOL-ARGUMENTS-MUST-NOT-PERSIST',
+      lastToolOutput: 'RAW-TOOL-OUTPUT-MUST-NOT-PERSIST',
+    });
     let storage = await subject();
 
     await storage.saveWorkspace(workspace);
@@ -635,10 +847,22 @@ describe('secret storage policy', () => {
     });
     expect(pluginEnvelope).toEqual({
       schemaVersion: 1,
-      bindingFingerprint: 'remote-mcp::streamable-http::https://mcp.example.com/mcp',
+      bindingFingerprint: mcpBindingFingerprint({
+        transport: 'streamable-http',
+        endpoint: 'https://mcp.example.com/mcp',
+        serverLabel: 'bound_mcp',
+        providerId: provider.id,
+      }),
       secret: 'Bearer mcp-roundtrip-secret',
     });
     expect(mocks.values.get(WORKSPACE_KEY)).not.toContain('roundtrip-secret');
+    expect(mocks.values.get(WORKSPACE_KEY)).not.toContain('RAW-TOOL-ARGUMENTS-MUST-NOT-PERSIST');
+    expect(mocks.values.get(WORKSPACE_KEY)).not.toContain('RAW-TOOL-OUTPUT-MUST-NOT-PERSIST');
+    expect(JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}').workspace.plugins[0]).toMatchObject({
+      allowedTools: ['search'],
+      serverLabel: 'bound_mcp',
+      providerId: provider.id,
+    });
 
     vi.resetModules();
     storage = await subject();
@@ -674,14 +898,23 @@ describe('secret storage policy', () => {
       version: '1.0.0',
       type: 'remote-mcp',
       permissions: ['network', 'tools'],
+      allowedTools: ['search'],
       transport: 'sse',
       endpoint: 'https://transport.mcp.example.com/mcp',
+      serverLabel: 'transport_mcp',
+      providerId: workspace.providers[0].id,
+      approvalPolicy: 'always',
       enabled: true,
     }];
     mocks.values.set(WORKSPACE_KEY, JSON.stringify(v4Envelope(workspace)));
     mocks.secureValues.set(`${PLUGIN_SECRET_PREFIX}.transport-bound-mcp`, JSON.stringify({
       schemaVersion: 1,
-      bindingFingerprint: 'remote-mcp::streamable-http::https://transport.mcp.example.com/mcp',
+      bindingFingerprint: mcpBindingFingerprint({
+        transport: 'streamable-http',
+        endpoint: 'https://transport.mcp.example.com/mcp',
+        serverLabel: 'transport_mcp',
+        providerId: workspace.providers[0].id,
+      }),
       secret: 'Bearer wrong-transport-secret',
     }));
     const { loadWorkspace } = await subject();
@@ -689,6 +922,236 @@ describe('secret storage policy', () => {
     const loaded = await loadWorkspace();
 
     expect(loaded?.plugins[0].authorization).toBeUndefined();
+  });
+
+  it('intentionally invalidates a remote-mcp-v2 secret envelope without migrating it', async () => {
+    mocks.platform.OS = 'android';
+    const workspace = createDefaultWorkspace();
+    const providerId = workspace.providers[0].id;
+    workspace.plugins = [{
+      id: 'v2-bound-mcp',
+      name: 'V2-bound MCP',
+      version: '1.0.0',
+      type: 'remote-mcp',
+      permissions: ['network', 'tools'],
+      allowedTools: ['search'],
+      transport: 'streamable-http',
+      endpoint: 'https://v2-bound.example.com/mcp',
+      enabled: true,
+      serverLabel: 'v2_bound_mcp',
+      providerId,
+      approvalPolicy: 'always',
+    }];
+    mocks.values.set(WORKSPACE_KEY, JSON.stringify(v5Envelope(workspace)));
+    mocks.secureValues.set(`${PLUGIN_SECRET_PREFIX}.v2-bound-mcp`, JSON.stringify({
+      schemaVersion: 1,
+      bindingFingerprint: JSON.stringify([
+        'remote-mcp-v2',
+        'streamable-http',
+        'https://v2-bound.example.com/mcp',
+        'v2_bound_mcp',
+        providerId,
+        ['search'],
+        'always',
+      ]),
+      secret: 'Bearer v2-secret-must-expire',
+    }));
+    const { loadWorkspace } = await subject();
+
+    const loaded = await loadWorkspace();
+
+    expect(loaded?.plugins[0].authorization).toBeUndefined();
+  });
+
+  it.each([
+    ['allowlist', (plugin: PluginManifest) => ({ ...plugin, allowedTools: ['fetch'] })],
+    ['provider binding', (plugin: PluginManifest, workspace: AppWorkspace) => ({
+      ...plugin,
+      providerId: workspace.providers[1].id,
+    })],
+  ] as const)('does not hydrate MCP authorization after a %s change', async (_kind, mutate) => {
+    mocks.platform.OS = 'android';
+    const workspace = createDefaultWorkspace();
+    const providerId = workspace.providers[0].id;
+    const original: PluginManifest = {
+      id: 'changed-binding-mcp',
+      name: 'Changed binding MCP',
+      version: '1.0.0',
+      type: 'remote-mcp',
+      permissions: ['network', 'tools'],
+      allowedTools: ['search'],
+      transport: 'streamable-http',
+      endpoint: 'https://changed-binding.example.com/mcp',
+      enabled: true,
+      serverLabel: 'changed_binding_mcp',
+      providerId,
+      approvalPolicy: 'always',
+    };
+    workspace.plugins = [mutate(original, workspace)];
+    mocks.values.set(WORKSPACE_KEY, JSON.stringify(v4Envelope(workspace)));
+    mocks.secureValues.set(`${PLUGIN_SECRET_PREFIX}.${original.id}`, JSON.stringify({
+      schemaVersion: 1,
+      bindingFingerprint: mcpBindingFingerprint({
+        transport: 'streamable-http',
+        endpoint: original.endpoint!,
+        serverLabel: original.serverLabel!,
+        providerId,
+        allowedTools: original.allowedTools,
+      }),
+      secret: 'Bearer stale-binding-secret',
+    }));
+    const { loadWorkspace } = await subject();
+
+    const loaded = await loadWorkspace();
+
+    expect(loaded?.plugins[0].authorization).toBeUndefined();
+  });
+
+  it('migrates an old plugin without an allowlist as disabled and removes its unbound secret', async () => {
+    mocks.platform.OS = 'android';
+    const workspace = createDefaultWorkspace();
+    const providerId = workspace.providers[0].id;
+    const legacyPlugin: PluginManifest = {
+      id: 'pre-allowlist-mcp',
+      name: 'Pre-allowlist MCP',
+      version: '1.0.0',
+      type: 'remote-mcp',
+      permissions: ['network', 'tools'],
+      allowedTools: ['search'],
+      transport: 'streamable-http',
+      endpoint: 'https://pre-allowlist.example.com/mcp',
+      enabled: true,
+      serverLabel: 'pre_allowlist_mcp',
+      providerId,
+      approvalPolicy: 'always',
+    };
+    workspace.plugins = [legacyPlugin];
+    const persisted = v4Envelope(workspace);
+    delete (persisted.workspace.plugins[0] as Partial<PluginManifest>).allowedTools;
+    mocks.values.set(WORKSPACE_KEY, JSON.stringify(persisted));
+    mocks.secureValues.set(`${PLUGIN_SECRET_PREFIX}.${legacyPlugin.id}`, 'Bearer old-plugin-secret');
+    const { loadWorkspace } = await subject();
+
+    const loaded = await loadWorkspace();
+
+    expect(loaded?.plugins[0]).toMatchObject({ allowedTools: [], enabled: false });
+    expect(loaded?.plugins[0].authorization).toBeUndefined();
+    expect(mocks.secureValues.has(`${PLUGIN_SECRET_PREFIX}.${legacyPlugin.id}`)).toBe(false);
+  });
+
+  it('drops an unchanged authorization when the allowlist binding changes during save', async () => {
+    mocks.platform.OS = 'android';
+    const workspace = createDefaultWorkspace();
+    workspace.plugins = [{
+      id: 'save-binding-mcp',
+      name: 'Save binding MCP',
+      version: '1.0.0',
+      type: 'remote-mcp',
+      permissions: ['network', 'tools'],
+      allowedTools: ['search'],
+      transport: 'streamable-http',
+      endpoint: 'https://save-binding.example.com/mcp',
+      enabled: true,
+      serverLabel: 'save_binding_mcp',
+      providerId: workspace.providers[0].id,
+      authorization: 'Bearer unchanged-stale-secret',
+      approvalPolicy: 'always',
+    }];
+    let storage = await subject();
+    await storage.saveWorkspace(workspace);
+
+    await storage.saveWorkspace({
+      ...workspace,
+      plugins: [{ ...workspace.plugins[0], allowedTools: ['fetch'] }],
+    });
+
+    expect(mocks.secureValues.has(`${PLUGIN_SECRET_PREFIX}.save-binding-mcp`)).toBe(false);
+    vi.resetModules();
+    storage = await subject();
+    const loaded = await storage.loadWorkspace();
+    expect(loaded?.plugins[0]).toMatchObject({ allowedTools: ['fetch'] });
+    expect(loaded?.plugins[0].authorization).toBeUndefined();
+  });
+
+  it.each([
+    ['Base URL', (provider: AppWorkspace['providers'][number]) => ({
+      ...provider,
+      baseUrl: 'https://ark.cn-beijing.volcengineapi.com/api/v3',
+    })],
+    ['kind', (provider: AppWorkspace['providers'][number]) => ({
+      ...provider,
+      kind: 'custom' as const,
+    })],
+  ] as const)(
+    'clears unchanged MCP authorization when the bound provider %s changes',
+    async (_kind, mutateProvider) => {
+      mocks.platform.OS = 'android';
+      const workspace = createDefaultWorkspace();
+      workspace.plugins = [{
+        id: 'provider-endpoint-bound-mcp',
+        name: 'Provider endpoint-bound MCP',
+        version: '1.0.0',
+        type: 'remote-mcp',
+        permissions: ['network', 'tools'],
+        allowedTools: ['search'],
+        transport: 'streamable-http',
+        endpoint: 'https://provider-endpoint-bound.example.com/mcp',
+        enabled: true,
+        serverLabel: 'provider_endpoint_bound_mcp',
+        providerId: workspace.providers[0].id,
+        authorization: 'Bearer provider-bound-secret',
+        approvalPolicy: 'always',
+      }];
+      let storage = await subject();
+      await storage.saveWorkspace(workspace);
+
+      await storage.saveWorkspace({
+        ...workspace,
+        providers: workspace.providers.map((provider, index) =>
+          index === 0 ? mutateProvider(provider) : provider
+        ),
+      });
+
+      expect(
+        mocks.secureValues.has(`${PLUGIN_SECRET_PREFIX}.provider-endpoint-bound-mcp`)
+      ).toBe(false);
+      vi.resetModules();
+      storage = await subject();
+      const loaded = await storage.loadWorkspace();
+      expect(loaded?.plugins[0].authorization).toBeUndefined();
+    }
+  );
+
+  it.each([
+    ['duplicate plugin ID', (workspace: AppWorkspace, base: PluginManifest) => [base, { ...base }]],
+    ['duplicate server label', (workspace: AppWorkspace, base: PluginManifest) => [
+      base,
+      { ...base, id: 'second-mcp', endpoint: 'https://second.example.com/mcp' },
+    ]],
+    ['missing provider binding', (_workspace: AppWorkspace, base: PluginManifest) => [
+      { ...base, providerId: 'missing-provider' },
+    ]],
+  ] as const)('rejects %s before committing public workspace data', async (_kind, pluginsFor) => {
+    const workspace = createDefaultWorkspace();
+    const base: PluginManifest = {
+      id: 'unique-mcp',
+      name: 'Unique MCP',
+      version: '1.0.0',
+      type: 'remote-mcp',
+      permissions: ['network', 'tools'],
+      allowedTools: ['search'],
+      transport: 'streamable-http',
+      endpoint: 'https://unique.example.com/mcp',
+      enabled: true,
+      serverLabel: 'unique_mcp',
+      providerId: workspace.providers[0].id,
+      approvalPolicy: 'always',
+    };
+    workspace.plugins = pluginsFor(workspace, base);
+    const { saveWorkspace } = await subject();
+
+    await expect(saveWorkspace(workspace)).rejects.toThrow(/plugins|providerId|serverLabel/);
+    expect(mocks.values.has(WORKSPACE_KEY)).toBe(false);
   });
 
   it('keeps a stale provider envelope from crossing endpoints when the post-workspace secret write fails', async () => {
@@ -757,8 +1220,12 @@ describe('secret storage policy', () => {
       version: '1.0.0',
       type: 'remote-mcp',
       permissions: ['network', 'tools'],
+      allowedTools: ['search'],
       transport: 'streamable-http',
       endpoint: 'https://a.mcp.example.com/mcp',
+      serverLabel: 'partial_mcp',
+      providerId: workspaceA.providers[0].id,
+      approvalPolicy: 'always',
       authorization: 'Bearer endpoint-a',
       enabled: true,
     }];
@@ -787,7 +1254,12 @@ describe('secret storage policy', () => {
     expect(JSON.parse(
       mocks.secureValues.get(`${PLUGIN_SECRET_PREFIX}.partial-mcp`) ?? '{}'
     ).bindingFingerprint).toBe(
-      'remote-mcp::streamable-http::https://a.mcp.example.com/mcp'
+      mcpBindingFingerprint({
+        transport: 'streamable-http',
+        endpoint: 'https://a.mcp.example.com/mcp',
+        serverLabel: 'partial_mcp',
+        providerId: workspaceA.providers[0].id,
+      })
     );
     expect(JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}').workspace.plugins[0].endpoint).toBe(
       'https://b.mcp.example.com/mcp'
@@ -820,8 +1292,12 @@ describe('secret storage policy', () => {
       version: '1.0.0',
       type: 'remote-mcp',
       permissions: ['network', 'tools'],
+      allowedTools: ['search'],
       transport: 'streamable-http',
       endpoint: 'https://removable-mcp.example/mcp',
+      serverLabel: 'removable_mcp',
+      providerId: 'removable-provider',
+      approvalPolicy: 'always',
       authorization: 'Bearer removable-mcp-secret',
       enabled: true,
     }];
@@ -859,6 +1335,65 @@ describe('secret storage policy', () => {
     );
   });
 
+  it('deletes provider and MCP secrets only after their workspace removal commits', async () => {
+    mocks.platform.OS = 'android';
+    const workspaceA = createDefaultWorkspace();
+    workspaceA.providers.push({
+      id: 'committed-removal-provider',
+      name: 'Committed removal provider',
+      kind: 'custom',
+      baseUrl: 'https://committed-removal.example/v1',
+      capabilities: ['text'],
+      models: [],
+      apiKey: 'committed-provider-secret',
+    });
+    workspaceA.plugins = [{
+      id: 'committed-removal-mcp',
+      name: 'Committed removal MCP',
+      version: '1.0.0',
+      type: 'remote-mcp',
+      permissions: ['network', 'tools'],
+      allowedTools: ['search'],
+      transport: 'streamable-http',
+      endpoint: 'https://committed-removal-mcp.example/mcp',
+      serverLabel: 'committed_removal_mcp',
+      providerId: 'committed-removal-provider',
+      approvalPolicy: 'always',
+      authorization: 'Bearer committed-mcp-secret',
+      enabled: false,
+    }];
+    let storage = await subject();
+    await storage.saveWorkspace(workspaceA);
+
+    expect(mocks.secureValues.has(`${SECRET_PREFIX}.committed-removal-provider`)).toBe(true);
+    expect(mocks.secureValues.has(`${PLUGIN_SECRET_PREFIX}.committed-removal-mcp`)).toBe(true);
+
+    await storage.saveWorkspace({
+      ...workspaceA,
+      providers: workspaceA.providers.filter(
+        (provider) => provider.id !== 'committed-removal-provider'
+      ),
+      plugins: [],
+    });
+
+    expect(mocks.secureValues.has(`${SECRET_PREFIX}.committed-removal-provider`)).toBe(false);
+    expect(mocks.secureValues.has(`${PLUGIN_SECRET_PREFIX}.committed-removal-mcp`)).toBe(false);
+    expect(mocks.secureDelete).toHaveBeenCalledWith(
+      `${SECRET_PREFIX}.committed-removal-provider`
+    );
+    expect(mocks.secureDelete).toHaveBeenCalledWith(
+      `${PLUGIN_SECRET_PREFIX}.committed-removal-mcp`
+    );
+
+    vi.resetModules();
+    storage = await subject();
+    const restarted = await storage.loadWorkspace();
+    expect(restarted?.providers.some(
+      (provider) => provider.id === 'committed-removal-provider'
+    )).toBe(false);
+    expect(restarted?.plugins).toEqual([]);
+  });
+
   it('migrates legacy bare native provider and MCP strings to binding envelopes before hydrating', async () => {
     mocks.platform.OS = 'android';
     const workspace = createDefaultWorkspace();
@@ -868,9 +1403,13 @@ describe('secret storage policy', () => {
       name: 'Legacy MCP',
       version: '1.0.0',
       type: 'remote-mcp',
-      permissions: ['network'],
+      permissions: ['network', 'tools'],
+      allowedTools: ['search'],
       transport: 'sse',
       endpoint: 'https://legacy.mcp.example.com/sse',
+      serverLabel: 'legacy_mcp',
+      providerId,
+      approvalPolicy: 'always',
       enabled: true,
     }];
     mocks.values.set(WORKSPACE_KEY, JSON.stringify(v4Envelope(workspace)));
@@ -893,7 +1432,12 @@ describe('secret storage policy', () => {
       mocks.secureValues.get(`${PLUGIN_SECRET_PREFIX}.legacy-mcp`) ?? '{}'
     )).toMatchObject({
       schemaVersion: 1,
-      bindingFingerprint: 'remote-mcp::sse::https://legacy.mcp.example.com/sse',
+      bindingFingerprint: mcpBindingFingerprint({
+        transport: 'sse',
+        endpoint: 'https://legacy.mcp.example.com/sse',
+        serverLabel: 'legacy_mcp',
+        providerId,
+      }),
       secret: 'Bearer legacy-plugin-secret',
     });
 
@@ -918,6 +1462,7 @@ describe('secret storage policy', () => {
       version: '1.0.0',
       type: 'mobile-js',
       permissions: [],
+      allowedTools: [],
     }];
     mocks.values.set(WORKSPACE_KEY, JSON.stringify(v4Envelope(workspace)));
     mocks.secureValues.set(`${SECRET_PREFIX}.${providerId}`, 'unbound-provider-secret');
@@ -959,7 +1504,132 @@ describe('secret storage policy', () => {
 });
 
 describe('versioned and ordered saves', () => {
-  it('writes a v5 envelope without a duplicate top-level messages field or provider secrets', async () => {
+  it('round-trips only a bounded MCP activity summary and strips every raw field', async () => {
+    const workspace = createDefaultWorkspace();
+    const mcpActivity: McpActivitySummary = {
+      serverLabel: 'safe_server',
+      providerRequestCount: 3,
+      approvals: [
+        { toolName: 'search.docs', decision: 'approve' },
+        { toolName: 'delete_item', decision: 'deny' },
+      ],
+      calls: [
+        { toolName: 'search.docs', outcome: 'completed' },
+        { toolName: 'read_file', outcome: 'unknown' },
+      ],
+    };
+    Object.assign(mcpActivity, {
+      authorization: 'RAW-MCP-AUTHORIZATION',
+      requestId: 'RAW-MCP-REQUEST-ID',
+    });
+    Object.assign(mcpActivity.approvals[0], {
+      arguments: 'RAW-MCP-ARGUMENTS',
+      approvalId: 'RAW-MCP-APPROVAL-ID',
+    });
+    Object.assign(mcpActivity.calls[0], {
+      output: 'RAW-MCP-OUTPUT',
+      callId: 'RAW-MCP-CALL-ID',
+    });
+    const message: ChatMessage = {
+      id: 'mcp-summary-message',
+      role: 'assistant',
+      content: 'MCP completed',
+      createdAt: 10,
+      status: 'ready',
+      mcpActivity,
+    };
+    workspace.messages = [message];
+    workspace.conversations = [{
+      ...workspace.conversations[0],
+      messages: [message],
+    }];
+    const { loadWorkspace, saveWorkspace } = await subject();
+
+    await saveWorkspace(workspace);
+    const serialized = mocks.values.get(WORKSPACE_KEY) ?? '';
+    for (const rawValue of [
+      'RAW-MCP-AUTHORIZATION',
+      'RAW-MCP-REQUEST-ID',
+      'RAW-MCP-ARGUMENTS',
+      'RAW-MCP-APPROVAL-ID',
+      'RAW-MCP-OUTPUT',
+      'RAW-MCP-CALL-ID',
+    ]) {
+      expect(serialized).not.toContain(rawValue);
+    }
+
+    const loaded = await loadWorkspace();
+    expect(loaded?.messages[0].mcpActivity).toEqual({
+      serverLabel: 'safe_server',
+      providerRequestCount: 3,
+      approvals: [
+        { toolName: 'search.docs', decision: 'approve' },
+        { toolName: 'delete_item', decision: 'deny' },
+      ],
+      calls: [
+        { toolName: 'search.docs', outcome: 'completed' },
+        { toolName: 'read_file', outcome: 'unknown' },
+      ],
+    });
+  });
+
+  it.each([
+    ['unsafe server label', (summary: McpActivitySummary) => {
+      summary.serverLabel = 'unsafe/server';
+    }],
+    ['zero request count', (summary: McpActivitySummary) => {
+      summary.providerRequestCount = 0;
+    }],
+    ['request count above five', (summary: McpActivitySummary) => {
+      summary.providerRequestCount = 6;
+    }],
+    ['more than four approvals', (summary: McpActivitySummary) => {
+      summary.approvals = Array.from({ length: 5 }, () => ({
+        toolName: 'search',
+        decision: 'approve' as const,
+      }));
+    }],
+    ['more than four calls', (summary: McpActivitySummary) => {
+      summary.calls = Array.from({ length: 5 }, () => ({
+        toolName: 'search',
+        outcome: 'completed' as const,
+      }));
+    }],
+    ['unsafe tool name', (summary: McpActivitySummary) => {
+      summary.calls[0].toolName = 'unsafe/tool';
+    }],
+    ['invalid decision', (summary: McpActivitySummary) => {
+      (summary.approvals[0] as unknown as Record<string, unknown>).decision = 'always';
+    }],
+    ['invalid outcome', (summary: McpActivitySummary) => {
+      (summary.calls[0] as unknown as Record<string, unknown>).outcome = 'running';
+    }],
+  ] as const)('rejects MCP activity with %s before public commit', async (_kind, mutate) => {
+    const workspace = createDefaultWorkspace();
+    const summary: McpActivitySummary = {
+      serverLabel: 'safe_server',
+      providerRequestCount: 1,
+      approvals: [{ toolName: 'search', decision: 'approve' }],
+      calls: [{ toolName: 'search', outcome: 'completed' }],
+    };
+    mutate(summary);
+    const message: ChatMessage = {
+      id: 'invalid-mcp-summary',
+      role: 'assistant',
+      content: 'invalid',
+      createdAt: 1,
+      status: 'ready',
+      mcpActivity: summary,
+    };
+    workspace.messages = [message];
+    workspace.conversations = [{ ...workspace.conversations[0], messages: [message] }];
+    const { saveWorkspace } = await subject();
+
+    await expect(saveWorkspace(workspace)).rejects.toThrow(/mcpActivity/);
+    expect(mocks.values.has(WORKSPACE_KEY)).toBe(false);
+  });
+
+  it('writes a v6 envelope without a duplicate top-level messages field or provider secrets', async () => {
     const workspace = createDefaultWorkspace();
     workspace.providers[0] = { ...workspace.providers[0], apiKey: 'web-only-test-key' };
     const { saveWorkspace } = await subject();
@@ -967,7 +1637,7 @@ describe('versioned and ordered saves', () => {
     await saveWorkspace(workspace);
 
     const envelope = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
-    expect(envelope.schemaVersion).toBe(5);
+    expect(envelope.schemaVersion).toBe(6);
     expect(envelope.revision).toBe(1);
     expect(envelope.workspace.messages).toBeUndefined();
     expect(envelope.workspace.conversations[0].messages).toEqual(workspace.messages);
@@ -1047,6 +1717,7 @@ describe('versioned and ordered saves', () => {
       id: 'roundtrip-usage',
       kind: 'chat',
       status: 'succeeded',
+      providerRequestCount: 3,
       providerId,
       modelId: 'roundtrip-model',
       createdAt: 11,
@@ -1365,8 +2036,11 @@ describe('versioned and ordered saves', () => {
       version: '1.0.0',
       type: 'remote-mcp',
       permissions: ['network', 'tools'],
+      allowedTools: ['search'],
       transport: 'streamable-http',
       endpoint: 'https://mcp.example.com/mcp',
+      serverLabel: 'mcp_1',
+      providerId: provider.id,
       authorization: 'Bearer plugin-secret',
       approvalPolicy: 'always',
       enabled: true,
@@ -1455,8 +2129,12 @@ describe('versioned and ordered saves', () => {
       version: '1.0.0',
       type: 'remote-mcp',
       permissions: ['network', 'tools'],
+      allowedTools: ['search'],
       transport: 'streamable-http',
       endpoint,
+      serverLabel: 'unsafe_mcp',
+      providerId: workspace.providers[0].id,
+      approvalPolicy: 'always',
       enabled: true,
     }];
     const raw = JSON.stringify(v2Envelope(workspace));

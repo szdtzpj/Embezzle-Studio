@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { ChatMessage, ProviderProfile } from '../src/domain/types';
+import type { ChatMessage, PluginManifest, ProviderProfile } from '../src/domain/types';
 import { createModelInfoFromId } from '../src/services/modelCapabilities';
 import {
   isWebDevelopmentProxyAllowed,
@@ -14,7 +14,7 @@ vi.mock('react-native', () => ({ Platform: platform }));
 const provider: ProviderProfile = {
   id: 'openai',
   name: 'OpenAI',
-  kind: 'custom',
+  kind: 'openai-compatible',
   baseUrl: 'https://api.openai.com/v1',
   apiKey: 'sk-test',
   capabilities: ['text', 'image-input', 'reasoning'],
@@ -28,6 +28,34 @@ const message: ChatMessage = {
   createdAt: 1,
   status: 'ready',
 };
+
+const mcpAuthorization = 'Bearer mcp-secret-value';
+const mcpAllowedTools = ['weather.lookup', 'calendar.read'];
+
+function enabledMcpPlugin(overrides: Partial<PluginManifest> = {}): PluginManifest {
+  return {
+    id: 'mcp-trusted',
+    name: 'Trusted MCP',
+    version: '1.0.0',
+    type: 'remote-mcp',
+    permissions: ['network', 'tools'],
+    allowedTools: [...mcpAllowedTools],
+    transport: 'streamable-http',
+    endpoint: 'https://mcp.example.com/rpc',
+    enabled: true,
+    serverLabel: 'trusted_mcp',
+    providerId: provider.id,
+    authorization: mcpAuthorization,
+    approvalPolicy: 'always',
+    ...overrides,
+  };
+}
+
+function modelWithMcp(targetProvider: ProviderProfile = provider) {
+  const model = createModelInfoFromId(targetProvider, 'gpt-5.2-pro', 'manual');
+  model.capabilities = Array.from(new Set([...model.capabilities, 'mcp']));
+  return model;
+}
 
 afterEach(() => {
   platform.OS = 'android';
@@ -259,6 +287,333 @@ describe('official OpenAI endpoint routing', () => {
       reasoningEffort: 'default',
     })).rejects.toThrow(/只在 OpenAI 官方 API/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('official OpenAI MCP routing integration', () => {
+  it('sends a no-approval MCP turn through Responses with exact safety fields and reasoning effort', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: 'resp_mcp_direct',
+      status: 'completed',
+      output: [{
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'No tool needed.' }],
+      }],
+      usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const requestApproval = vi.fn(async () => 'approve' as const);
+
+    const result = await sendOpenAiCompatibleChat({
+      provider,
+      modelId: 'gpt-5.2-pro',
+      model: modelWithMcp(),
+      messages: [message],
+      reasoningEffort: 'max',
+      maxOutputTokens: 4096,
+      mcp: {
+        plugin: enabledMcpPlugin(),
+        requestApproval,
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(url).toBe('https://api.openai.com/v1/responses');
+    expect(init.redirect).toBe('error');
+    expect(body).toMatchObject({
+      model: 'gpt-5.2-pro',
+      store: false,
+      parallel_tool_calls: false,
+      include: ['reasoning.encrypted_content'],
+      reasoning: { effort: 'xhigh' },
+      max_output_tokens: 4096,
+      tools: [{
+        type: 'mcp',
+        server_label: 'trusted_mcp',
+        server_url: 'https://mcp.example.com/rpc',
+        authorization: mcpAuthorization,
+        require_approval: 'always',
+        allowed_tools: mcpAllowedTools,
+      }],
+    });
+    expect(body.tools[0].allowed_tools).toEqual(mcpAllowedTools);
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      content: 'No tool needed.',
+      mcpActivity: {
+        serverLabel: 'trusted_mcp',
+        providerRequestCount: 1,
+        approvals: [],
+        calls: [],
+      },
+      raw: {
+        protocol: 'openai-official',
+        responseIds: ['resp_mcp_direct'],
+        requestCount: 1,
+      },
+    });
+  });
+
+  it('calls the approval callback and continues with the complete manual context', async () => {
+    const rawArguments = '{"city":"Shanghai"}';
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_mcp_approval',
+        status: 'completed',
+        output: [
+          {
+            type: 'mcp_list_tools',
+            id: 'list_1',
+            server_label: 'trusted_mcp',
+            tools: [{ name: 'weather.lookup' }, { name: 'calendar.read' }],
+          },
+          {
+            type: 'mcp_approval_request',
+            id: 'approval_1',
+            server_label: 'trusted_mcp',
+            name: 'weather.lookup',
+            arguments: rawArguments,
+          },
+        ],
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_mcp_final',
+        status: 'completed',
+        output: [
+          {
+            type: 'mcp_call',
+            id: 'call_1',
+            server_label: 'trusted_mcp',
+            name: 'weather.lookup',
+            arguments: rawArguments,
+            approval_request_id: 'approval_1',
+          },
+          {
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: 'Shanghai is clear.' }],
+          },
+        ],
+      }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const requestApproval = vi.fn(async () => 'approve' as const);
+    const beforeContinuation = vi.fn(async () => undefined);
+    const beforeProviderRequest = vi.fn((_context: { requestNumber: number }) => undefined);
+    const onProviderRequestStarted = vi.fn((_context: { requestNumber: number }) => undefined);
+
+    const result = await sendOpenAiCompatibleChat({
+      provider,
+      modelId: 'gpt-5.2-pro',
+      model: modelWithMcp(),
+      messages: [message],
+      reasoningEffort: 'high',
+      mcp: {
+        plugin: enabledMcpPlugin(),
+        requestApproval,
+        beforeContinuation,
+        beforeProviderRequest,
+        onProviderRequestStarted,
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(beforeProviderRequest.mock.calls.map(([context]) => context.requestNumber)).toEqual([1, 2]);
+    expect(onProviderRequestStarted.mock.calls.map(([context]) => context.requestNumber)).toEqual([1, 2]);
+    expect(fetchMock.mock.calls.map(([, init]) => (init as RequestInit).redirect)).toEqual([
+      'error',
+      'error',
+    ]);
+    expect(requestApproval).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'approval_1',
+        serverLabel: 'trusted_mcp',
+        toolName: 'weather.lookup',
+        rawArguments,
+        arguments: { city: 'Shanghai' },
+      }),
+      expect.objectContaining({ approvalNumber: 1, requestNumber: 1 })
+    );
+    expect(beforeContinuation).toHaveBeenCalledWith(expect.objectContaining({
+      nextRequestNumber: 2,
+      approvals: [{
+        approvalRequestId: 'approval_1',
+        serverLabel: 'trusted_mcp',
+        toolName: 'weather.lookup',
+        decision: 'approve',
+        argumentBytes: rawArguments.length,
+      }],
+    }));
+    const firstBody = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
+    const continuationBody = JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body));
+    expect(firstBody.reasoning).toEqual({ effort: 'high' });
+    expect(continuationBody).toMatchObject({
+      store: false,
+      parallel_tool_calls: false,
+      reasoning: { effort: 'high' },
+      tools: [{
+        require_approval: 'always',
+        allowed_tools: mcpAllowedTools,
+      }],
+    });
+    expect(continuationBody.input).toContainEqual(expect.objectContaining({
+      type: 'mcp_approval_request',
+      id: 'approval_1',
+    }));
+    expect(continuationBody.input).toContainEqual({
+      type: 'mcp_approval_response',
+      approval_request_id: 'approval_1',
+      approve: true,
+    });
+    expect(result.content).toBe('Shanghai is clear.');
+    expect(result.mcpActivity).toEqual({
+      serverLabel: 'trusted_mcp',
+      providerRequestCount: 2,
+      approvals: [{ toolName: 'weather.lookup', decision: 'approve' }],
+      calls: [{ toolName: 'weather.lookup', outcome: 'completed' }],
+    });
+  });
+
+  it('rejects Web Search and MCP together before issuing a request', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const model = modelWithMcp();
+    model.capabilities = Array.from(new Set([...model.capabilities, 'web-search']));
+
+    await expect(sendOpenAiCompatibleChat({
+      provider,
+      modelId: model.id,
+      model,
+      messages: [message],
+      reasoningEffort: 'default',
+      webSearch: { enabled: true, searchContextSize: 'medium' },
+      mcp: {
+        plugin: enabledMcpPlugin(),
+        requestApproval: vi.fn(async () => 'approve' as const),
+      },
+    })).rejects.toThrow(/MCP 与联网搜索不能在同一轮启用/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for relays, undeclared models, invalid plugins, and disabled plugins', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const requestApproval = vi.fn(async () => 'approve' as const);
+    const relay = {
+      ...provider,
+      id: 'openai-relay',
+      kind: 'openai-compatible' as const,
+      baseUrl: 'https://relay.example.com/v1',
+    };
+
+    await expect(sendOpenAiCompatibleChat({
+      provider: relay,
+      modelId: 'gpt-5.2-pro',
+      model: modelWithMcp(relay),
+      messages: [message],
+      reasoningEffort: 'default',
+      mcp: {
+        plugin: enabledMcpPlugin({ providerId: relay.id }),
+        requestApproval,
+      },
+    })).rejects.toThrow(/精确的 OpenAI 官方 api\.openai\.com Responses 路由/);
+
+    const undeclaredModel = createModelInfoFromId(provider, 'gpt-5.2-pro', 'manual');
+    undeclaredModel.capabilities = undeclaredModel.capabilities.filter((item) => item !== 'mcp');
+    await expect(sendOpenAiCompatibleChat({
+      provider,
+      modelId: undeclaredModel.id,
+      model: undeclaredModel,
+      messages: [message],
+      reasoningEffort: 'default',
+      mcp: { plugin: enabledMcpPlugin(), requestApproval },
+    })).rejects.toThrow(/模型未明确标记 MCP 能力/);
+
+    for (const plugin of [
+      enabledMcpPlugin({ allowedTools: [] }),
+      enabledMcpPlugin({ enabled: false }),
+    ]) {
+      await expect(sendOpenAiCompatibleChat({
+        provider,
+        modelId: 'gpt-5.2-pro',
+        model: modelWithMcp(),
+        messages: [message],
+        reasoningEffort: 'default',
+        mcp: { plugin, requestApproval },
+      })).rejects.toThrow(/MCP 配置未通过.*白名单与逐次审批安全检查/);
+    }
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'a custom port',
+      { kind: 'openai-compatible' as const, baseUrl: 'https://api.openai.com:8443/v1' },
+    ],
+    [
+      'a mismatched provider kind',
+      { kind: 'custom' as const, baseUrl: 'https://api.openai.com/v1' },
+    ],
+    [
+      'an unexpected path',
+      { kind: 'openai-compatible' as const, baseUrl: 'https://api.openai.com/admin' },
+    ],
+  ])('rejects MCP before fetch for %s', async (_label, overrides) => {
+    const unsafeProvider: ProviderProfile = {
+      ...provider,
+      ...overrides,
+      id: `unsafe-${_label}`,
+    };
+    const fetchMock = vi.fn();
+    const requestApproval = vi.fn(async () => 'approve' as const);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(sendOpenAiCompatibleChat({
+      provider: unsafeProvider,
+      modelId: 'gpt-5.2-pro',
+      model: modelWithMcp(unsafeProvider),
+      messages: [message],
+      reasoningEffort: 'default',
+      mcp: {
+        plugin: enabledMcpPlugin({ providerId: unsafeProvider.id }),
+        requestApproval,
+      },
+    })).rejects.toThrow(/OpenAI.*api\.openai\.com Responses/);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  it('does not expose MCP authorization when an HTTP error body reflects it', async () => {
+    const reflectedBody = `upstream echoed ${mcpAuthorization}`;
+    const fetchMock = vi.fn().mockResolvedValue(new Response(reflectedBody, {
+      status: 502,
+      headers: { 'content-type': 'text/plain' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const error = await sendOpenAiCompatibleChat({
+      provider,
+      modelId: 'gpt-5.2-pro',
+      model: modelWithMcp(),
+      messages: [message],
+      reasoningEffort: 'default',
+      mcp: {
+        plugin: enabledMcpPlugin(),
+        requestApproval: vi.fn(async () => 'approve' as const),
+      },
+    }).then(() => undefined, (reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('MCP Responses request failed.');
+    expect((error as Error).message).not.toContain(mcpAuthorization);
+    expect((error as Error).message).not.toContain(reflectedBody);
+    const sentBody = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
+    expect(sentBody.tools[0].authorization).toBe(mcpAuthorization);
   });
 });
 

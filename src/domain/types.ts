@@ -179,6 +179,7 @@ export interface ProviderUsageEvent {
   id: string;
   kind: ProviderUsageKind;
   status: ProviderUsageStatus;
+  providerRequestCount: number;
   providerId: string;
   modelId: string;
   createdAt: number;
@@ -265,6 +266,19 @@ export interface GenerationTaskInfo {
   status?: string;
 }
 
+export interface McpActivitySummary {
+  serverLabel: string;
+  providerRequestCount: number;
+  approvals: Array<{
+    toolName: string;
+    decision: 'approve' | 'deny';
+  }>;
+  calls: Array<{
+    toolName: string;
+    outcome: 'completed' | 'failed' | 'unknown';
+  }>;
+}
+
 export interface ChatMessage {
   id: string;
   originMessageId?: string;
@@ -286,6 +300,7 @@ export interface ChatMessage {
   requestMetrics?: RequestMetrics;
   costEstimate?: CostEstimate;
   generationTask?: GenerationTaskInfo;
+  mcpActivity?: McpActivitySummary;
   modelId?: string;
   providerId?: string;
   providerName?: string;
@@ -309,9 +324,11 @@ export interface ChatConversation {
 export interface PluginManifest {
   id: string;
   name: string;
+  description?: string;
   version: string;
   type: 'mobile-js' | 'remote-mcp';
   permissions: Array<'network' | 'files' | 'clipboard' | 'tools'>;
+  allowedTools: string[];
   transport?: 'streamable-http' | 'sse';
   endpoint?: string;
   enabled?: boolean;
@@ -354,5 +371,6 @@ export interface ChatCompletionResult {
   webSearchTriggered?: boolean;
   attachments?: MediaAttachment[];
   generationTask?: GenerationTaskInfo;
+  mcpActivity?: McpActivitySummary;
   raw: unknown;
 }

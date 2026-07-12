@@ -217,7 +217,7 @@ describe('Android mobile UI regressions', () => {
     expect(appSource).toContain('providerKeyBindingFingerprint !== finalFingerprint');
     expect(sendSource.indexOf('authorizeProviderRequestPlan')).toBeGreaterThan(-1);
     expect(sendSource.indexOf('authorizeProviderRequestPlan')).toBeLessThan(
-      sendSource.indexOf("beginActiveRequest('回答生成')")
+      sendSource.indexOf("beginActiveRequest('回答生成', { mcpActive })")
     );
     expect(sendSource.indexOf('persistProviderUsageEvents')).toBeLessThan(
       sendSource.indexOf('runAssistantRequest')

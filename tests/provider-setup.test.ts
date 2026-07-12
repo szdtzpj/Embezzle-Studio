@@ -236,6 +236,78 @@ describe('model capability matrix', () => {
     expect(row.cells.embedding).toMatchObject({ status: 'provider-only' });
   });
 
+  it('enables MCP only when an official OpenAI model explicitly declares it', () => {
+    const official = provider({
+      kind: 'openai-compatible',
+      baseUrl: 'https://api.openai.com/v1',
+    });
+    const declared = buildModelCapabilityMatrixRow(
+      official,
+      model({ capabilities: ['text', 'mcp'] })
+    );
+    const undeclared = buildModelCapabilityMatrixRow(
+      official,
+      model({ capabilities: ['text'] })
+    );
+
+    expect(declared.cells.mcp).toMatchObject({
+      declared: true,
+      status: 'available',
+    });
+    expect(declared.cells.mcp.reason).toMatch(/api\.openai\.com.*store:false/);
+    expect(undeclared.cells.mcp).toMatchObject({
+      declared: false,
+      status: 'unknown',
+    });
+  });
+
+  it('does not enable MCP for an OpenAI-compatible relay that only claims the OpenAI kind', () => {
+    const disguisedRelay = provider({
+      kind: 'openai-compatible',
+      baseUrl: 'https://relay.example/v1',
+    });
+    const row = buildModelCapabilityMatrixRow(
+      disguisedRelay,
+      model({ capabilities: ['text', 'mcp'] })
+    );
+
+    expect(row.cells.mcp).toMatchObject({
+      declared: true,
+      status: 'provider-only',
+    });
+    expect(row.cells.mcp.reason).toMatch(/精确的 api\.openai\.com 官方端点/);
+  });
+
+  it.each([
+    [
+      '火山方舟',
+      provider({
+        kind: 'volcengine-ark',
+        baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+      }),
+      /官方虽有工具审批协议.*真实账号验证 store:false 手动续接前/,
+    ],
+    [
+      '阿里百炼',
+      provider({
+        kind: 'bailian-compatible',
+        baseUrl: 'https://workspace-sg.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+      }),
+      /Responses 缺少执行前审批协议/,
+    ],
+  ])('keeps %s MCP provider-only with its protocol-specific reason', (_name, target, reason) => {
+    const row = buildModelCapabilityMatrixRow(
+      target,
+      model({ capabilities: ['text', 'mcp'] })
+    );
+
+    expect(row.cells.mcp).toMatchObject({
+      declared: true,
+      status: 'provider-only',
+    });
+    expect(row.cells.mcp.reason).toMatch(reason);
+  });
+
   it('applies exact provider and platform gates to video, search, and audio cells', () => {
     const bailian = provider({
       kind: 'bailian-compatible',
