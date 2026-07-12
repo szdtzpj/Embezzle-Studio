@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { forwardRef, useImperativeHandle, useState, type ReactNode } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { SettingsMainScreen } from './settings/SettingsMainScreen';
 import { ColorModeScreen } from './settings/ColorModeScreen';
@@ -15,12 +15,15 @@ import { MotionSwitch } from '../components/Motion';
 import { useKelivoTheme, type KelivoTheme } from '../theme';
 import type { AppUpdateInfo } from '../../services/updateChecker';
 import type {
+  Capability,
   ModelInfo,
+  ModelTask,
   ProviderKind,
   ProviderProfile,
 } from '../../domain/types';
 import type { ModelCapabilityFilter } from '../../services/modelCapabilities';
 import type { ProviderEndpointInspection } from '../../services/providerSetup';
+import { isUserCreatedProvider } from '../../data/providerCatalog';
 
 export type { SettingsToolsSection } from './settings/toolsSections';
 
@@ -32,6 +35,7 @@ export interface SettingsScreenProps {
   providers: ProviderProfile[];
   activeProvider: ProviderProfile;
   activeModelId: string;
+  activeModel: ModelInfo | undefined;
   addedModels: ModelInfo[];
   addedModelIds: Set<string>;
   modelCandidates: ModelInfo[];
@@ -71,9 +75,16 @@ export interface SettingsScreenProps {
   onAddManualModel: () => void;
   onSelectModel: (modelId: string) => void;
   onRemoveModel: (modelId: string) => void;
+  onSetActiveModelTask: (task: ModelTask) => void;
+  onToggleActiveModelCapability: (capability: Capability) => void;
   onLoadMoreCandidates?: () => void;
   onCheckUpdates: () => void;
   onOpenUpdateTarget: (kind: 'release' | 'install') => void;
+}
+
+export interface SettingsScreenHandle {
+  handleBack: () => boolean;
+  resetNavigation: () => void;
 }
 
 type ScreenState =
@@ -90,7 +101,10 @@ type PendingProviderDeletion = {
   onDeleted?: () => void;
 };
 
-export function SettingsScreen(props: SettingsScreenProps) {
+export const SettingsScreen = forwardRef<SettingsScreenHandle, SettingsScreenProps>(function SettingsScreen(
+  props,
+  ref,
+) {
   const theme = useKelivoTheme();
   const styles = getStyles(theme);
   const [stack, setStack] = useState<ScreenState[]>([{ key: 'main' }]);
@@ -113,6 +127,10 @@ export function SettingsScreen(props: SettingsScreenProps) {
   };
 
   const navigateToProviderDetail = (providerId: string) => {
+    const provider = props.providers.find((item) => item.id === providerId);
+    if (!provider || provider.enabled === false) {
+      return;
+    }
     props.onSelectProvider(providerId);
     push({ key: 'providerDetail' });
   };
@@ -122,7 +140,7 @@ export function SettingsScreen(props: SettingsScreenProps) {
       return;
     }
     const provider = props.providers.find((item) => item.id === providerId);
-    if (!provider) {
+    if (!provider || !isUserCreatedProvider(provider)) {
       return;
     }
 
@@ -142,6 +160,26 @@ export function SettingsScreen(props: SettingsScreenProps) {
     setPendingProviderDeletion(null);
     props.onDeleteProvider(deletion.providerId, deletion.onDeleted);
   };
+
+  useImperativeHandle(ref, () => ({
+    handleBack: () => {
+      if (pendingProviderDeletion) {
+        setPendingProviderDeletion(null);
+        return true;
+      }
+      if (stack.length <= 1) {
+        return false;
+      }
+      setNavigationDirection('backward');
+      setStack((screens) => screens.slice(0, -1));
+      return true;
+    },
+    resetNavigation: () => {
+      setPendingProviderDeletion(null);
+      setNavigationDirection('none');
+      setStack([{ key: 'main' }]);
+    },
+  }), [pendingProviderDeletion, stack.length]);
 
   const renderScreen = () => {
     switch (current.key) {
@@ -207,6 +245,7 @@ export function SettingsScreen(props: SettingsScreenProps) {
             readOnly={props.readOnly}
             provider={props.activeProvider}
             activeModelId={props.activeModelId}
+            activeModel={props.activeModel}
             addedModels={props.addedModels}
             addedModelIds={props.addedModelIds}
             modelCandidates={props.modelCandidates}
@@ -238,9 +277,11 @@ export function SettingsScreen(props: SettingsScreenProps) {
             onAddManualModel={props.onAddManualModel}
             onSelectModel={props.onSelectModel}
             onRemoveModel={props.onRemoveModel}
+            onSetActiveModelTask={props.onSetActiveModelTask}
+            onToggleActiveModelCapability={props.onToggleActiveModelCapability}
             onLoadMoreCandidates={props.onLoadMoreCandidates}
             onDeleteProvider={
-              props.providers.length > 1
+              props.providers.length > 1 && isUserCreatedProvider(props.activeProvider)
                 ? () => requestDeleteProvider(props.activeProvider.id, pop)
                 : undefined
             }
@@ -275,7 +316,7 @@ export function SettingsScreen(props: SettingsScreenProps) {
       />
     </View>
   );
-}
+});
 
 function createStyles(theme: KelivoTheme) {
   return StyleSheet.create({

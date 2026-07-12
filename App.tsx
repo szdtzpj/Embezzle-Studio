@@ -77,6 +77,7 @@ import type {
   MessageRole,
   MediaAttachment,
   McpActivitySummary,
+  Capability,
   ModelInfo,
   ModelTargetRef,
   ModelTask,
@@ -132,7 +133,9 @@ import {
   reasoningEffortLabels,
 } from './src/services/reasoningEfforts';
 import {
+  isProviderEnabled,
   isWorkspaceReadOnly,
+  resolveEnabledProvider,
   resolveMessageProvider,
 } from './src/services/workspaceRuntime';
 import { aggregateUsage, estimateMessageCost } from './src/services/usageAnalytics';
@@ -248,7 +251,7 @@ import {
   upsertProviderUsageEvent,
   type ProviderRequestPlan,
 } from './src/services/costGuard';
-import { SettingsScreen } from './src/ui/screens/SettingsScreen';
+import { SettingsScreen, type SettingsScreenHandle } from './src/ui/screens/SettingsScreen';
 import { KelivoThemeProvider } from './src/ui/theme';
 import { AppDialogHost } from './src/ui/components/AppDialogHost';
 import { ConfirmDialog } from './src/ui/components/ConfirmDialog';
@@ -277,6 +280,8 @@ interface AppPalette {
   textMuted: string;
   textMutedSolid: string;
   textOnAccent: string;
+  textOnDanger: string;
+  mediaOverlayText: string;
   danger: string;
   dangerBg: string;
   dangerBorder: string;
@@ -309,6 +314,8 @@ const lightPalette: AppPalette = {
   textMuted: '#9A9A9A55',
   textMutedSolid: '#9A9A9A',
   textOnAccent: '#FFFFFF',
+  textOnDanger: '#FFFFFF',
+  mediaOverlayText: '#FFFFFF',
   danger: '#BB0947',
   dangerBg: '#FDDADE',
   dangerBorder: 'rgba(187, 9, 71, 0.28)',
@@ -341,6 +348,8 @@ const darkPalette: AppPalette = {
   textMuted: '#878A9566',
   textMutedSolid: '#878A95',
   textOnAccent: '#1E2A5A',
+  textOnDanger: '#65002B',
+  mediaOverlayText: '#FFFFFF',
   danger: '#FFB1C2',
   dangerBg: '#5B1130',
   dangerBorder: 'rgba(255, 177, 194, 0.35)',
@@ -1189,7 +1198,12 @@ function resolveValidVoiceTarget(
   const expectedTask: ModelTask = kind === 'transcription'
     ? 'audio-transcription'
     : 'speech-generation';
-  if (!provider || !model || inferModelTask(model) !== expectedTask || !model.capabilities.includes(capability)) {
+  if (
+    !isProviderEnabled(provider) ||
+    !model ||
+    inferModelTask(model) !== expectedTask ||
+    !model.capabilities.includes(capability)
+  ) {
     return null;
   }
   const readiness = getProviderAudioReadiness(provider);
@@ -1304,7 +1318,7 @@ function AppContent({
   onSetColorMode: (colorMode: ColorMode) => void;
   appearanceNotice: string;
 }) {
-  const { palette, styles } = useAppTheme();
+  const { palette, styles, isDark } = useAppTheme();
   const voiceRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const voiceRecorderState = useAudioRecorderState(voiceRecorder, 250);
   const [workspace, setWorkspaceState] = useState<AppWorkspace>(() => createDefaultWorkspace());
@@ -1322,6 +1336,27 @@ function AppContent({
   const [persistenceLoadError, setPersistenceLoadError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsMounted, setSettingsMounted] = useState(false);
+  const settingsScreenRef = useRef<SettingsScreenHandle>(null);
+  const workspaceReadOnly = isWorkspaceReadOnly(booting, persistenceReady);
+  const closeSettings = useCallback(() => {
+    settingsScreenRef.current?.resetNavigation();
+    setSettingsOpen(false);
+    if (workspaceReadOnly) {
+      return;
+    }
+    setWorkspace((current) => {
+      const selectedProvider = current.providers.find(
+        (provider) => provider.id === current.activeProviderId,
+      );
+      if (isProviderEnabled(selectedProvider)) {
+        return current;
+      }
+      const fallbackProvider = current.providers.find(isProviderEnabled);
+      return fallbackProvider
+        ? { ...current, activeProviderId: fallbackProvider.id }
+        : current;
+    });
+  }, [setWorkspace, workspaceReadOnly]);
   const [refreshingModels, setRefreshingModels] = useState(false);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [workbenchArtifactId, setWorkbenchArtifactId] = useState<string | null>(null);
@@ -1509,11 +1544,19 @@ function AppContent({
   }
 
   function ensureProviderConfigurationIdle(): boolean {
-    if (!activeRequestRef.current) {
-      return true;
+    if (activeRequestRef.current) {
+      setNotice('当前服务商请求仍在进行中；请先停止或等待完成，再切换模型或修改服务商/MCP 配置。');
+      return false;
     }
-    setNotice('当前服务商请求仍在进行中；请先停止或等待完成，再切换模型或修改服务商/MCP 配置。');
-    return false;
+    if (activeAudioOperationRef.current) {
+      setNotice('当前语音操作仍在进行中；请先停止或等待完成，再修改服务商或模型配置。');
+      return false;
+    }
+    if (generationTaskControllersRef.current.size > 0) {
+      setNotice('当前媒体任务查询仍在进行中；请等待完成，再修改服务商或模型配置。');
+      return false;
+    }
+    return true;
   }
 
   function beginActiveRequest(
@@ -1865,7 +1908,10 @@ function AppContent({
         return true;
       }
       if (settingsOpen) {
-        setSettingsOpen(false);
+        if (settingsScreenRef.current?.handleBack()) {
+          return true;
+        }
+        closeSettings();
         return true;
       }
       if (attachMenuOpen || reasoningMenuOpen || parameterMenuOpen || messageActionMenuId) {
@@ -1882,6 +1928,7 @@ function AppContent({
   }, [
     attachMenuOpen,
     contextInspectorOpen,
+    closeSettings,
     costConfirmationReason,
     deleteConfirmConversationId,
     deleteConfirmProviderId,
@@ -1897,7 +1944,7 @@ function AppContent({
   ]);
 
   const activeProvider = useMemo(
-    () => workspace.providers.find((provider) => provider.id === workspace.activeProviderId) ?? workspace.providers[0],
+    () => resolveEnabledProvider(workspace.providers, workspace.activeProviderId),
     [workspace.activeProviderId, workspace.providers]
   );
   const activeProject = useMemo(
@@ -1924,7 +1971,6 @@ function AppContent({
     // Reset when switching projects and once after async hydration.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProject?.id, persistenceReady]);
-  const workspaceReadOnly = isWorkspaceReadOnly(booting, persistenceReady);
   const activeConversation = useMemo(
     () => workspace.conversations.find(
       (conversation) => conversation.id === workspace.activeConversationId
@@ -2119,6 +2165,7 @@ function AppContent({
   const providerModelGroups = useMemo(
     () =>
       workspace.providers
+        .filter(isProviderEnabled)
         .map((provider) => ({
           provider,
           models: getSelectableModels(provider),
@@ -2133,7 +2180,7 @@ function AppContent({
         const model = provider
           ? getSelectableModels(provider).find((item) => item.id === target.modelId)
           : undefined;
-        if (!provider || !model || inferModelTask(model) !== 'chat') {
+        if (!isProviderEnabled(provider) || !model || inferModelTask(model) !== 'chat') {
           return [];
         }
         const effortKey = `${provider.id}:${model.id}`;
@@ -2797,7 +2844,7 @@ function AppContent({
 
   function openGlobalSearchResult(result: WorkspaceSearchResult) {
     setHistorySearchQuery('');
-    setSettingsOpen(false);
+    closeSettings();
     if (result.kind === 'project' && result.projectId) {
       selectProject(result.projectId);
       return;
@@ -2826,27 +2873,20 @@ function AppContent({
     }
   }
 
-  function closeSettings() {
-    setSettingsOpen(false);
-    if (workspaceReadOnly) {
+  function toggleProviderEnabled(providerId: string) {
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
       return;
     }
-    setWorkspace((current) => {
-      const selectedProvider = current.providers.find(
-        (provider) => provider.id === current.activeProviderId,
-      );
-      if (isProviderEnabled(selectedProvider)) {
-        return current;
-      }
-      const fallbackProvider = current.providers.find(isProviderEnabled);
-      return fallbackProvider
-        ? { ...current, activeProviderId: fallbackProvider.id }
-        : current;
-    });
-  }
-
-  function toggleProviderEnabled(providerId: string) {
-    if (!ensureWorkspaceWritable()) {
+    const provider = workspaceRef.current.providers.find((item) => item.id === providerId);
+    if (!provider) {
+      return;
+    }
+    const disabling = isProviderEnabled(provider);
+    if (
+      disabling &&
+      workspaceRef.current.providers.filter(isProviderEnabled).length <= 1
+    ) {
+      setNotice('至少需要保留一个已启用的供应商。');
       return;
     }
     setWorkspace((current) => {
@@ -2861,20 +2901,49 @@ function AppContent({
         current.activeProviderId === providerId && !isProviderEnabled(toggledProvider)
           ? fallbackProvider?.id ?? current.activeProviderId
           : current.activeProviderId;
+      const comparisonTargets = disabling
+        ? current.comparisonTargets.filter((target) => target.providerId !== providerId)
+        : current.comparisonTargets;
+      const voice = { ...current.voice };
+      if (disabling && voice.transcriptionTarget?.providerId === providerId) {
+        delete voice.transcriptionTarget;
+      }
+      if (disabling && voice.speechTarget?.providerId === providerId) {
+        delete voice.speechTarget;
+      }
       return {
         ...current,
         providers,
         activeProviderId,
+        comparisonTargets,
+        comparisonEnabled: current.comparisonEnabled && comparisonTargets.length >= 2,
+        voice,
+        plugins: disabling
+          ? current.plugins.map((plugin) =>
+              plugin.type === 'remote-mcp' && plugin.providerId === providerId
+                ? { ...plugin, enabled: false }
+                : plugin
+            )
+          : current.plugins,
+        projects: disabling
+          ? current.projects.map((project) =>
+              project.defaultTarget?.providerId === providerId
+                ? { ...project, defaultTarget: undefined, updatedAt: Date.now() }
+                : project
+            )
+          : current.projects,
       };
     });
-  }
-
-  function isProviderEnabled(provider?: ProviderProfile | null): provider is ProviderProfile {
-    return Boolean(provider && (provider.enabled ?? true));
+    setNotice(disabling ? '已禁用供应商并停止其运行时目标。' : '已启用供应商。');
   }
 
   function selectProvider(providerId: string) {
     if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
+      return;
+    }
+    const provider = workspaceRef.current.providers.find((item) => item.id === providerId);
+    if (!isProviderEnabled(provider)) {
+      setNotice('请先启用该供应商。');
       return;
     }
 
@@ -2906,6 +2975,12 @@ function AppContent({
     if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
       return;
     }
+    const provider = workspaceRef.current.providers.find((item) => item.id === providerId);
+    if (!isProviderEnabled(provider)) {
+      setNotice('请先启用该供应商。');
+      setModelPickerOpen(false);
+      return;
+    }
 
     setWorkspace((current) => ({
       ...current,
@@ -2921,6 +2996,11 @@ function AppContent({
 
   function toggleComparisonTarget(providerId: string, modelId: string) {
     if (!ensureWorkspaceWritable()) {
+      return;
+    }
+    const provider = workspaceRef.current.providers.find((item) => item.id === providerId);
+    if (!isProviderEnabled(provider)) {
+      setNotice('禁用的供应商不能加入多模型对比。');
       return;
     }
     const key = `${providerId}:${modelId}`;
@@ -3044,7 +3124,7 @@ function AppContent({
     const rendered = renderPromptTemplate(template.content, {});
     if (template.mode === 'composer') {
       setInput((current) => current.trim() ? `${current}\n\n${rendered}` : rendered);
-      setSettingsOpen(false);
+      closeSettings();
       setNotice('模板已插入输入框；变量占位符可在发送前直接编辑。');
       return;
     }
@@ -3074,7 +3154,7 @@ function AppContent({
       };
     });
     setNotice('会话指令已启用；同一模板在当前对话中只保留一份。');
-    setSettingsOpen(false);
+    closeSettings();
   }
 
   function removePromptTemplate(templateId: string) {
@@ -3696,6 +3776,125 @@ function AppContent({
     setNotice('已移除模型。');
   }
 
+  function updateActiveModel(patch: Partial<ModelInfo>) {
+    if (
+      !ensureWorkspaceWritable() ||
+      !ensureProviderConfigurationIdle() ||
+      !activeProvider ||
+      !activeModel
+    ) {
+      return;
+    }
+
+    setWorkspace((current) => {
+      const provider = current.providers.find((item) => item.id === activeProvider.id);
+      const model = provider?.models.find((item) => item.id === activeModel.id);
+      if (!provider || !model) {
+        return current;
+      }
+
+      const nextModel: ModelInfo = { ...model, ...patch, source: 'manual' };
+      const nextTask = inferModelTask(nextModel);
+      const matchesTarget = (target: ModelTargetRef | undefined) =>
+        target?.providerId === provider.id && target.modelId === model.id;
+      const comparisonTargets = nextTask === 'chat'
+        ? current.comparisonTargets
+        : current.comparisonTargets.filter((target) => !matchesTarget(target));
+      const voice = { ...current.voice };
+
+      if (
+        matchesTarget(voice.transcriptionTarget) &&
+        (nextTask !== 'audio-transcription' ||
+          !nextModel.capabilities.includes('speech-to-text'))
+      ) {
+        delete voice.transcriptionTarget;
+      }
+      if (
+        matchesTarget(voice.speechTarget) &&
+        (nextTask !== 'speech-generation' ||
+          !nextModel.capabilities.includes('text-to-speech'))
+      ) {
+        delete voice.speechTarget;
+      }
+
+      const reasoningEffortByModel = { ...current.reasoningEffortByModel };
+      if (nextTask !== 'chat' || !nextModel.capabilities.includes('reasoning')) {
+        delete reasoningEffortByModel[`${provider.id}:${model.id}`];
+      }
+
+      return {
+        ...current,
+        providers: current.providers.map((item) =>
+          item.id === provider.id
+            ? {
+                ...item,
+                models: item.models.map((candidate) =>
+                  candidate.id === model.id ? nextModel : candidate
+                ),
+              }
+            : item
+        ),
+        comparisonTargets,
+        comparisonEnabled: current.comparisonEnabled && comparisonTargets.length >= 2,
+        voice,
+        reasoningEffortByModel,
+      };
+    });
+  }
+
+  function setActiveModelTask(task: ModelTask) {
+    if (!ensureWorkspaceWritable() || !activeModel) {
+      return;
+    }
+
+    const taskCapabilities: Partial<Record<ModelTask, Capability>> = {
+      'image-generation': 'image-generation',
+      'video-generation': 'video-generation',
+      'audio-transcription': 'speech-to-text',
+      'speech-generation': 'text-to-speech',
+      embedding: 'embedding',
+      rerank: 'rerank',
+    };
+    const taskCapabilitySet = new Set(
+      Object.values(taskCapabilities).filter((value): value is Capability => Boolean(value))
+    );
+    const selectedCapability = taskCapabilities[task];
+    const capabilities = activeModel.capabilities.filter(
+      (capability) => !taskCapabilitySet.has(capability)
+    );
+    if (selectedCapability) {
+      capabilities.push(selectedCapability);
+    }
+    const capabilityOverrides = { ...activeModel.capabilityOverrides };
+    for (const capability of taskCapabilitySet) {
+      capabilityOverrides[capability] = capability === selectedCapability;
+    }
+
+    updateActiveModel({ task, capabilities, capabilityOverrides });
+    clearPendingAttachments();
+  }
+
+  function toggleActiveModelCapability(capability: Capability) {
+    if (!ensureWorkspaceWritable() || !activeModel) {
+      return;
+    }
+
+    const enabled = !activeModel.capabilities.includes(capability);
+    const capabilities = enabled
+      ? [...activeModel.capabilities, capability]
+      : activeModel.capabilities.filter((value) => value !== capability);
+    updateActiveModel({
+      capabilities,
+      capabilityOverrides: {
+        ...activeModel.capabilityOverrides,
+        [capability]: enabled,
+      },
+    });
+    if ((capability === 'image-input' || capability === 'video-input') && !enabled) {
+      clearPendingAttachments();
+    }
+  }
+
   async function refreshModels() {
     if (!ensureWorkspaceWritable() || !activeProvider) {
       return;
@@ -4226,7 +4425,7 @@ function AppContent({
           assertChatAttachmentsSupported(nextAttachments, runtime.model, runtime.provider);
         }
       } else if (activeModel) {
-        assertChatAttachmentsSupported(nextAttachments, activeModel, activeProvider);
+        assertChatAttachmentsSupported(nextAttachments, activeModel, activeProvider ?? undefined);
       }
       setAttachments(nextAttachments);
     } catch (error) {
@@ -5706,9 +5905,9 @@ function AppContent({
       return;
     }
 
-    const provider = workspace.providers.find((item) => item.id === task.providerId);
-    if (!provider) {
-      setNotice('找不到这个生成任务对应的服务商。');
+    const provider = workspaceRef.current.providers.find((item) => item.id === task.providerId);
+    if (!isProviderEnabled(provider)) {
+      setNotice('这个媒体任务对应的服务商已禁用；请先重新启用后再刷新。');
       return;
     }
 
@@ -5949,6 +6148,10 @@ function AppContent({
       setNotice('MCP Authorization 过长或包含不安全控制字符。');
       return;
     }
+    if (!activeProvider) {
+      setNotice('请先启用并选择一个服务商。');
+      return;
+    }
     const id = createId('mcp');
     setWorkspace((current) => ({
       ...current,
@@ -5998,7 +6201,7 @@ function AppContent({
         setNotice('MCP 无法启用：请检查公网 HTTPS 地址、服务商绑定、工具白名单与逐次审批设置。');
         return;
       }
-      if (!provider || !isOfficialOpenAiProvider(provider)) {
+      if (!isProviderEnabled(provider) || !isOfficialOpenAiProvider(provider)) {
         const providerName = provider?.name ?? '已删除的服务商';
         setNotice(
           `MCP 无法启用：${providerName} 当前只保存配置。v1.4 仅对精确的 OpenAI 官方 api.openai.com Responses 路由开放逐次审批执行。`
@@ -6775,6 +6978,9 @@ function AppContent({
 
   
   function renderSettingsToolsSection(section: SettingsToolsSection) {
+    if (!activeProvider) {
+      return null;
+    }
     switch (section) {
       case 'workspace':
         return (
@@ -6878,7 +7084,7 @@ function AppContent({
                   showsHorizontalScrollIndicator={false}
                   contentContainerStyle={styles.providerRow}
                 >
-                  {getSelectableModels(activeProvider)
+                  {addedModels
                     .filter((model) => inferModelTask(model) === 'chat')
                     .map((model) => {
                       const selected = workspace.comparisonTargets.some(
@@ -7383,7 +7589,7 @@ function AppContent({
                         accessibilityLabel="打开任务所在对话"
                         onPress={() => {
                           selectConversation(item.conversationId);
-                          setSettingsOpen(false);
+                          closeSettings();
                         }}
                         style={styles.iconButton}
                       >
@@ -7691,7 +7897,7 @@ function AppContent({
     }
   }
 
-function toggleSettingsScreen() {
+  function toggleSettingsScreen() {
     Keyboard.dismiss();
     setAttachMenuOpen(false);
     setReasoningMenuOpen(false);
@@ -7708,7 +7914,11 @@ function toggleSettingsScreen() {
       setSidebarOpen(false);
       setModelPickerOpen(false);
     }
-    setSettingsOpen(nextOpen);
+    if (nextOpen) {
+      setSettingsOpen(true);
+    } else {
+      closeSettings();
+    }
   }
 
   function handleChatScroll(event: NativeSyntheticEvent<NativeScrollEvent>) {
@@ -7837,6 +8047,7 @@ function toggleSettingsScreen() {
             >
               <ScreenFade>
                 <SettingsScreen
+                  ref={settingsScreenRef}
                   readOnly={workspaceReadOnly}
                   colorMode={colorMode}
                   onSetColorMode={onSetColorMode}
@@ -7844,6 +8055,7 @@ function toggleSettingsScreen() {
                   providers={workspace.providers}
                   activeProvider={activeProvider}
                   activeModelId={activeModelId}
+                  activeModel={activeModel}
                   addedModels={addedModels}
                   addedModelIds={addedModelIds}
                   modelCandidates={modelCandidates}
@@ -7906,6 +8118,8 @@ function toggleSettingsScreen() {
                   onAddManualModel={addManualModel}
                   onSelectModel={selectModel}
                   onRemoveModel={removeModel}
+                  onSetActiveModelTask={setActiveModelTask}
+                  onToggleActiveModelCapability={toggleActiveModelCapability}
                   onLoadMoreCandidates={() => {
                     setCandidateModelRenderLimit((current) => current + candidateModelPageSize);
                   }}
@@ -8829,7 +9043,7 @@ function toggleSettingsScreen() {
             <>
               <BlurView
                 intensity={38}
-                tint="light"
+                tint={isDark ? 'dark' : 'light'}
                 blurMethod="dimezisBlurView"
                 style={styles.sidebarConversationFrost}
               >
@@ -8852,7 +9066,7 @@ function toggleSettingsScreen() {
                   <Text style={styles.sidebarConversationActionText}>
                     {conversationActionConversation.pinnedAt ? '取消置顶' : '置顶'}
                   </Text>
-                  <Pin size={16} color="#111827" strokeWidth={2.4} />
+                  <Pin size={16} color={palette.text} strokeWidth={2.4} />
                 </AnimatedPressable>
                 <AnimatedPressable
                   accessibilityRole="button"
@@ -8860,7 +9074,7 @@ function toggleSettingsScreen() {
                   style={styles.sidebarConversationActionRow}
                 >
                   <Text style={styles.sidebarConversationActionText}>编辑名称</Text>
-                  <Pencil size={16} color="#2563EB" strokeWidth={2.4} />
+                  <Pencil size={16} color={palette.edit} strokeWidth={2.4} />
                 </AnimatedPressable>
                 <AnimatedPressable
                   accessibilityRole="button"
@@ -10005,7 +10219,7 @@ function PendingAttachmentPreview({
         onPress={onRemove}
         style={({ pressed }) => [styles.pendingAttachmentRemove, pressed && styles.buttonPressed]}
       >
-        <X size={14} color={palette.textOnAccent} strokeWidth={2.5} />
+        <X size={14} color={palette.mediaOverlayText} strokeWidth={2.5} />
       </Pressable>
     </View>
   );
@@ -10031,12 +10245,12 @@ function VideoAttachmentSurface({ uri }: { uri: string }) {
       />
       {status === 'loading' ? (
         <View pointerEvents="none" style={styles.attachmentVideoStatusOverlay}>
-          <ActivityIndicator color={palette.textOnAccent} />
+          <ActivityIndicator color={palette.mediaOverlayText} />
           <Text style={styles.attachmentVideoStatusText}>正在加载视频</Text>
         </View>
       ) : status === 'error' ? (
         <View pointerEvents="none" style={styles.attachmentVideoStatusOverlay}>
-          <Video size={24} color={palette.textOnAccent} strokeWidth={1.8} />
+          <Video size={24} color={palette.mediaOverlayText} strokeWidth={1.8} />
           <Text style={styles.attachmentVideoStatusText}>预览加载失败，可尝试保存或分享</Text>
         </View>
       ) : null}
@@ -11289,7 +11503,7 @@ function createAppStyles(palette: AppPalette) {
     width: 24,
     height: 24,
     borderRadius: 12,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: palette.surface,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -11508,7 +11722,7 @@ function createAppStyles(palette: AppPalette) {
     fontWeight: '600',
   },
   mcpActivityApproved: {
-    color: '#39734C',
+    color: palette.success,
     fontSize: 10,
     fontWeight: '700',
   },
@@ -11586,8 +11800,8 @@ function createAppStyles(palette: AppPalette) {
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
   userInlineEditInput: {
-    borderColor: '#9FDBB8',
-    backgroundColor: '#F4FFF8',
+    borderColor: palette.userEditBorder,
+    backgroundColor: palette.userEditBubble,
   },
   assistantInlineEditInput: {
     borderColor: palette.border,
@@ -11618,13 +11832,13 @@ function createAppStyles(palette: AppPalette) {
     minWidth: 88,
     height: 34,
     borderRadius: radii.sm,
-    backgroundColor: palette.text,
+    backgroundColor: palette.accent,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 12,
   },
   inlineEditPrimaryText: {
-    color: '#FFFFFF',
+    color: palette.textOnAccent,
     fontSize: 13,
     fontWeight: '800',
   },
@@ -11636,7 +11850,7 @@ function createAppStyles(palette: AppPalette) {
     borderRadius: radii.md,
     borderWidth: 1,
     borderColor: palette.border,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: palette.surface,
     overflow: 'hidden',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 8 },
@@ -11656,7 +11870,7 @@ function createAppStyles(palette: AppPalette) {
     gap: 12,
     paddingHorizontal: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#EFEFEF',
+    borderBottomColor: palette.border,
   },
   messageActionMenuDangerRow: {
     borderBottomWidth: 0,
@@ -11794,7 +12008,7 @@ function createAppStyles(palette: AppPalette) {
     backgroundColor: 'rgba(13, 13, 13, 0.72)',
   },
   attachmentVideoStatusText: {
-    color: palette.textOnAccent,
+    color: palette.mediaOverlayText,
     fontSize: 12,
     fontWeight: '600',
     textAlign: 'center',
@@ -11930,7 +12144,7 @@ function createAppStyles(palette: AppPalette) {
     backgroundColor: 'rgba(13, 13, 13, 0.72)',
   },
   pendingAttachmentName: {
-    color: palette.textOnAccent,
+    color: palette.mediaOverlayText,
     fontSize: 11,
     fontWeight: '600',
   },
@@ -12446,7 +12660,7 @@ function createAppStyles(palette: AppPalette) {
     backgroundColor: palette.surface,
   },
   sidebarConversationMoreActive: {
-    backgroundColor: '#FFFFFF',
+    backgroundColor: palette.surfaceAlt,
     borderWidth: 1,
     borderColor: palette.accentBorder,
   },
@@ -12460,7 +12674,7 @@ function createAppStyles(palette: AppPalette) {
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: palette.border,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: palette.surface,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 12 },
     shadowOpacity: 0.12,
@@ -12493,7 +12707,7 @@ function createAppStyles(palette: AppPalette) {
     gap: 10,
     paddingHorizontal: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#EFEFEF',
+    borderBottomColor: palette.border,
   },
   sidebarConversationActionDangerRow: {
     borderBottomWidth: 0,
@@ -12519,7 +12733,7 @@ function createAppStyles(palette: AppPalette) {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.32)',
+    backgroundColor: palette.scrim,
     paddingHorizontal: 28,
     zIndex: 1000,
     elevation: 1000,
@@ -12597,7 +12811,7 @@ function createAppStyles(palette: AppPalette) {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.32)',
+    backgroundColor: palette.scrim,
     paddingHorizontal: 30,
     zIndex: 1000,
     elevation: 1000,
@@ -12649,7 +12863,7 @@ function createAppStyles(palette: AppPalette) {
     paddingHorizontal: 14,
   },
   deleteConfirmButtonText: {
-    color: '#FFFFFF',
+    color: palette.textOnDanger,
     fontSize: 14,
     fontWeight: '800',
   },
@@ -12854,4 +13068,3 @@ const appStylesByMode = {
   light: createAppStyles(lightPalette),
   dark: createAppStyles(darkPalette),
 } as const;
-

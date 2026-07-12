@@ -1,5 +1,14 @@
 import type { ReactNode } from 'react';
-import { Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { AlertTriangle, Info, ShieldAlert, Trash2 } from 'lucide-react-native';
 import { AnimatedPressable } from './AnimatedPressable';
 import { MotionItem } from './Motion';
@@ -52,70 +61,82 @@ export function ConfirmDialog({
     <Modal
       visible={visible}
       transparent
-      statusBarTranslucent
       animationType="fade"
       onRequestClose={onCancel}
     >
-      <Pressable style={styles.scrim} onPress={onCancel}>
-        <MotionItem
-          delay={20}
-          distance={12}
-          duration={220}
-          scaleFrom={0.94}
-          style={styles.dialogMotion}
-        >
-          <Pressable
-            accessible={false}
-            accessibilityViewIsModal
-            style={styles.dialog}
-            onPress={(event) => event.stopPropagation()}
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined}
+        style={styles.keyboard}
+      >
+        <Pressable style={styles.scrim} onPress={onCancel}>
+          <MotionItem
+            delay={20}
+            distance={12}
+            duration={220}
+            scaleFrom={0.94}
+            style={styles.dialogMotion}
           >
-            <View
-              accessible
-              accessibilityRole="alert"
-              accessibilityLiveRegion="assertive"
-              style={styles.messageBlock}
+            <Pressable
+              accessible={false}
+              accessibilityViewIsModal
+              style={styles.dialog}
+              onPress={(event) => event.stopPropagation()}
             >
-              <View style={styles.iconWrap}>
-                {icon ?? <DefaultIcon tone={tone} />}
-              </View>
+              <ScrollView
+                style={styles.contentScroll}
+                contentContainerStyle={styles.contentScrollBody}
+                bounces={false}
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}
+              >
+                <View
+                  accessible
+                  accessibilityRole="alert"
+                  accessibilityLiveRegion="assertive"
+                  style={styles.messageBlock}
+                >
+                  <View style={styles.iconWrap}>
+                    {icon ?? <DefaultIcon tone={tone} />}
+                  </View>
 
-              <Text style={styles.title}>{title}</Text>
+                  <Text style={styles.title}>{title}</Text>
 
-              {subject ? (
-                <View style={styles.subjectWrap}>
-                  <Text style={styles.subject} numberOfLines={2}>
-                    {subject}
-                  </Text>
+                  {subject ? (
+                    <View style={styles.subjectWrap}>
+                      <Text style={styles.subject}>
+                        {subject}
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  <Text style={styles.description}>{description}</Text>
                 </View>
-              ) : null}
+              </ScrollView>
 
-              <Text style={styles.description}>{description}</Text>
-            </View>
-
-            <View style={styles.actions}>
-              <AnimatedPressable
-                accessibilityRole="button"
-                accessibilityLabel={cancelLabel}
-                onPress={onCancel}
-                haptic="light"
-                style={styles.cancelButton}
-              >
-                <Text style={styles.cancelText}>{cancelLabel}</Text>
-              </AnimatedPressable>
-              <AnimatedPressable
-                accessibilityRole="button"
-                accessibilityLabel={confirmLabel}
-                onPress={onConfirm}
-                haptic={tone === 'danger' ? 'warning' : 'medium'}
-                style={styles.confirmButton}
-              >
-                <Text style={styles.confirmText}>{confirmLabel}</Text>
-              </AnimatedPressable>
-            </View>
-          </Pressable>
-        </MotionItem>
-      </Pressable>
+              <View style={styles.actions}>
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  accessibilityLabel={cancelLabel}
+                  onPress={onCancel}
+                  haptic="light"
+                  style={styles.cancelButton}
+                >
+                  <Text style={styles.cancelText}>{cancelLabel}</Text>
+                </AnimatedPressable>
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  accessibilityLabel={confirmLabel}
+                  onPress={onConfirm}
+                  haptic={tone === 'danger' ? 'warning' : 'medium'}
+                  style={styles.confirmButton}
+                >
+                  <Text style={styles.confirmText}>{confirmLabel}</Text>
+                </AnimatedPressable>
+              </View>
+            </Pressable>
+          </MotionItem>
+        </Pressable>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -135,17 +156,21 @@ function createStyles(theme: KelivoTheme, tone: DialogTone) {
         : theme.colors.errorContainer;
   const onAccent =
     tone === 'warning'
-      ? theme.colors.text
+      ? theme.colors.onWarning
       : tone === 'primary'
         ? theme.colors.onPrimary
         : theme.colors.onError;
 
   return StyleSheet.create({
+    keyboard: {
+      flex: 1,
+    },
     scrim: {
       flex: 1,
       alignItems: 'center',
       justifyContent: 'center',
       paddingHorizontal: 24,
+      paddingVertical: 24,
       backgroundColor: theme.colors.scrim,
       ...(Platform.OS === 'web'
         ? ({
@@ -157,19 +182,29 @@ function createStyles(theme: KelivoTheme, tone: DialogTone) {
     dialogMotion: {
       width: '100%',
       maxWidth: 348,
+      maxHeight: '100%',
     },
     dialog: {
       width: '100%',
+      maxHeight: '100%',
       minWidth: 0,
       alignItems: 'center',
-      paddingHorizontal: 20,
-      paddingTop: 22,
-      paddingBottom: 18,
       borderRadius: 20,
       borderWidth: 0.7,
       borderColor: theme.colors.outline,
       backgroundColor: theme.colors.card,
       ...theme.shadows.medium,
+      overflow: 'hidden',
+    },
+    contentScroll: {
+      width: '100%',
+      flexShrink: 1,
+    },
+    contentScrollBody: {
+      alignItems: 'center',
+      paddingHorizontal: 20,
+      paddingTop: 22,
+      paddingBottom: 8,
     },
     messageBlock: {
       width: '100%',
@@ -219,11 +254,14 @@ function createStyles(theme: KelivoTheme, tone: DialogTone) {
       width: '100%',
       flexDirection: 'row',
       gap: 10,
-      marginTop: 19,
+      paddingHorizontal: 20,
+      paddingTop: 11,
+      paddingBottom: 18,
     },
     cancelButton: {
       flex: 1,
-      height: 42,
+      minHeight: 42,
+      paddingVertical: 10,
       borderRadius: 12,
       alignItems: 'center',
       justifyContent: 'center',
@@ -238,7 +276,8 @@ function createStyles(theme: KelivoTheme, tone: DialogTone) {
     },
     confirmButton: {
       flex: 1,
-      height: 42,
+      minHeight: 42,
+      paddingVertical: 10,
       borderRadius: 12,
       alignItems: 'center',
       justifyContent: 'center',

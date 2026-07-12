@@ -45,6 +45,63 @@ describe('Android mobile UI regressions', () => {
     );
   });
 
+  it('uses static Android fallbacks for reusable settings motion and press controls', async () => {
+    const [pressableSource, motionSource] = await Promise.all([
+      source('src/ui/components/AnimatedPressable.tsx'),
+      source('src/ui/components/Motion.tsx'),
+    ]);
+
+    expect(pressableSource).toMatch(
+      /export function AnimatedPressable[\s\S]*?if \(Platform\.OS === 'android'\) \{\s*return <AndroidPressable \{\.\.\.props\} \/>;/
+    );
+    const androidPressableSource = pressableSource.slice(
+      pressableSource.indexOf('function AndroidPressable('),
+      pressableSource.indexOf('function AnimatedPressableImpl('),
+    );
+    expect(androidPressableSource).toContain('<Pressable');
+    expect(androidPressableSource).not.toContain('useSharedValue(');
+    expect(androidPressableSource).not.toContain('createAnimatedComponent');
+
+    expect(motionSource).toMatch(
+      /export function MotionSwitch[\s\S]*?Platform\.OS === 'android'[\s\S]*?<StaticMotionSwitch \{\.\.\.props\} \/>/
+    );
+    expect(motionSource).toMatch(
+      /export function MotionItem[\s\S]*?Platform\.OS === 'android'[\s\S]*?return <View style=\{props\.style\}>\{props\.children\}<\/View>/
+    );
+    expect(motionSource).toMatch(
+      /export function MotionPresence[\s\S]*?Platform\.OS === 'android'[\s\S]*?props\.visible \? <View/
+    );
+    expect(motionSource).toMatch(
+      /export function MotionSwap[\s\S]*?Platform\.OS === 'android'[\s\S]*?<View style=\{props\.contentStyle\}>/
+    );
+  });
+
+  it('routes Android back through the settings stack and resets hidden sensitive state on close', async () => {
+    const [appSource, settingsSource, providerDetailSource] = await Promise.all([
+      source('App.tsx'),
+      source('src/ui/screens/SettingsScreen.tsx'),
+      source('src/ui/screens/settings/ProviderDetailScreen.tsx'),
+    ]);
+
+    expect(settingsSource).toContain('export interface SettingsScreenHandle');
+    expect(settingsSource).toContain('handleBack: () => boolean;');
+    expect(settingsSource).toContain('resetNavigation: () => void;');
+    expect(settingsSource).toContain('useImperativeHandle(ref');
+    expect(settingsSource).toContain("setStack([{ key: 'main' }]);");
+
+    expect(appSource).toContain('useRef<SettingsScreenHandle>(null)');
+    expect(appSource).toContain('ref={settingsScreenRef}');
+    expect(appSource).toContain('settingsScreenRef.current?.handleBack()');
+    expect(appSource).toContain('settingsScreenRef.current?.resetNavigation()');
+    expect(appSource).toMatch(
+      /if \(settingsOpen\) \{[\s\S]*?settingsScreenRef\.current\?\.handleBack\(\)[\s\S]*?closeSettings\(\);[\s\S]*?return true;/
+    );
+    expect(providerDetailSource).toMatch(
+      /useEffect\(\(\) => \{[\s\S]*?setShowKey\(false\);[\s\S]*?\}, \[provider\.id\]\);/
+    );
+    expect(providerDetailSource).toContain('key={provider.id}');
+  });
+
   it('keeps the model picker above Android system navigation controls', async () => {
     const appSource = await source('App.tsx');
 
@@ -232,6 +289,38 @@ describe('Android mobile UI regressions', () => {
     expect(requestSource).toContain('maxOutputTokens: workspaceRef.current.costGuard.enabled');
   });
 
+  it('blocks provider changes and media refreshes across every active provider runtime', async () => {
+    const appSource = await source('App.tsx');
+    const idleGateSource = appSource.slice(
+      appSource.indexOf('function ensureProviderConfigurationIdle()'),
+      appSource.indexOf('function beginActiveRequest('),
+    );
+    const toggleProviderSource = appSource.slice(
+      appSource.indexOf('function toggleProviderEnabled('),
+      appSource.indexOf('function selectProvider('),
+    );
+    const refreshTaskSource = appSource.slice(
+      appSource.indexOf('async function refreshGenerationTask('),
+      appSource.indexOf('function refreshTaskCenterItem('),
+    );
+
+    expect(idleGateSource).toContain('activeRequestRef.current');
+    expect(idleGateSource).toContain('activeAudioOperationRef.current');
+    expect(idleGateSource).toContain('generationTaskControllersRef.current.size > 0');
+    expect(toggleProviderSource).toContain(
+      'if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle())'
+    );
+
+    const providerLookupIndex = refreshTaskSource.indexOf(
+      'workspaceRef.current.providers.find((item) => item.id === task.providerId)'
+    );
+    const disabledGateIndex = refreshTaskSource.indexOf('if (!isProviderEnabled(provider))');
+    const requestIndex = refreshTaskSource.indexOf('queryGenerationTask(provider, task, controller.signal)');
+    expect(providerLookupIndex).toBeGreaterThan(-1);
+    expect(disabledGateIndex).toBeGreaterThan(providerLookupIndex);
+    expect(requestIndex).toBeGreaterThan(disabledGateIndex);
+  });
+
   it('keeps v1.2 cross-feature state coherent under streaming, rebinding, and navigation', async () => {
     const [appSource, branchSource] = await Promise.all([
       source('App.tsx'),
@@ -341,6 +430,29 @@ describe('Android mobile UI regressions', () => {
     // Removing a model may clear a project default that pointed at it.
     expect(removeModelSource).toContain('defaultTarget');
     expect(removeModelSource).toContain('projects:');
+  });
+
+  it('keeps manual model task and capability overrides available after the settings redesign', async () => {
+    const [appSource, settingsSource, providerDetailSource] = await Promise.all([
+      source('App.tsx'),
+      source('src/ui/screens/SettingsScreen.tsx'),
+      source('src/ui/screens/settings/ProviderDetailScreen.tsx'),
+    ]);
+
+    expect(appSource).toContain('function setActiveModelTask(');
+    expect(appSource).toContain('function toggleActiveModelCapability(');
+    expect(providerDetailSource).toContain('testID="active-model-overrides-card"');
+    expect(providerDetailSource).toContain('>模型用途</Text>');
+    expect(providerDetailSource).toContain('能力覆盖');
+    expect(providerDetailSource).toContain('自动识别不准确时可手动覆盖');
+    expect(settingsSource).toContain('onSetActiveModelTask={props.onSetActiveModelTask}');
+    expect(settingsSource).toContain(
+      'onToggleActiveModelCapability={props.onToggleActiveModelCapability}'
+    );
+    expect(appSource).toContain('onSetActiveModelTask={setActiveModelTask}');
+    expect(appSource).toContain(
+      'onToggleActiveModelCapability={toggleActiveModelCapability}'
+    );
   });
 
   it('keeps request-based voice Android-only and disables background audio services', async () => {

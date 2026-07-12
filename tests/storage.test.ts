@@ -161,6 +161,23 @@ function workspaceWithTitle(title: string): AppWorkspace {
   };
 }
 
+function enabledRemoteMcp(providerId: string): PluginManifest {
+  return {
+    id: 'enabled-storage-mcp',
+    name: 'Enabled storage MCP',
+    version: '1.0.0',
+    type: 'remote-mcp',
+    permissions: ['network', 'tools'],
+    allowedTools: ['search'],
+    transport: 'streamable-http',
+    endpoint: 'https://mcp.example.com/mcp',
+    serverLabel: 'enabled_storage_mcp',
+    providerId,
+    approvalPolicy: 'always',
+    enabled: true,
+  };
+}
+
 describe('MCP storage contract boundaries', () => {
   it('accepts a 128-character tool name and rejects 129 characters, slash, and colon', () => {
     expect(normalizeMcpToolName('a'.repeat(128))).toBe('a'.repeat(128));
@@ -1972,15 +1989,103 @@ describe('versioned and ordered saves', () => {
     expect(loadedModel?.capabilities).not.toContain('reasoning');
   });
 
-  it('preserves a disabled provider across the v2 normalization boundary', async () => {
+  it('recovers an all-disabled snapshot without silently re-enabling remote MCP', async () => {
     const workspace = createDefaultWorkspace();
-    workspace.providers[0] = { ...workspace.providers[0], enabled: false };
-    const { loadWorkspace, saveWorkspace } = await subject();
+    const firstProvider = {
+      ...workspace.providers[0],
+      kind: 'openai-compatible' as const,
+      baseUrl: 'https://api.openai.com/v1',
+      enabled: false,
+    };
+    const secondProvider = { ...workspace.providers[1], enabled: false };
+    workspace.providers = [firstProvider, secondProvider];
+    workspace.activeProviderId = secondProvider.id;
+    workspace.plugins = [enabledRemoteMcp(firstProvider.id)];
+    mocks.values.set(WORKSPACE_KEY, JSON.stringify({
+      ...v4Envelope(workspace),
+      schemaVersion: 6,
+    }));
+    const { loadWorkspace } = await subject();
 
-    await saveWorkspace(workspace);
     const loaded = await loadWorkspace();
 
-    expect(loaded?.providers[0].enabled).toBe(false);
+    expect(loaded?.providers.filter((provider) => provider.enabled !== false)).toHaveLength(1);
+    expect(loaded?.providers[0]).toMatchObject({ id: firstProvider.id, enabled: true });
+    expect(loaded?.activeProviderId).toBe(firstProvider.id);
+    expect(loaded?.plugins[0]).toMatchObject({
+      id: 'enabled-storage-mcp',
+      enabled: false,
+    });
+  });
+
+  it('clears disabled-provider targets and disables its bound remote MCP during load', async () => {
+    const workspace = createDefaultWorkspace();
+    const disabledModel = {
+      id: 'disabled-provider-model',
+      name: 'Disabled provider model',
+      source: 'manual' as const,
+      task: 'chat' as const,
+      capabilities: ['text', 'speech-to-text', 'text-to-speech'] as const,
+    };
+    const enabledModel = {
+      id: 'enabled-provider-model',
+      name: 'Enabled provider model',
+      source: 'manual' as const,
+      task: 'chat' as const,
+      capabilities: ['text'] as const,
+    };
+    const disabledProvider = {
+      ...workspace.providers[0],
+      kind: 'openai-compatible' as const,
+      baseUrl: 'https://api.openai.com/v1',
+      enabled: false,
+      models: [{ ...disabledModel, capabilities: [...disabledModel.capabilities] }],
+    };
+    const enabledProvider = {
+      ...workspace.providers[1],
+      enabled: true,
+      models: [{ ...enabledModel, capabilities: [...enabledModel.capabilities] }],
+    };
+    const disabledTarget = { providerId: disabledProvider.id, modelId: disabledModel.id };
+    const enabledTarget = { providerId: enabledProvider.id, modelId: enabledModel.id };
+    workspace.providers = [disabledProvider, enabledProvider];
+    workspace.activeProviderId = disabledProvider.id;
+    workspace.activeModelIdByProvider = {
+      [disabledProvider.id]: disabledModel.id,
+      [enabledProvider.id]: enabledModel.id,
+    };
+    workspace.projects = workspace.projects.map((project) => ({
+      ...project,
+      defaultTarget: disabledTarget,
+    }));
+    workspace.comparisonEnabled = true;
+    workspace.comparisonTargets = [disabledTarget, enabledTarget];
+    workspace.voice = {
+      transcriptionTarget: disabledTarget,
+      speechTarget: disabledTarget,
+      speechVoice: 'alloy',
+      speechFormat: 'mp3',
+    };
+    workspace.plugins = [enabledRemoteMcp(disabledProvider.id)];
+    mocks.values.set(WORKSPACE_KEY, JSON.stringify({
+      ...v4Envelope(workspace),
+      schemaVersion: 6,
+    }));
+    const { loadWorkspace } = await subject();
+
+    const loaded = await loadWorkspace();
+
+    expect(loaded?.providers.find((provider) => provider.id === disabledProvider.id)?.enabled).toBe(false);
+    expect(loaded?.activeProviderId).toBe(enabledProvider.id);
+    expect(loaded?.projects[0].defaultTarget).toBeUndefined();
+    expect(loaded?.comparisonTargets).toEqual([enabledTarget]);
+    expect(loaded?.comparisonEnabled).toBe(false);
+    expect(loaded?.voice.transcriptionTarget).toBeUndefined();
+    expect(loaded?.voice.speechTarget).toBeUndefined();
+    expect(loaded?.plugins[0]).toMatchObject({
+      id: 'enabled-storage-mcp',
+      enabled: false,
+    });
   });
 
   it('preserves authoritative remote model task and capabilities across a restart', async () => {

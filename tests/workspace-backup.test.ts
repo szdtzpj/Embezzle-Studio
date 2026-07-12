@@ -570,6 +570,111 @@ describe('encrypted workspace backup round trip', () => {
     }
   }, 20_000);
 
+  it('round-trips a disabled provider without re-enabling it, while inheriting only its matching local API key', async () => {
+    const source = createDefaultWorkspace();
+    const current = createDefaultWorkspace();
+    const disabledModel: ProviderProfile['models'][number] = {
+      id: 'disabled-model',
+      capabilities: ['text'],
+      source: 'manual',
+    };
+    const enabledModel: ProviderProfile['models'][number] = {
+      id: 'enabled-model',
+      capabilities: ['text'],
+      source: 'manual',
+    };
+    const disabledProviderId = source.providers[0].id;
+    const enabledProviderId = source.providers[1].id;
+    const disabledTarget = { providerId: disabledProviderId, modelId: disabledModel.id };
+    const enabledTarget = { providerId: enabledProviderId, modelId: enabledModel.id };
+    source.providers[0] = {
+      ...source.providers[0],
+      enabled: false,
+      models: [disabledModel],
+    };
+    source.providers[1] = {
+      ...source.providers[1],
+      enabled: true,
+      models: [enabledModel],
+    };
+    source.activeProviderId = disabledProviderId;
+    source.activeModelIdByProvider = {
+      ...source.activeModelIdByProvider,
+      [disabledProviderId]: disabledModel.id,
+      [enabledProviderId]: enabledModel.id,
+    };
+    source.projects[0] = { ...source.projects[0], defaultTarget: disabledTarget };
+    source.comparisonEnabled = true;
+    source.comparisonTargets = [disabledTarget, enabledTarget];
+    source.voice = {
+      ...source.voice,
+      transcriptionTarget: disabledTarget,
+      speechTarget: disabledTarget,
+    };
+    current.providers[0] = {
+      ...current.providers[0],
+      apiKey: 'MATCHING-LOCAL-API-KEY',
+    };
+
+    const envelope = createWorkspaceBackupEnvelope(source, 1_700_000_000_000);
+    expect(envelope.workspace.providers.find((provider) => provider.id === disabledProviderId)?.enabled).toBe(false);
+    const encrypted = await exportEncryptedWorkspaceBackup(source, password, {
+      randomBytes: deterministicRandom(29),
+    });
+    const imported = await importEncryptedWorkspaceBackup(encrypted, password, current);
+
+    expect(imported.providers.find((provider) => provider.id === disabledProviderId)).toMatchObject({
+      enabled: false,
+      apiKey: 'MATCHING-LOCAL-API-KEY',
+    });
+    expect(imported.activeProviderId).toBe(enabledProviderId);
+    expect(imported.projects[0].defaultTarget).toBeUndefined();
+    expect(imported.comparisonTargets).toEqual([enabledTarget]);
+    expect(imported.comparisonEnabled).toBe(false);
+    expect(imported.voice.transcriptionTarget).toBeUndefined();
+    expect(imported.voice.speechTarget).toBeUndefined();
+  }, 20_000);
+
+  it('recovers one provider from an all-disabled backup without re-arming web search or remote MCP', async () => {
+    const source = createDefaultWorkspace();
+    source.providers = source.providers.map((provider) => ({ ...provider, enabled: false }));
+    source.webSearch = { ...source.webSearch, enabled: true };
+    source.plugins = [plugin({ enabled: true, providerId: source.providers[0].id })];
+
+    const encrypted = await exportEncryptedWorkspaceBackup(source, password, {
+      randomBytes: deterministicRandom(31),
+    });
+    const imported = await importEncryptedWorkspaceBackup(
+      encrypted,
+      password,
+      createDefaultWorkspace()
+    );
+
+    expect(imported.providers[0].enabled).toBe(true);
+    expect(imported.providers.slice(1).every((provider) => provider.enabled === false)).toBe(true);
+    expect(imported.activeProviderId).toBe(imported.providers[0].id);
+    expect(imported.webSearch.enabled).toBe(false);
+    expect(imported.plugins.filter((item) => item.type === 'remote-mcp')).toEqual([
+      expect.objectContaining({ id: 'plugin-shared', enabled: false }),
+    ]);
+  }, 20_000);
+
+  it('treats providers from a legacy backup without enabled fields as enabled', async () => {
+    const envelope = createWorkspaceBackupEnvelope(createDefaultWorkspace(), 1_700_000_000_000);
+    envelope.workspace.providers.forEach((provider) => {
+      delete provider.enabled;
+    });
+    const encrypted = await encryptPlainEnvelope(envelope);
+
+    const imported = await importEncryptedWorkspaceBackup(
+      encrypted,
+      password,
+      createDefaultWorkspace()
+    );
+
+    expect(imported.providers.every((provider) => provider.enabled === true)).toBe(true);
+  }, 20_000);
+
   it('does not bind a local API key or MCP authorization to a same-ID backup entry at a different endpoint', async () => {
     const source = populatedWorkspace();
     source.providers[0] = {

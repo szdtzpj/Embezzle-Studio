@@ -27,6 +27,33 @@ export const modelTaskLabel: Record<ModelTask, string> = {
   rerank: '重排',
 };
 
+/** Tasks that users can explicitly assign when provider metadata is incomplete. */
+export const configurableModelTasks: readonly ModelTask[] = Object.freeze([
+  'chat',
+  'image-generation',
+  'video-generation',
+  'audio-transcription',
+  'speech-generation',
+  'embedding',
+  'rerank',
+]);
+
+/** Capabilities that affect visible client features and can be safely overridden. */
+export const configurableModelCapabilities: ReadonlyArray<{
+  key: Capability;
+  label: string;
+}> = Object.freeze([
+  { key: 'image-input', label: '图片输入' },
+  { key: 'video-input', label: '视频输入' },
+  { key: 'file-input', label: '文件输入' },
+  { key: 'reasoning', label: '深度思考' },
+  { key: 'tool-calling', label: '工具调用' },
+  { key: 'web-search', label: '联网搜索' },
+  { key: 'speech-to-text', label: '语音转写' },
+  { key: 'text-to-speech', label: '语音合成' },
+  { key: 'mcp', label: 'MCP' },
+]);
+
 /** Short capability tags used on model rows (settings / pickers). */
 export const modelCapabilityTagLabel: Partial<Record<Capability, string>> = {
   'image-input': '视觉',
