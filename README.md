@@ -40,7 +40,7 @@
 ## 当前功能
 
 - 服务商配置：支持 OpenAI 兼容接口、火山方舟、百炼兼容模式、New API 中转站和自定义中转地址。`1.2.0` 的本地配置向导使用独立草稿检查服务商类型、Endpoint 与 Key 绑定；类型或规范化 Endpoint 改变时会先清除旧 Key、模型与候选，避免把凭据发送到新地址。百炼 Coding Plan/Token Plan 等不允许接入自定义应用的套餐端点会被阻断。
-- 主题与设置：`1.5.0` 候选加入跟随系统、浅色和深色三种主题并在本机持久化；设置页按账号、服务商、模型与应用信息重新分组，服务商详情可集中管理 Endpoint、Key、模型与启停状态。停用服务商现在是实际运行时边界：它不会再参与模型选择、重试、对比、语音或项目默认目标，且应用会阻止停用最后一个可用服务商。
+- 主题与设置：`1.5.0` 加入跟随系统、浅色和深色三种主题并在本机持久化；设置页按账号、服务商、模型与应用信息重新分组，服务商详情可集中管理 Endpoint、Key、模型与启停状态。停用服务商现在是实际运行时边界：它不会再参与模型选择、重试、对比、语音或项目默认目标，且应用会阻止停用最后一个可用服务商。
 - 模型获取：OpenAI/兼容服务商尝试模型列表接口；火山方舟只在精确官方数据面主机上尝试未列入官方 API 参考的兼容 `/models` 探测，失败或响应不兼容时回退到根据官方目录维护的本地精选候选，并始终支持手动添加 Model ID 或 Endpoint ID。
 - 模型选择：聊天页可按服务商查看已添加模型，并切换当前激活模型。能力矩阵把服务商/模型声明与客户端已经实现、测试过的协议能力分开显示，不会把目录标签当成可用适配器的证据；手动模型和中转模型仍可明确覆盖用途与能力，以便正确开放图片、视频、语音、附件、推理及 MCP 路由。
 - 对话协议：Chat Completions 默认流式输出；OpenAI Responses-only Pro 模型自动切换 `/responses` 非流式协议，并记录 Token 用量。
@@ -50,7 +50,7 @@
 - 参数调整：按服务商和模型只显示已适配的温度、top_p、惩罚参数及其真实范围；思考模式或固定参数模型会明确提示或隐藏无效控件，关闭后交给服务商默认值处理。
 - 多模态入口：按模型能力显示图片、视频和文件选择入口；图片可发送给视觉模型，百炼兼容模式支持有界的本地视频 `video_url` 输入，文件输入仅对显式具备 `file-input` 能力的 OpenAI 官方模型开放。另支持文本生图，以及带参考图片/视频的火山方舟视频任务提交和后续查询。
 - 媒体预览与导出：待发送图片显示为方形缩略图；对话中的视频使用 `expo-video` 原生控件在当前页播放并支持全屏。视频卡片把文件名与“保存/分享”操作放在独立操作区；Android 保存通过系统 Storage Access Framework 让用户选择目录，Web 使用浏览器下载，其它原生平台回退到系统分享。
-- Android 布局与切页：主聊天区和改名对话框使用键盘避让，Android 配置为 `resize`；聊天页在打开设置后保持挂载，设置页首次打开后复用，并限制远端候选模型的单批渲染量以降低切页和大列表压力。`1.5.0` 候选恢复 Android 控件/列表的静态按压回退，系统返回键会先退出设置子页再关闭设置，并在切换服务商时清理详情页临时状态。
+- Android 布局与切页：主聊天区和改名对话框使用键盘避让，Android 配置为 `resize`；聊天页在打开设置后保持挂载，设置页首次打开后复用，并限制远端候选模型的单批渲染量以降低切页和大列表压力。`1.5.0` 恢复 Android 控件/列表的静态按压回退，系统返回键会先退出设置子页再关闭设置，并在切换服务商时清理详情页临时状态。
 - 安全对话框：确认与提示请求按 FIFO 顺序处理，避免并发请求覆盖前一个未完成 Promise；长提示内容可在小屏幕上滚动，键盘弹出时仍可到达操作按钮。浅色/深色主题分别提供可读的警告、菜单、编辑器、媒体遮罩和工作台差异颜色。
 - 本地项目工作区：项目、项目指令、默认模型和会话归属都保存在本机；删除项目时会明确迁移其中会话，不依赖 Embezzle Studio 的同步服务。
 - 本地成果工作台：`1.3.0` 可把消息保存为项目成果，或新建 Markdown/纯文本/代码/JSON/HTML 成果；编辑会追加有界版本，旧版本恢复会生成新版本而不破坏后续历史，并支持有界行级差异和当前版本导出。HTML 以 `.html.txt`/`text/plain` 惰性导出，不执行脚本、代码或网络预览。
@@ -67,7 +67,7 @@
 
 ## 仍在完善
 
-当前稳定 Latest 已是 [`v1.4.0`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.4.0) / Android versionCode 10；它是 immutable、非 prerelease 且包含精确 3 个正式资产。现有 `1.2.0`、`1.3.0` 本机候选只属于各自开发阶段的历史证据；`1.4.0` 本机候选也必须与 Actions 正式 APK 分开核对。
+当前稳定 Latest 已是 [`v1.5.0`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.5.0) / Android versionCode 11；它是 immutable、非 prerelease 且包含精确 3 个正式资产。现有 `1.2.0`、`1.3.0`、`1.4.0` 和 `1.5.0` 本机候选只属于各自开发阶段的历史证据，必须与 Actions 正式 APK 分开核对。
 
 Embezzle Studio 不购买、转售、补贴或代理模型、搜索、语音、媒体或 MCP 能力，也不运行生产 API、MCP 网关、审批服务器、汇率服务、云同步、遥测后端或任务 worker。所有服务商与工具调用及费用都由用户配置的账号承担；本地费用护栏不做汇率换算，且其估算/尝试账本不能替代服务商账单。
 
@@ -158,7 +158,11 @@ Actions 正式 `Embezzle-Studio-v1.4.0-release.apk` 为 97,518,039 字节，SHA-
 
 最终工作树已重新完成干净 Expo prebuild、`clean assembleRelease --no-daemon` 与本机正式证书签名。未签名输入为 97,461,244 字节；最终候选位于 `D:\EmbezzleStudio-Releases\v1.5.0-candidate\Embezzle-Studio-v1.5.0-candidate-release.apk`，大小 97,595,863 字节，SHA-256 `2456bdb7de0405f283a1a4fd0fffd0994dbcb37dd06e502e2b4aae6cbf90941f`。`aapt`/Manifest 复核 `com.szdtzpj.embezzlestudio` / 1.5.0 / code 11、min/target 24/36、`allowBackup=false`、`adjustResize` 与有意 `RECORD_AUDIO`；CAMERA、`SYSTEM_ALERT_WINDOW`、`REQUEST_INSTALL_PACKAGES` 缺席。`apksigner`/zipalign 证明只有一个证书 SHA-256 为 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02` 的 signer，v2/v3 与对齐均通过。
 
-最终重建后的 D 盘 APK 仍只会是本机发布前证据，不是 GitHub 正式资产，也不能提前代表尚未创建的 `v1.5.0` tag、Release 或 production Android/Pages Actions。公开 stable Latest 仍是 `v1.4.0`；`adb devices -l` 仍为空，因此尚无本次候选的连接真机验收，真实服务商账号计费与 MCP 验收也仍属外部边界。完整现状见 [`1.5.0` 发布前续作断点](./docs/CONTINUATION_CHECKPOINT_2026-07-12_V1.5.md)。
+PR [#17](https://github.com/szdtzpj/Embezzle-Studio/pull/17) 的精确 head 为 `a5475a11ca5947ea255865f174f5ac0569d8fb07`，合并提交、发布提交与 annotated tag `v1.5.0` 的 peeled commit 均为 `29409b13cc1599ba543f937c9ba5fc8b85cc46f7`。PR Quality [`29195544004`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29195544004)、`main` Quality [`29195629389`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29195629389)、初始 Pages [`29195629374`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29195629374)、production Android [`29195736374`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29195736374) 和发布后 Pages [`29196365268`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29196365268) 均成功。正式 Release 是 stable Latest、immutable、非 prerelease，包含精确 3 个资产；Release attestation 与全部 3 个 asset attestation 均通过。
+
+Actions 正式 `Embezzle-Studio-v1.5.0-release.apk` 为 97,595,863 字节，SHA-256 `bc1a3c434d00b5f4d99be29f4f1b5327d85e2efe9f7bd98286c8ce7b5614f622`，与同尺寸但 SHA-256 为 `2456bdb7de0405f283a1a4fd0fffd0994dbcb37dd06e502e2b4aae6cbf90941f` 的本机候选不是同一字节；正式三项资产保存在 `D:\EmbezzleStudio-Releases\v1.5.0`。`aapt`/Manifest 复核正式 APK 的包名/版本/code 为 `com.szdtzpj.embezzlestudio` / 1.5.0 / 11、min/target 24/36、`allowBackup=false`、`adjustResize` 与有意 `RECORD_AUDIO`，且无 CAMERA、`SYSTEM_ALERT_WINDOW`、`REQUEST_INSTALL_PACKAGES`；`apksigner`/zipalign 证明只有一个预期 signer，证书 SHA-256 为 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`，v2/v3 与对齐均通过。
+
+发布后 Pages manifest、`release.html` 与 APK HEAD 均匿名返回 HTTP 200；完整公网 APK 已下载到 `D:\EmbezzleStudio-Releases\v1.5.0-pages-public-verify-20260712-223505`，大小与正式 SHA-256 完全一致。`adb devices -l` 仍为空，因此没有本次正式 Actions APK 的连接真机验收；真实 OpenAI/MCP、火山方舟和阿里百炼账号也仍待验收。完整本机与发布证据边界见 [`1.5.0` 正式发布续作断点](./docs/CONTINUATION_CHECKPOINT_2026-07-12_V1.5.md)。
 
 当前仓库是公开的个人账户仓库，已经创建 `Settings -> Environments -> android-release`、把 deployment branch policy 限制为 `main`，并配置了下列五个 Environment secrets；以下表格和命令同时作为环境重建或密钥轮换手册。个人账户仓库不能把 collaborator 提升为另一个 owner；`BlueOcean223` 已取得平台可提供的最高 collaborator 权限 `write`，并加入 main update ruleset 的 `pull_request` bypass，因此可在必需 Quality 检查通过后合并 PR。独立的 `Protect main` ruleset 仍无 bypass，并继续阻止直接更新、删除与 force-push；正式 tag 创建和生产签名仍只允许 owner。不要把 `BlueOcean223` 描述为 owner，也不要把这些规则描述成等价的双人审批。
 
