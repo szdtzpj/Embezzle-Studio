@@ -170,6 +170,20 @@ describe('Android production release workflow', () => {
     expect(validation).toContain('if [[ "$actual_head" != "$EXPECTED_TAG_COMMIT" ]]');
   });
 
+  it('enforces the intentional Android permission contract for voice input', () => {
+    const permissionCheck = runScript(
+      'build',
+      'Verify packaged identity, SDK levels, and permission contract'
+    );
+
+    expect(permissionCheck).toContain('android.permission.SYSTEM_ALERT_WINDOW');
+    expect(permissionCheck).toContain('android.permission.CAMERA');
+    expect(permissionCheck).toContain('if ! grep -Fq "android.permission.RECORD_AUDIO"');
+    expect(permissionCheck).not.toMatch(
+      /for forbidden_permission in[\s\S]*android\.permission\.RECORD_AUDIO[\s\S]*; do/
+    );
+  });
+
   it('keeps signing secret access separate from repository permissions', () => {
     const sign = job('sign');
     const ownerGate = runScript('sign', 'Require owner-controlled signing');

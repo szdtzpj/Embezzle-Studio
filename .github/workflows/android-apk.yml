@@ -238,7 +238,7 @@ jobs:
             exit 1
           }
 
-      - name: Verify packaged identity, SDK levels, and forbidden permissions
+      - name: Verify packaged identity, SDK levels, and permission contract
         shell: bash
         run: |
           set -euo pipefail
@@ -283,13 +283,17 @@ jobs:
 
           for forbidden_permission in \
             android.permission.SYSTEM_ALERT_WINDOW \
-            android.permission.CAMERA \
-            android.permission.RECORD_AUDIO; do
+            android.permission.CAMERA; do
             if grep -Fq "$forbidden_permission" <<<"$permissions"; then
               echo "::error::Forbidden permission $forbidden_permission is present in the packaged manifest."
               exit 1
             fi
           done
+
+          if ! grep -Fq "android.permission.RECORD_AUDIO" <<<"$permissions"; then
+            echo "::error::Voice input is enabled but RECORD_AUDIO is missing from the packaged manifest."
+            exit 1
+          fi
 
       - name: Upload unsigned APK for isolated signing
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -1,30 +1,77 @@
-# Embezzle Studio
+<p align="center">
+  <img src="./assets/brand-mark.png" width="280" alt="Embezzle Studio Logo" />
+</p>
 
-[简体中文](./README.md) | [English](./README.en.md)
+<h1 align="center">Embezzle Studio</h1>
 
-Embezzle Studio 是一个面向 Android 的移动端 AI 对话客户端。项目还在早期开发中，当前目标是把常用的 OpenAI 兼容接口、个人中转站和国内模型服务商集中到一个可配置的手机应用里，方便在移动端进行模型选择、对话和简单的多模态调用。
+<p align="center">
+  <strong>把你的模型、资料与创作成果，装进一个由你掌控的移动工作台。</strong>
+</p>
+
+<p align="center">
+  面向 Android 的 BYOK 多模型对话、创作与本地知识工作台
+</p>
+
+<p align="center">
+  <a href="https://szdtzpj.github.io/Embezzle-Studio/release.html"><img alt="Latest Release" src="https://img.shields.io/github/v/release/szdtzpj/Embezzle-Studio?display_name=tag&amp;sort=semver&amp;style=for-the-badge&amp;color=7C3AED" /></a>
+  <a href="https://github.com/szdtzpj/Embezzle-Studio/actions/workflows/quality.yml"><img alt="Quality" src="https://img.shields.io/github/actions/workflow/status/szdtzpj/Embezzle-Studio/quality.yml?branch=main&amp;style=for-the-badge&amp;label=quality" /></a>
+  <img alt="Android 24+" src="https://img.shields.io/badge/Android-24%2B-3DDC84?style=for-the-badge&amp;logo=android&amp;logoColor=white" />
+  <img alt="BYOK" src="https://img.shields.io/badge/BYOK-user--funded-0EA5E9?style=for-the-badge" />
+</p>
+
+<p align="center">
+  <a href="https://szdtzpj.github.io/Embezzle-Studio/release.html"><strong>下载 Android 正式版</strong></a>
+  · <a href="./docs/local-knowledge-workbench.md">本地知识工作台</a>
+  · <a href="./docs/product-architecture.md">架构与安全边界</a>
+  · <a href="./README.en.md">English</a>
+</p>
+
+<table>
+  <tr>
+    <td width="50%" valign="top"><strong>🔑 用户自有服务商</strong><br /><sub>模型、搜索、语音与媒体调用全部使用用户自己的 Endpoint、API Key、额度与账单。</sub></td>
+    <td width="50%" valign="top"><strong>🛡️ Local-first</strong><br /><sub>项目、对话、成果、资料、检索与费用估算保存在本机，不依赖 Embezzle Studio 服务器。</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><strong>⚡ 多模型统一工作台</strong><br /><sub>集中管理 OpenAI 兼容接口、火山方舟、阿里百炼和个人中转，并支持显式多模型对比。</sub></td>
+    <td width="50%" valign="top"><strong>📚 从对话到成果</strong><br /><sub>把回答沉淀为可版本化成果与项目资料，在发送前检查实际上下文和 Token 风险。</sub></td>
+  </tr>
+</table>
 
 ## 当前功能
 
-- 服务商配置：支持 OpenAI 兼容接口、火山方舟、百炼兼容模式、New API 中转站和自定义中转地址。
+- 服务商配置：支持 OpenAI 兼容接口、火山方舟、百炼兼容模式、New API 中转站和自定义中转地址。`1.2.0` 的本地配置向导使用独立草稿检查服务商类型、Endpoint 与 Key 绑定；类型或规范化 Endpoint 改变时会先清除旧 Key、模型与候选，避免把凭据发送到新地址。百炼 Coding Plan/Token Plan 等不允许接入自定义应用的套餐端点会被阻断。
 - 模型获取：OpenAI/兼容服务商尝试模型列表接口；火山方舟只在精确官方数据面主机上尝试未列入官方 API 参考的兼容 `/models` 探测，失败或响应不兼容时回退到根据官方目录维护的本地精选候选，并始终支持手动添加 Model ID 或 Endpoint ID。
-- 模型选择：聊天页可按服务商查看已添加模型，并切换当前激活模型。
+- 模型选择：聊天页可按服务商查看已添加模型，并切换当前激活模型。能力矩阵把服务商/模型声明与客户端已经实现、测试过的协议能力分开显示，不会把目录标签当成可用适配器的证据。
 - 对话协议：Chat Completions 默认流式输出；OpenAI Responses-only Pro 模型自动切换 `/responses` 非流式协议，并记录 Token 用量。
+- 多模型同问：可选择 2–4 个用户服务商模型并行回答；整组共用停止控制，单个失败不丢弃其它结果，后续对话只携带用户选中的一个候选。界面会在发送前明确本次将产生多少次独立服务商调用。
+- 可信联网搜索：使用用户自己的 Key 调用 OpenAI、火山方舟或阿里百炼官方 Responses 搜索协议；只有响应包含搜索调用、有效引用或百炼搜索计数证据时才标记为已联网，并把 HTTPS 来源展示为可点击链接。
 - 思考设置：按精确模型系列保存思考强度，区分 `off`、`none`、`minimal`、`xhigh`、`max`，并分别映射 OpenAI、火山方舟和百炼协议。
 - 参数调整：按服务商和模型只显示已适配的温度、top_p、惩罚参数及其真实范围；思考模式或固定参数模型会明确提示或隐藏无效控件，关闭后交给服务商默认值处理。
 - 多模态入口：按模型能力显示图片、视频和文件选择入口；图片可发送给视觉模型，百炼兼容模式支持有界的本地视频 `video_url` 输入，文件输入仅对显式具备 `file-input` 能力的 OpenAI 官方模型开放。另支持文本生图，以及带参考图片/视频的火山方舟视频任务提交和后续查询。
 - 媒体预览与导出：待发送图片显示为方形缩略图；对话中的视频使用 `expo-video` 原生控件在当前页播放并支持全屏。视频卡片把文件名与“保存/分享”操作放在独立操作区；Android 保存通过系统 Storage Access Framework 让用户选择目录，Web 使用浏览器下载，其它原生平台回退到系统分享。
 - Android 布局与切页：主聊天区和改名对话框使用键盘避让，Android 配置为 `resize`；聊天页在打开设置后保持挂载，设置页首次打开后复用，并限制远端候选模型的单批渲染量以降低切页和大列表压力。
-- 对话记录：本地保存历史会话，支持搜索用户和模型回复内容，并支持置顶、改名、分享、删除。
-- 消息操作：支持原生/网页复制、分享、停止生成、保留流式部分内容、重新生成、编辑和按因果分支删除。
+- 本地项目工作区：项目、项目指令、默认模型和会话归属都保存在本机；删除项目时会明确迁移其中会话，不依赖 Embezzle Studio 的同步服务。
+- 本地成果工作台：`1.3.0` 可把消息保存为项目成果，或新建 Markdown/纯文本/代码/JSON/HTML 成果；编辑会追加有界版本，旧版本恢复会生成新版本而不破坏后续历史，并支持有界行级差异和当前版本导出。HTML 以 `.html.txt`/`text/plain` 惰性导出，不执行脚本、代码或网络预览。
+- 项目资料与本地检索：可手写资料、从消息/成果保存快照，或导入受支持的纯文本/代码文件；项目内检索和分块均在本机有界完成。当前不解析 PDF/Word/Excel/PowerPoint/OpenDocument，也不声称这是向量 RAG、自动记忆或云端知识库。
+- 显式上下文控制：资料只在当前会话明确勾选后才可注入聊天请求；检查器展示保守文本 Token 估计、实际纳入/裁剪/排除/置顶消息、附件不确定性与资料纳入/省略状态。比较模型共享最小窗口的一份上下文；图片/视频生成只发送最新提示词。压缩按钮只生成待审阅草稿，不自动扣费。
+- 对话记录与全局搜索：本地保存历史会话，支持置顶、改名、分享、删除，以及对项目、模板、会话和消息做有长度/文档数/结果数上限的字面量全局搜索；搜索内容不会发送给服务商。
+- 消息操作与对话分支：支持原生/网页复制、分享、停止生成、保留流式部分内容、重新生成、编辑、按因果分支删除，以及从任意消息克隆本地对话分支。分支重新生成消息/对比组 ID，并用 canonical `originMessageId` 在用量分析和任务中心去重，避免把同一历史事件重复累计。
+- 本地生产力与费用护栏：提示词/角色模板、跨对话媒体任务中心、Token/延迟聚合、用户自填价格估算和费用护栏均在本机完成。护栏可限制输出 Token、每日请求次数、对比目标数并确认潜在多次收费；CNY/USD 阈值只依据当天已完成请求的本地已知累计，在累计达到阈值后提醒/阻断下一次请求，不预测当前请求是否跨线。本地 attempt ledger 区分已知估算与未知费用，未知费用绝不按 0 处理，也不冒充服务商真实账单。
+- 请求式语音：Android 可用用户自己的 OpenAI 或阿里百炼账号完成录音转写与回答朗读；转写只写入草稿、不自动发送，朗读音频先下载到本机缓存并明确标识为 AI 合成语音。火山语音因使用独立 AppID/Token 协议而不会错误复用 Ark Key。
+- 加密备份与 MCP 安全配置：配置/文字对话/模板可做带密码的本地认证加密导出；专用配置字段中的 API Key/MCP 授权、媒体文件和本机费用尝试账本 `providerUsageEvents` 不进入外部导出备份。普通对话、提示词、模板和错误文字会按原样备份，请勿把密钥粘贴到这些文本中。Android 关闭系统自动应用备份，跨设备迁移应使用显式认证加密导出；`1.2.0` 历史候选和 `1.3.0` 最终本机候选均已独立复核 `android:allowBackup="false"`。远程 MCP 配置默认关闭、授权前展示权限，实际工具执行在逐次审批闭环完成前保持 fail-closed。
 - 更新检查：从固定的公共 Pages 更新清单检查版本和已校验 APK 元数据，并跳转到受信任的发布页面；应用本身不会伪装成 APK 校验器或安装器。
 - 本地存储：Android API Key 使用 SecureStore；Web API Key 只保留在当前标签页的 `sessionStorage`/内存中，并会迁移清除旧版持久化值。工作区使用带版本和备份的 AsyncStorage；原生附件复制到应用文件目录，Web 附件以 Blob 存入 IndexedDB，避免把大型 Base64 写进工作区 JSON。
 
 ## 仍在完善
 
+当前待发布版本为 `1.3.0` / Android versionCode 9，并已有本机验证候选。在精确 tag、受保护 Android 工作流、Immutable Release 和 Pages 下载链全部完成前，公开稳定版仍是 `v1.0.6`；现有 `1.2.0` 本机候选只属于上一开发阶段的历史证据，不能当作 `1.3.0` APK，也不能与公开 Release 资产混用。
+
+Embezzle Studio 不购买、转售、补贴或代理模型、搜索、语音和媒体能力，也不运行生产 API、汇率服务、云同步、遥测后端或任务 worker。所有服务商调用和费用都由用户配置的账号承担；本地费用护栏不做汇率换算，且其估算/尝试账本不能替代服务商账单。
+
 - 对话视频附件目前只为百炼兼容模式实现 `video_url` 传输；其他服务商仍需各自的上传、转码或引用协议适配。
 - 用户已在一台 Android 真机上确认键盘避让、Seedance 预览/下载、图片预览尺寸和设置/聊天切换的主路径解决；更多机型、系统目录取消/失败/空间不足、远程媒体过期和长时间压力矩阵仍需验收。Web 回归不能替代这些扩展原生验证。
-- MCP、插件系统和联网搜索服务商还没有作为稳定功能接入。
+- MCP 远程配置和权限确认已接入，但真实工具调用/审批响应循环尚未开放；百炼 MCP 缺少同等逐次审批契约时尤其不会启用写工具。
+- 联网搜索与语音的协议和解析已有自动化测试，但用户账号是否开通对应付费产品、真实搜索计费证据、麦克风/播放和长时间并发仍需代表性账号与 Android 真机验收。
 - OpenAI 官方接口不会返回原始隐藏思考链；应用只能展示接口返回的思考摘要、reasoning_content 或 Token 用量。
 - Android 安装包构建需要本机 Android 工具链，或通过 CI/EAS 等方式构建。
 
@@ -44,6 +91,8 @@ Embezzle Studio 是一个面向 Android 的移动端 AI 对话客户端。项目
 - React Native Reanimated
 - React Native Gesture Handler
 - Expo Video
+- Expo Audio
+- Expo Crypto + Noble Ciphers/Hashes
 - AsyncStorage
 - SecureStore
 
@@ -80,6 +129,14 @@ Pull Request 和 `main` 分支推送会触发 `.github/workflows/quality.yml`。
 
 发布前的本地 production-signed candidate 保留在 `D:\EmbezzleStudio-Releases\v1.0.6-candidate`，用于证明最终源码和正式证书在本机工具链下也可通过；它不是公开资产。GitHub 正式三项资产已下载到 `D:\EmbezzleStudio-Releases\v1.0.6`，其中 APK 的包名为 `com.szdtzpj.embezzlestudio`、版本 `1.0.6`/versionCode 6、minSdk 24/targetSdk 36；单一正式签名者、v2/v3 和 zipalign 通过，且没有 overlay、camera 或 microphone 权限。用户在 Android 真机上确认此前四个问题的主路径解决，并随后授权当前版本上线；前者属于用户验收，后者不等同于本次会话连接设备产生的最终 APK 测试日志。当前 `adb devices -l` 仍为空，因此新增安全区、桌面/主题图标、启动页、原生动画，以及额外机型、SAF 取消/失败/空间不足、远端媒体过期和长时间压力矩阵仍待独立验证。
 
+历史开发版 `1.2.0` / versionCode 8 已完成本机质量门、Web 导出与 390×844 浏览器回归、Expo Doctor 20/20、3 份 workflow YAML、35 个 Bash 块、干净 Android prebuild/Release 构建和正式证书候选签名。候选 APK 位于 `D:\EmbezzleStudio-Releases\v1.2.0-candidate\Embezzle-Studio-v1.2.0-candidate-release.apk`，97,313,239 字节，SHA-256 `872f32a48320f2a20dadee6fc0f699668666d067a60e546a19467ed922082da0`；`aapt`/打包 Manifest 证明版本、SDK、`RECORD_AUDIO` 与 `allowBackup=false`，CAMERA/overlay 缺席，`apksigner` 证明单一预期正式证书、v2/v3 和 zipalign。它仍是上一源码阶段的本地候选，不是 `1.3.0` 证据、GitHub Release 或公开 APK。
+
+`1.3.0` 最终本机质量门已通过：`npm.cmd run check` 为 38 个测试文件 / 634 个测试，TypeScript/ESLint 干净；Web export 为 3,259 modules / 7.4 MB。全新 390×844 导出 Web 会话验证 HTML `.html.txt` 惰性导出与内容、成果版本历史、成果转资料、有界本地搜索、显式资料选择实际从 0 变为 1，以及上下文压缩只生成草稿而不发送；console 0 error / 0 warning，且没有非静态请求。`expo install --check`、Expo Doctor 20/20、3 份 YAML、35 个 Bash `bash -n`、16 个官方 Action 完整 SHA、diff/密钥边界检查均通过。最终审计还覆盖保守 Unicode/emoji Token 门槛、ID/Unicode 往返、聚合存储预算 fail-closed、备份大小/Endpoint 密钥拒绝和原子导入。
+
+干净 prebuild、`clean assembleRelease` 与正式证书本机签名通过。候选 APK 位于 `D:\EmbezzleStudio-Releases\v1.3.0-candidate\Embezzle-Studio-v1.3.0-candidate-release.apk`，97,448,407 字节，SHA-256 `c95dafe6e6eb77f3a1a4c7504c6ad05c27218b45972de2e247db264ec4c777d4`。包名/版本/code 为 `com.szdtzpj.embezzlestudio` / 1.3.0 / 9，min/target 24/36，`allowBackup=false`，有意 `RECORD_AUDIO`，无 CAMERA/`SYSTEM_ALERT_WINDOW`；只有一个预期正式签名者，证书 SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`，v2/v3 和 zipalign 通过。
+
+`adb devices -l` 为空，因此本轮没有 Android 真机或真实服务商账号/计费验收。本机候选验证记录建立时，`1.3.0` 尚未 tag、上传、创建 GitHub Release、更新 Pages 或公开；后续公网状态请以顶部动态版本徽章和[可信下载页](https://szdtzpj.github.io/Embezzle-Studio/release.html)为准。详细能力与安全边界见[本地知识与成果工作台](./docs/local-knowledge-workbench.md)，完整本机证据与外部边界见[`1.3.0` 续作断点](./docs/CONTINUATION_CHECKPOINT_2026-07-12_V1.3.md)。
+
 当前仓库已经创建 `Settings -> Environments -> android-release`、把 deployment branch policy 限制为 `main`，并配置了下列五个 Environment secrets；以下表格和命令同时作为环境重建或密钥轮换手册。若仓库/组织方案支持 deployment protection rules，还应启用 required reviewers 和 `Prevent self-review`。[GitHub Environments 官方限制](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)说明：Free、Pro 或 Team 方案的 required reviewers 只可用于公开仓库；私有仓库的 Environment secrets 和 deployment branches/tags 至少需要 Pro/Team，保持私有并获得 required reviewers 则需要 Enterprise。个人私有仓库的直接 collaborator 也没有可降级的 read 角色；当前按维护者决定，`BlueOcean223` 保留为明确受信任的 write collaborator，并接受没有双人审批的剩余风险。不要把“仅允许 `main` + owner workflow gate”描述成等价的双人审批。
 
 | Secret | 内容 |
@@ -112,7 +169,7 @@ keytool -list -v -keystore $keystore -alias embezzle-studio | Select-String 'SHA
 
 1. 同步更新 `app.json` 的 `expo.version` 和递增的 `android.versionCode`、`package.json`/`package-lock.json` 的版本，以及 `src/data/appInfo.ts` 的版本。
 2. 在本地通过与 CI 相同的质量检查，通过 Pull Request 合并到 `main`，再等待该合并提交的 Quality 与 push-triggered Pages 工作流都成功。
-3. 暂停其它 `main` 合并和新版本 Release；从最新 `origin/main` 的精确提交创建并推送与应用版本一致的 tag，例如下一版本 `v1.0.7`。
+3. 暂停其它 `main` 合并和新版本 Release；从最新 `origin/main` 的精确提交创建并推送与应用版本一致的 tag，例如当前开发版本 `v1.3.0`。
 4. 确认仓库已启用 Immutable Releases，由 `szdtzpj` 创建同名、非 prerelease 的空 draft Release，再从默认分支 `main` 手动运行 Android 工作流；不要提前发布空 Release。
 5. 工作流会检出与当前 `origin/main` 完全相同的 tag 提交，生成未签名 APK，使用正式 keystore 签名，并在冻结前后重复核对 tag/main 提交以及每个 GitHub asset 的 digest、状态与 uploader，然后才把 draft 发布为 latest immutable Release。等该工作流、自动触发的 Pages 工作流、Release attestation 和公开 APK 字节校验都成功后，才结束发布冻结。
 
@@ -121,11 +178,11 @@ keytool -list -v -keystore $keystore -alias embezzle-studio | Select-String 'SHA
 ```powershell
 git fetch origin
 $mergeSha = git rev-parse origin/main
-git tag -a v1.0.7 $mergeSha -m "Embezzle Studio v1.0.7"
-git push origin v1.0.7
+git tag -a v1.3.0 $mergeSha -m "Embezzle Studio v1.3.0"
+git push origin v1.3.0
 gh api --method PUT repos/szdtzpj/Embezzle-Studio/immutable-releases
-gh release create v1.0.7 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.0.7" --notes "Android production release v1.0.7."
-gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.0.7
+gh release create v1.3.0 --repo szdtzpj/Embezzle-Studio --verify-tag --draft --title "Embezzle Studio v1.3.0" --notes "Android production release v1.3.0."
+gh workflow run android-apk.yml --repo szdtzpj/Embezzle-Studio --ref main -f release_tag=v1.3.0
 ```
 
 Release 标题、正文与发布时间会被复制到公开 Pages 清单和下载页。创建 draft 前必须把这些文字当作公开内容审阅，不得包含私有仓库、账号、客户或密钥信息；不要未经检查直接使用自动生成的 release notes。
@@ -142,4 +199,5 @@ GitHub Release 的多个资产上传不是事务操作。工作流仅在 owner-a
 
 - [Product and Architecture](./docs/product-architecture.md)
 - [Provider Protocol Matrix](./docs/provider-protocols.md)
+- [BYOK Productivity Suite](./docs/byok-productivity-suite.md)
 - [Roadmap](./docs/roadmap.md)

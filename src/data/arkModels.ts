@@ -170,7 +170,7 @@ export function isArkStaticDoubaoModelId(modelId: string): boolean {
 
 export function isVolcengineArkDataPlaneHost(baseUrl: string): boolean {
   try {
-    const host = new URL(baseUrl).hostname.toLowerCase();
+    const host = new URL(baseUrl).hostname.toLowerCase().replace(/\.+$/, '');
     return host === 'ark.cn-beijing.volces.com' || host === 'ark.cn-beijing.volcengineapi.com';
   } catch {
     return false;

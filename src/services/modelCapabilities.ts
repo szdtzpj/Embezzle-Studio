@@ -76,6 +76,8 @@ const capabilityOrder: Capability[] = [
   'web-search',
   'image-generation',
   'video-generation',
+  'speech-to-text',
+  'text-to-speech',
   'embedding',
   'rerank',
   'streaming',
@@ -162,6 +164,8 @@ const imageGenerationKeywords = [
 ];
 const embeddingKeywords = ['embedding', 'embeddings', 'text-embedding', 'embed', 'bge-m3', 'm3e', 'jina-embeddings'];
 const rerankKeywords = ['rerank', 'reranker', 're-rank', 'bge-reranker'];
+const speechToTextKeywords = ['speech-to-text', 'transcribe', 'transcription', 'whisper', 'asr'];
+const textToSpeechKeywords = ['text-to-speech', 'speech-generation', 'tts'];
 const reasoningKeywords = [
   'reasoning',
   'reasoner',
@@ -581,6 +585,12 @@ function addExternalCapability(caps: Set<Capability>, raw: string): void {
   if (value.includes('video-generation')) {
     add(caps, 'video-generation');
   }
+  if (value.includes('speech-to-text') || value.includes('transcription')) {
+    add(caps, 'speech-to-text');
+  }
+  if (value.includes('text-to-speech') || value.includes('speech-generation')) {
+    add(caps, 'text-to-speech');
+  }
   if (value.includes('embedding')) {
     add(caps, 'embedding');
   }
@@ -754,8 +764,16 @@ function addCapabilitiesFromModelId(caps: Set<Capability>, provider: ProviderPro
   if (includesAny(text, rerankKeywords)) add(caps, 'rerank');
   if (includesAny(text, imageGenerationKeywords)) add(caps, 'image-generation');
   if (includesAny(text, videoGenerationKeywords)) add(caps, 'video-generation');
+  if (includesAny(text, speechToTextKeywords)) add(caps, 'speech-to-text');
+  if (includesAny(text, textToSpeechKeywords)) add(caps, 'text-to-speech');
 
-  const isGenerationOrVector = caps.has('image-generation') || caps.has('video-generation') || caps.has('embedding') || caps.has('rerank');
+  const isGenerationOrVector =
+    caps.has('image-generation') ||
+    caps.has('video-generation') ||
+    caps.has('speech-to-text') ||
+    caps.has('text-to-speech') ||
+    caps.has('embedding') ||
+    caps.has('rerank');
 
   if (!isGenerationOrVector && includesAny(text, reasoningKeywords)) add(caps, 'reasoning');
   if (
@@ -848,6 +866,8 @@ export function inferModelTask(model: Pick<ModelInfo, 'id' | 'name' | 'task' | '
   const text = typeof model === 'string' ? normalizedModelId(model) : modelSearchText(model);
   const capabilities = typeof model === 'string' ? [] : model.capabilities;
 
+  if (capabilities.includes('speech-to-text') || includesAny(text, speechToTextKeywords)) return 'audio-transcription';
+  if (capabilities.includes('text-to-speech') || includesAny(text, textToSpeechKeywords)) return 'speech-generation';
   if (capabilities.includes('image-generation') || includesAny(text, imageGenerationKeywords)) return 'image-generation';
   if (capabilities.includes('video-generation') || includesAny(text, videoGenerationKeywords)) return 'video-generation';
   if (capabilities.includes('embedding') || includesAny(text, embeddingKeywords)) return 'embedding';

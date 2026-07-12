@@ -29,6 +29,13 @@ import {
   openAiResponsesLimits,
   parseOpenAiResponsesResponse,
 } from './openAiResponses';
+import {
+  assertProviderWebSearchMessagesSupported,
+  buildProviderWebSearchRequest,
+  parseProviderWebSearchResponse,
+  resolveProviderWebSearchProtocol,
+  type OpenAiWebSearchContextSize,
+} from './providerWebSearch';
 
 interface ChatCompletionArgs {
   provider: ProviderProfile;
@@ -37,7 +44,12 @@ interface ChatCompletionArgs {
   messages: ChatMessage[];
   reasoningEffort: ReasoningEffort;
   parameterSettings?: ModelParameterSettings;
+  maxOutputTokens?: number;
   onStreamUpdate?: (update: ChatStreamUpdate) => void;
+  webSearch?: {
+    enabled: boolean;
+    searchContextSize: OpenAiWebSearchContextSize;
+  };
   signal?: AbortSignal;
 }
 
@@ -85,6 +97,16 @@ const maxStreamOutputCharacters = 2_000_000;
 const bailianMaxInlineVideoDataUrlBytes = 10 * 1024 * 1024;
 const responseAbortCleanups = new WeakMap<Response, () => void>();
 
+interface WebDevelopmentProxyRuntime {
+  platform?: string;
+  development?: boolean;
+  explicitlyEnabled?: boolean;
+  location?: {
+    protocol: string;
+    hostname: string;
+  };
+}
+
 function createAbortError(message = '请求已取消。'): Error {
   const error = new Error(message);
   error.name = 'AbortError';
@@ -96,8 +118,26 @@ export function isAbortError(error: unknown): boolean {
 }
 
 function isLoopbackHostname(hostname: string): boolean {
-  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
   return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
+}
+
+export function isWebDevelopmentProxyAllowed({
+  platform = Platform.OS,
+  development = typeof __DEV__ !== 'undefined' && __DEV__ === true,
+  explicitlyEnabled = process.env.EXPO_PUBLIC_ENABLE_WEB_DEV_PROXY === '1',
+  location = typeof window !== 'undefined'
+    ? { protocol: window.location.protocol, hostname: window.location.hostname }
+    : undefined,
+}: WebDevelopmentProxyRuntime = {}): boolean {
+  return Boolean(
+    platform === 'web' &&
+    development &&
+    explicitlyEnabled &&
+    location &&
+    (location.protocol === 'http:' || location.protocol === 'https:') &&
+    isLoopbackHostname(location.hostname)
+  );
 }
 
 function parseProviderBaseUrl(rawBaseUrl: string): URL {
@@ -237,7 +277,7 @@ async function readJsonResponse<T>(response: Response, requestUrl: string, label
 
   if (looksLikeHtmlResponse(body, contentType)) {
     throw new Error(
-      `${label}返回的是 HTML 页面，不是 JSON。当前请求地址：${requestUrl}。请确认 Base URL 是 OpenAI/New API 兼容接口地址，例如 https://new-api.zxzt123.com/v1；如果只填主站域名，服务端通常会返回管理后台页面。`
+      `${label}返回的是 HTML 页面，不是 JSON。当前请求地址：${requestUrl}。请确认 Base URL 是 OpenAI/New API 兼容接口地址，例如 https://your-relay.example.com/v1；如果只填主站域名，服务端通常会返回管理后台页面。`
     );
   }
 
@@ -292,6 +332,11 @@ async function providerFetch(
     if (Platform.OS !== 'web') {
       response = await fetch(url, { ...init, signal: controller.signal });
     } else {
+      if (!isWebDevelopmentProxyAllowed()) {
+        throw new Error(
+          '正式 Web 构建不会发送 API Key 或模型请求。仅可在本机通过 npm run web 显式启动受限调试代理。'
+        );
+      }
       try {
         response = await fetch(webDevProxyUrl, {
           method: 'POST',
@@ -847,7 +892,7 @@ function modelText(modelId: string): string {
 
 function isOpenAiBaseUrl(provider: ProviderProfile): boolean {
   try {
-    return parseProviderBaseUrl(provider.baseUrl).hostname.toLowerCase() === 'api.openai.com';
+    return parseProviderBaseUrl(provider.baseUrl).hostname.toLowerCase().replace(/\.+$/, '') === 'api.openai.com';
   } catch {
     return false;
   }
@@ -1163,6 +1208,27 @@ function applyModelParameterOptions(
     if (presenceConstraint.supported && presencePenalty !== 0) body.presence_penalty = presencePenalty;
     if (frequencyConstraint.supported && frequencyPenalty !== 0) body.frequency_penalty = frequencyPenalty;
   }
+}
+
+function applyOutputTokenLimit(
+  body: Record<string, unknown>,
+  provider: ProviderProfile,
+  maxOutputTokens: number | undefined
+): void {
+  if (maxOutputTokens === undefined) {
+    return;
+  }
+  if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 64 || maxOutputTokens > 131_072) {
+    throw new Error('最大输出 Token 必须是 64–131072 的整数。');
+  }
+  if (isOpenAiBaseUrl(provider)) {
+    body.max_completion_tokens = maxOutputTokens;
+    return;
+  }
+  // Ark's ordinary ChatCompletions reference and Bailian's broadly compatible
+  // model families both document max_tokens. New API/custom relays receive the
+  // same best-effort OpenAI-compatible field and may choose to reject it.
+  body.max_tokens = maxOutputTokens;
 }
 
 function applyReasoningOptions(
@@ -1712,7 +1778,9 @@ export async function sendOpenAiCompatibleChat({
   messages,
   reasoningEffort,
   parameterSettings,
+  maxOutputTokens,
   onStreamUpdate,
+  webSearch,
   signal,
 }: ChatCompletionArgs): Promise<ChatCompletionResult> {
   if (!modelId) {
@@ -1721,6 +1789,10 @@ export async function sendOpenAiCompatibleChat({
 
   const requestModel = model ?? createModelInfoFromId(provider, modelId, 'manual');
   const task = inferModelTask(requestModel);
+
+  if (webSearch?.enabled && task !== 'chat') {
+    throw new Error('联网搜索只适用于聊天模型，已拒绝发起请求。');
+  }
 
   if (task === 'image-generation') {
     return sendImageGenerationRequest(provider, modelId, messages, signal);
@@ -1737,9 +1809,60 @@ export async function sendOpenAiCompatibleChat({
   if (task === 'embedding' || task === 'rerank') {
     throw new Error('当前模型不是对话模型，不能在聊天窗口中调用。请切换到文本/多模态对话模型。');
   }
+  if (task === 'audio-transcription' || task === 'speech-generation') {
+    throw new Error('当前是语音专用模型，请使用语音输入或朗读入口。');
+  }
 
   const chatAttachments = messages.flatMap((message) => message.attachments ?? []);
   assertChatAttachmentsSupported(chatAttachments, requestModel, provider);
+
+  if (webSearch?.enabled) {
+    if (!provider.apiKey?.trim()) {
+      throw new Error('联网搜索必须使用你在当前服务商中配置的 API Key。');
+    }
+    if (!requestModel.capabilities.includes('web-search')) {
+      throw new Error('当前模型未明确标记为支持联网搜索，已拒绝发起可能计费的搜索请求。');
+    }
+    assertProviderWebSearchMessagesSupported(provider, messages);
+    const requestMessages = await materializeMessagesForRequest(messages, provider);
+    const searchProtocol = resolveProviderWebSearchProtocol(provider);
+    const request = buildProviderWebSearchRequest({
+      provider,
+      modelId,
+      messages: requestMessages,
+      ...(searchProtocol === 'openai-official'
+        ? { searchContextSize: webSearch.searchContextSize }
+        : {}),
+      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+    });
+    const response = await providerFetch(
+      request.url,
+      {
+        method: 'POST',
+        headers: authHeaders(provider),
+        body: JSON.stringify(request.body),
+        signal,
+      },
+      openAiProRequestTimeoutMs
+    );
+    const responseBody = await readLimitedResponseText(
+      response,
+      response.ok ? openAiResponsesLimits.maxResponseJsonBytes : maxErrorResponseBytes,
+      '联网搜索'
+    );
+    if (!response.ok) {
+      throw new Error(`联网搜索请求失败：${response.status} ${compactResponseText(responseBody)}`);
+    }
+    const result = parseProviderWebSearchResponse({ provider, payload: responseBody });
+    return {
+      content: result.content,
+      reasoningContent: result.reasoningContent,
+      usage: result.usage,
+      citations: result.citations,
+      webSearchTriggered: result.webSearchTriggered,
+      raw: result,
+    };
+  }
 
   if (isOpenAiResponsesOnlyModel(provider, modelId)) {
     const requestMessages = await materializeMessagesForRequest(messages, provider);
@@ -1748,6 +1871,7 @@ export async function sendOpenAiCompatibleChat({
       modelId,
       messages: requestMessages,
       reasoningEffort: normalizeReasoningEffort(provider, requestModel, reasoningEffort),
+      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     });
     const response = await providerFetch(
       request.url,
@@ -1782,6 +1906,7 @@ export async function sendOpenAiCompatibleChat({
   };
   const normalizedEffort = normalizeReasoningEffort(provider, requestModel, reasoningEffort);
   applyModelParameterOptions(body, parameterSettings, provider, requestModel, normalizedEffort);
+  applyOutputTokenLimit(body, provider, maxOutputTokens);
   applyReasoningOptions(body, provider, modelId, normalizedEffort);
 
   const response = await providerFetch(`${baseUrl}/chat/completions`, {
