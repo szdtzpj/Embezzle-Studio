@@ -7,6 +7,8 @@ import { useKelivoTheme, type KelivoTheme } from '../../theme';
 export interface ToolsPanelScreenProps {
   title?: string;
   onBack: () => void;
+  /** Optional trailing control (e.g. + add), mirrors kelivo AppBar actions. */
+  headerRight?: ReactNode;
   children: ReactNode;
 }
 
@@ -17,6 +19,7 @@ export interface ToolsPanelScreenProps {
 export function ToolsPanelScreen({
   title = '工作区与工具',
   onBack,
+  headerRight,
   children,
 }: ToolsPanelScreenProps) {
   const theme = useKelivoTheme();
@@ -29,7 +32,7 @@ export function ToolsPanelScreen({
           <ArrowLeft size={22} color={theme.colors.text} strokeWidth={2.2} />
         </AnimatedPressable>
         <Text style={styles.headerTitle}>{title}</Text>
-        <View style={styles.headerButton} />
+        <View style={styles.headerButton}>{headerRight ?? null}</View>
       </View>
       <ScrollView
         style={styles.scroll}

@@ -86,13 +86,16 @@ describe('Android mobile UI regressions', () => {
     expect(settingsSource).toContain('export interface SettingsScreenHandle');
     expect(settingsSource).toContain('handleBack: () => boolean;');
     expect(settingsSource).toContain('resetNavigation: () => void;');
+    expect(settingsSource).toContain('openToolsSection: (section: SettingsToolsSection) => void;');
     expect(settingsSource).toContain('useImperativeHandle(ref');
     expect(settingsSource).toContain("setStack([{ key: 'main' }]);");
+    expect(settingsSource).toContain("openToolsSection: (section: SettingsToolsSection) => {");
 
     expect(appSource).toContain('useRef<SettingsScreenHandle>(null)');
     expect(appSource).toContain('ref={settingsScreenRef}');
     expect(appSource).toContain('settingsScreenRef.current?.handleBack()');
     expect(appSource).toContain('settingsScreenRef.current?.resetNavigation()');
+    expect(appSource).toContain("settingsScreenRef.current?.openToolsSection('webSearch')");
     expect(appSource).toMatch(
       /if \(settingsOpen\) \{[\s\S]*?settingsScreenRef\.current\?\.handleBack\(\)[\s\S]*?closeSettings\(\);[\s\S]*?return true;/
     );
@@ -170,17 +173,108 @@ describe('Android mobile UI regressions', () => {
     expect(menuSource).toContain('keyboardShouldPersistTaps="handled"');
     expect(menuSource).toContain('onScrollBeginDrag={Keyboard.dismiss}');
     expect(menuSource).toContain('maxHeight: parameterMenuMaxHeight');
+    // ScrollView itself must be height-bounded; maxHeight only on the MotiView parent
+    // clips content without enabling scroll on native.
+    expect(menuSource).toContain('style={[styles.parameterMenuScroll, { maxHeight: parameterMenuMaxHeight }]}');
+    expect(menuSource).toContain('showsVerticalScrollIndicator');
     expect(appSource).toContain('onSubmitEditing={Keyboard.dismiss}');
     expect(appSource).toMatch(/accessibilityLabel="调整生成参数"[\s\S]*?Keyboard\.dismiss\(\);/);
+    // Slider pans must not steal vertical scrolls inside the parameter menu.
+    expect(appSource).toContain('onStartShouldSetPanResponder: () => false');
+    expect(appSource).toContain(
+      'Math.abs(gestureState.dx) > 4 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy)'
+    );
   });
 
-  it('uses one seamless folding glyph instead of three bouncing thinking dots', async () => {
-    const appSource = await source('App.tsx');
+  it('exposes a composer search sheet with service rows and dynamic globe icon', async () => {
+    const [appSource, panelSource] = await Promise.all([
+      source('App.tsx'),
+      source('src/ui/components/SearchServicesPanel.tsx'),
+    ]);
+    expect(appSource).toContain('testID="composer-search-globe"');
+    expect(appSource).toContain('ComposerSearchSheet');
+    expect(appSource).toContain('SearchServiceIcon');
+    expect(appSource).toContain('resolveActiveSearchIconKind');
+    expect(appSource).toContain('SearchServicesPanel');
+    expect(appSource).toContain("function applyComposerSearchMode(");
+    expect(panelSource).toContain('testID="composer-search-menu"');
+    expect(panelSource).toContain('testID="composer-search-tags"');
+    expect(panelSource).toContain('testID="composer-search-toggle"');
+    expect(panelSource).toContain('搜索设置');
+    expect(panelSource).toContain('网络搜索');
+    expect(panelSource).toContain('服务商内置');
+    expect(panelSource).toContain('composerSheet');
+    expect(panelSource).toContain('serviceCard');
+    expect(panelSource).toContain('masterCard');
+    expect(panelSource).toContain('export function ComposerSearchSheet');
+    expect(panelSource).toContain('export function SearchServiceIcon');
+    expect(panelSource).toContain("variant?: 'badge' | 'toolbar'");
+    expect(panelSource).toContain('Bing.Color');
+    expect(panelSource).toContain('Tavily.Color');
+    expect(panelSource).toContain('BraveMark');
+    expect(panelSource).toContain('FirecrawlMark');
+    expect(panelSource).toContain('SectionCard');
+    expect(panelSource).toContain('openAdd');
+    expect(panelSource).toContain('testID="search-service-row-builtin"');
+    expect(panelSource).toContain('testID="search-service-actions"');
+    expect(panelSource).toContain('测试连接');
+    expect(panelSource).toContain('fetchImpl: guardedApiFetch');
+    expect(panelSource).toContain('onLongPress');
+    expect(panelSource).toContain('openEditForm(service)');
+    expect(panelSource).toContain('对话页点地球图标');
+    expect(panelSource).not.toContain('onSelectExternalService');
+    expect(panelSource).not.toContain('onSetProviderEnabled');
+    expect(panelSource).toContain("kind === 'bing' || kind === 'duckduckgo'");
+    expect(panelSource).toContain('bing');
+    expect(panelSource).toContain('duckduckgo');
+    expect(panelSource).toContain('firecrawl');
+    expect(panelSource).toContain('externalSearchProviderAllowsAnonymous');
+    expect(panelSource).not.toContain('免费 · 点按选用');
+    expect(appSource).not.toContain('testID="composer-search-chip"');
+    expect(appSource).toContain('testID="search-service-add"');
+    expect(appSource).toContain("variant=\"toolbar\"");
+    expect(appSource).toContain("openToolsSection('webSearch')");
+    expect(appSource).toContain('isExternalSearchServiceConfigured');
+    expect(appSource).toContain('renderToolsHeaderRight');
+  });
 
-    expect(appSource).toContain('function ThinkingGlyph()');
-    expect(appSource).toContain('cancelAnimation(progress)');
-    expect(appSource).toContain('<ThinkingGlyph />');
-    expect(appSource).toContain('thinkingGlyphBand');
+  it('renders assistant message content as Markdown', async () => {
+    const [appSource, mdSource] = await Promise.all([
+      source('App.tsx'),
+      source('src/ui/components/MessageMarkdown.tsx'),
+    ]);
+    expect(appSource).toContain('MessageMarkdown');
+    expect(appSource).toContain('citations={message.citations}');
+    expect(appSource).toContain("message.status === 'pending'");
+    expect(appSource).toContain('<Text selectable style={styles.messageText}>');
+    expect(mdSource).toContain('react-native-markdown-display');
+    expect(mdSource).toContain('export function MessageMarkdown');
+    expect(mdSource).toContain('resolveMessageMarkdownLink');
+  });
+
+  it('renders modular thinking and tool activity cards instead of three bouncing dots', async () => {
+    const [appSource, activityUiSource, activitySource] = await Promise.all([
+      source('App.tsx'),
+      source('src/ui/components/MessageActivityModules.tsx'),
+      source('src/services/messageActivity.ts'),
+    ]);
+
+    expect(appSource).toContain('<MessageActivityModules message={message} />');
+    expect(activityUiSource).toContain('testID="message-activity-modules"');
+    expect(activityUiSource).toContain('testID="search-step-detail"');
+    expect(activityUiSource).toContain('reasoningCard');
+    expect(activityUiSource).toContain('Lightbulb');
+    expect(activityUiSource).toContain('MessageMarkdown');
+    expect(activityUiSource).toContain("variant=\"muted\"");
+    expect(activityUiSource).toContain('SearchStepDetail');
+    expect(activityUiSource).toContain('展开');
+    expect(activityUiSource).toContain('useState(false)');
+    expect(activityUiSource).not.toContain("useState(module.status === 'running')");
+    expect(activitySource).toContain('深度思考');
+    expect(activitySource).toContain('formatSearchActivityTitle');
+    expect(activitySource).toContain('parseSearchToolDetail');
+    expect(activitySource).toContain('activityTimeline');
+    expect(activitySource).toContain('isSearchToolName');
     expect(appSource).not.toContain('function ThinkingDot(');
     expect(appSource).not.toContain('<ThinkingDots />');
     expect(appSource).not.toContain('withDelay(');
@@ -313,8 +407,14 @@ describe('Android mobile UI regressions', () => {
     ]);
 
     expect(appSource).toContain('function WebCitationList');
+    expect(appSource).toContain('testID="web-citation-chip"');
+    expect(appSource).toContain('testID="web-citation-sheet"');
+    expect(appSource).toContain('个引用');
+    expect(appSource).toContain('搜索结果');
     expect(appSource).toContain('accessibilityRole="link"');
-    expect(appSource).toContain('本次响应未提供已触发联网搜索的证据');
+    expect(await source('src/services/messageActivity.ts')).not.toContain(
+      'web-search-no-evidence'
+    );
     expect(searchSource).toContain("item.type === 'web_search_call'");
     expect(searchSource).toContain('usage.x_tools.web_search.count');
   });

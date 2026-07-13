@@ -123,6 +123,13 @@ function populatedWorkspace(): AppWorkspace {
   });
   const message = generatedMessage();
   message.pinnedForContext = true;
+  message.citations = [{
+    url: 'https://www.example.com/source?q=public#result',
+    title: 'Portable source',
+    text: 'Portable citation snippet',
+    id: 's1',
+    index: 1,
+  }];
   const activeConversation = workspace.conversations[0];
   const artifact = {
     id: 'artifact-portable',
@@ -1235,6 +1242,17 @@ describe('strict backup validation', () => {
       url: 'https://www.example.com/search?q=public%20source#result-1',
     }];
 
+    expect(validateWorkspaceBackupEnvelope(envelope)).toBe(envelope);
+  });
+
+  it('preserves external-search citation text and stable inline-link metadata', () => {
+    const envelope = createWorkspaceBackupEnvelope(populatedWorkspace(), 1_700_000_000_000);
+
+    expect(envelope.workspace.conversations[0].messages[0].citations?.[0]).toMatchObject({
+      text: 'Portable citation snippet',
+      id: 's1',
+      index: 1,
+    });
     expect(validateWorkspaceBackupEnvelope(envelope)).toBe(envelope);
   });
 

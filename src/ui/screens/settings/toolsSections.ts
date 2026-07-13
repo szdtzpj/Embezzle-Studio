@@ -13,7 +13,7 @@ export type SettingsToolsSection =
 export const settingsToolsSectionTitles: Record<SettingsToolsSection, string> = {
   workspace: '项目工作台',
   comparison: '多模型对比',
-  webSearch: '联网搜索',
+  webSearch: '搜索服务',
   prompts: '提示词与角色模板',
   costGuard: '费用保险丝',
   usage: '用量与费用',

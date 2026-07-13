@@ -1,7 +1,9 @@
 import type {
+  ActivityTimelineStep,
   ChatCompletionResult,
   ChatMessage,
   ChatTokenUsage,
+  ExternalSearchSettings,
   GenerationTaskInfo,
   MediaAttachment,
   ModelParameterSettings,
@@ -9,6 +11,7 @@ import type {
   PluginManifest,
   ProviderProfile,
   ReasoningEffort,
+  ToolActivityItem,
 } from '../domain/types';
 import { Platform } from 'react-native';
 import { isVolcengineArkProvider } from '../data/arkModels';
@@ -39,6 +42,25 @@ import {
   resolveProviderWebSearchProtocol,
   type OpenAiWebSearchContextSize,
 } from './providerWebSearch';
+import {
+  citationsFromExternalSearchResults,
+  EXTERNAL_SEARCH_TOOL_NAME,
+  formatExternalSearchToolResult,
+  getExternalSearchSystemPrompt,
+  getExternalSearchToolDefinition,
+  parseSearchWebToolArguments,
+  reindexExternalSearchResult,
+  resolveActiveExternalSearchService,
+  runExternalSearch,
+  type ExternalSearchResult,
+} from './externalSearch';
+import {
+  completeOpenThinkingSteps,
+  nextTimelineSequence,
+  toolActivityTitle,
+  upsertTimelineStep,
+  upsertToolActivity,
+} from './messageActivity';
 import { getRemoteMcpExecutableReadiness } from '../plugins/contracts';
 import { isExactOfficialOpenAiProvider } from './providerSetup';
 import {
@@ -66,6 +88,11 @@ export interface ChatMcpOptions {
   onProviderRequestStarted?: (context: ProviderMcpSendContext) => void;
 }
 
+export interface ExternalSearchProviderRequestContext {
+  requestNumber: number;
+  signal?: AbortSignal;
+}
+
 interface ChatCompletionArgs {
   provider: ProviderProfile;
   modelId: string;
@@ -79,6 +106,10 @@ interface ChatCompletionArgs {
     enabled: boolean;
     searchContextSize: OpenAiWebSearchContextSize;
   };
+  externalSearch?: ExternalSearchSettings;
+  beforeExternalSearchProviderRequest?: (
+    context: ExternalSearchProviderRequestContext
+  ) => Promise<void> | void;
   mcp?: ChatMcpOptions;
   signal?: AbortSignal;
 }
@@ -87,7 +118,25 @@ interface ChatStreamUpdate {
   content: string;
   reasoningContent?: string;
   usage?: ChatTokenUsage;
+  toolActivity?: ToolActivityItem[];
+  activityTimeline?: ActivityTimelineStep[];
   raw?: unknown;
+}
+
+interface ToolLoopModelResult {
+  content: string;
+  reasoningContent?: string;
+  usage?: ChatTokenUsage;
+  toolCalls: Array<Record<string, any>>;
+  raw: unknown;
+}
+
+interface StreamToolCallAccumulator {
+  index: number;
+  id?: string;
+  type?: string;
+  name: string;
+  arguments: string;
 }
 
 interface RemoteModel extends RemoteModelMetadata {
@@ -404,6 +453,20 @@ async function providerFetch(
     throw error;
   }
 }
+
+/**
+ * Shared API transport for direct native requests and the explicitly enabled
+ * local Web development proxy. Production Web builds fail closed.
+ */
+export const guardedApiFetch: typeof fetch = async (input, init) => {
+  const url =
+    typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : (input as Request).url;
+  return providerFetch(url, init ?? {});
+};
 
 function imageContent(attachment: MediaAttachment) {
   if (attachment.kind !== 'image') {
@@ -884,6 +947,223 @@ async function readStreamingChatCompletion(
     }
 
     return finalizeStreamResult(state);
+  } finally {
+    reader?.releaseLock();
+    responseAbortCleanups.get(response)?.();
+    responseAbortCleanups.delete(response);
+  }
+}
+
+function appendStreamFragment(current: string, fragment: unknown): string {
+  if (typeof fragment !== 'string' || !fragment) return current;
+  if (!current || fragment.startsWith(current)) return fragment;
+  return current + fragment;
+}
+
+function collectStreamToolCalls(
+  payload: any,
+  calls: Map<number, StreamToolCallAccumulator>
+): void {
+  const choice = payload?.choices?.[0];
+  const snapshotCalls = Array.isArray(choice?.message?.tool_calls)
+    ? choice.message.tool_calls
+    : undefined;
+  const deltaCalls = Array.isArray(choice?.delta?.tool_calls)
+    ? choice.delta.tool_calls
+    : undefined;
+  const rows = snapshotCalls ?? deltaCalls ?? [];
+  const snapshot = Boolean(snapshotCalls);
+
+  rows.forEach((row: any, position: number) => {
+    const index = Number.isSafeInteger(row?.index) ? row.index : position;
+    const current = calls.get(index) ?? {
+      index,
+      name: '',
+      arguments: '',
+    };
+    const nextName = row?.function?.name ?? row?.name;
+    const nextArguments = row?.function?.arguments ?? row?.arguments;
+    calls.set(index, {
+      ...current,
+      ...(typeof row?.id === 'string' && row.id ? { id: row.id } : {}),
+      ...(typeof row?.type === 'string' && row.type ? { type: row.type } : {}),
+      name: snapshot
+        ? (typeof nextName === 'string' ? nextName : current.name)
+        : appendStreamFragment(current.name, nextName),
+      arguments: snapshot
+        ? (typeof nextArguments === 'string' ? nextArguments : current.arguments)
+        : appendStreamFragment(current.arguments, nextArguments),
+    });
+  });
+
+  const legacy = choice?.delta?.function_call;
+  if (legacy && typeof legacy === 'object') {
+    const current = calls.get(0) ?? { index: 0, name: '', arguments: '' };
+    calls.set(0, {
+      ...current,
+      name: appendStreamFragment(current.name, legacy.name),
+      arguments: appendStreamFragment(current.arguments, legacy.arguments),
+    });
+  }
+}
+
+function materializeStreamToolCalls(
+  calls: ReadonlyMap<number, StreamToolCallAccumulator>
+): Array<Record<string, any>> {
+  return Array.from(calls.values())
+    .sort((left, right) => left.index - right.index)
+    .map((call) => ({
+      id: call.id || `call_stream_${call.index}`,
+      type: call.type || 'function',
+      function: {
+        name: call.name,
+        arguments: call.arguments,
+      },
+    }));
+}
+
+function readToolLoopJsonPayload(payload: any): ToolLoopModelResult {
+  const message = payload?.choices?.[0]?.message ?? {};
+  const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+  const content = readAssistantText(payload);
+  return {
+    content: content === '模型返回了空内容。' && toolCalls.length ? '' : content,
+    reasoningContent: readReasoningText(payload),
+    usage: readTokenUsage(payload),
+    toolCalls,
+    raw: payload,
+  };
+}
+
+async function readStreamingToolLoopCompletion(
+  response: Response,
+  onStreamUpdate?: (update: ChatStreamUpdate) => void
+): Promise<ToolLoopModelResult> {
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+  if (
+    contentType.includes('application/json') ||
+    !contentType.includes('text/event-stream')
+  ) {
+    const body = await readLimitedResponseText(response, maxJsonResponseBytes, '外部联网搜索对话');
+    if (looksLikeHtmlResponse(body, contentType)) {
+      throw new Error('外部联网搜索对话返回了 HTML 页面，请检查 Base URL。');
+    }
+    try {
+      return readToolLoopJsonPayload(JSON.parse(body));
+    } catch (error) {
+      throw new Error(
+        `外部联网搜索对话返回的 JSON 无法解析：${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  const state = {
+    content: '',
+    reasoningContent: '',
+    usage: undefined as ChatTokenUsage | undefined,
+    lastPayload: undefined as unknown,
+    sawStreamPayload: false,
+    done: false,
+    toolCalls: new Map<number, StreamToolCallAccumulator>(),
+  };
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  const processBlock = (block: string) => {
+    const data = block
+      .split('\n')
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n')
+      .trim();
+    if (!data) return;
+    if (data === '[DONE]') {
+      state.done = true;
+      return;
+    }
+    if (new TextEncoder().encode(data).byteLength > maxStreamEventBytes) {
+      throw new Error('模型返回的单个流事件过大，已停止接收。');
+    }
+    let payload: any;
+    try {
+      payload = JSON.parse(data);
+    } catch (error) {
+      throw new Error(`无法解析模型流事件：${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (payload?.error) {
+      const message =
+        typeof payload.error?.message === 'string'
+          ? payload.error.message
+          : compactResponseText(JSON.stringify(payload.error));
+      throw new Error(`外部联网搜索流式请求失败：${message}`);
+    }
+    state.sawStreamPayload = true;
+    state.lastPayload = payload;
+    const contentUpdate = readStreamContentUpdate(payload);
+    const reasoningDelta = readStreamReasoningDelta(payload);
+    const usage = readTokenUsage(payload);
+    if (contentUpdate) {
+      state.content = contentUpdate.snapshot
+        ? contentUpdate.text
+        : state.content + contentUpdate.text;
+    }
+    if (typeof reasoningDelta === 'string') {
+      state.reasoningContent += reasoningDelta;
+    }
+    if (usage) state.usage = usage;
+    collectStreamToolCalls(payload, state.toolCalls);
+    if (state.content.length + state.reasoningContent.length > maxStreamOutputCharacters) {
+      throw new Error('模型输出过长，已停止接收以保护应用内存。');
+    }
+    if (contentUpdate?.text || reasoningDelta || usage) {
+      onStreamUpdate?.({
+        content: state.content,
+        reasoningContent: state.reasoningContent || undefined,
+        usage: state.usage,
+        raw: payload,
+      });
+    }
+  };
+
+  const consumeText = (text: string) => {
+    buffer += text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    if (new TextEncoder().encode(buffer).byteLength > maxStreamEventBytes) {
+      throw new Error('模型流缓冲区过大或事件分隔符无效，已停止接收。');
+    }
+    let separatorIndex = buffer.indexOf('\n\n');
+    while (separatorIndex >= 0) {
+      const block = buffer.slice(0, separatorIndex);
+      buffer = buffer.slice(separatorIndex + 2);
+      processBlock(block);
+      separatorIndex = buffer.indexOf('\n\n');
+    }
+  };
+
+  const reader = response.body?.getReader();
+  try {
+    if (!reader) {
+      consumeText(await response.text());
+    } else {
+      while (!state.done) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        consumeText(decoder.decode(value, { stream: true }));
+      }
+      if (state.done) await reader.cancel();
+      consumeText(decoder.decode());
+    }
+    if (buffer.trim() && !state.done) processBlock(buffer);
+    if (!state.sawStreamPayload) {
+      throw new Error('模型没有返回有效的流式事件。');
+    }
+    const toolCalls = materializeStreamToolCalls(state.toolCalls);
+    return {
+      content: state.content || (toolCalls.length || state.reasoningContent ? '' : '模型返回了空内容。'),
+      reasoningContent: state.reasoningContent || undefined,
+      usage: state.usage,
+      toolCalls,
+      raw: state.lastPayload,
+    };
   } finally {
     reader?.releaseLock();
     responseAbortCleanups.get(response)?.();
@@ -1801,6 +2081,438 @@ export function assertChatAttachmentsSupported(
   }
 }
 
+function mergeTokenUsage(a?: ChatTokenUsage, b?: ChatTokenUsage): ChatTokenUsage | undefined {
+  if (!a && !b) return undefined;
+  const sum = (left?: number, right?: number) =>
+    left === undefined && right === undefined ? undefined : (left ?? 0) + (right ?? 0);
+  return {
+    ...(sum(a?.inputTokens, b?.inputTokens) !== undefined
+      ? { inputTokens: sum(a?.inputTokens, b?.inputTokens) }
+      : {}),
+    ...(sum(a?.outputTokens, b?.outputTokens) !== undefined
+      ? { outputTokens: sum(a?.outputTokens, b?.outputTokens) }
+      : {}),
+    ...(sum(a?.reasoningTokens, b?.reasoningTokens) !== undefined
+      ? { reasoningTokens: sum(a?.reasoningTokens, b?.reasoningTokens) }
+      : {}),
+    ...(sum(a?.cachedInputTokens, b?.cachedInputTokens) !== undefined
+      ? { cachedInputTokens: sum(a?.cachedInputTokens, b?.cachedInputTokens) }
+      : {}),
+    ...(sum(a?.totalTokens, b?.totalTokens) !== undefined
+      ? { totalTokens: sum(a?.totalTokens, b?.totalTokens) }
+      : {}),
+  };
+}
+
+async function sendExternalSearchToolChat({
+  provider,
+  modelId,
+  requestModel,
+  messages,
+  reasoningEffort,
+  parameterSettings,
+  maxOutputTokens,
+  externalSearch,
+  beforeProviderRequest,
+  onStreamUpdate,
+  signal,
+}: {
+  provider: ProviderProfile;
+  modelId: string;
+  requestModel: ModelInfo;
+  messages: ChatMessage[];
+  reasoningEffort: ReasoningEffort;
+  parameterSettings?: ModelParameterSettings;
+  maxOutputTokens?: number;
+  externalSearch: ExternalSearchSettings;
+  beforeProviderRequest?: (
+    context: ExternalSearchProviderRequestContext
+  ) => Promise<void> | void;
+  onStreamUpdate?: (update: ChatStreamUpdate) => void;
+  signal?: AbortSignal;
+}): Promise<ChatCompletionResult> {
+  if (!provider.apiKey?.trim()) {
+    throw new Error('外部联网搜索需要当前聊天服务商的 API Key（用于主模型 tool 循环）。');
+  }
+  if (!requestModel.capabilities.includes('tool-calling')) {
+    throw new Error('外部联网搜索需要明确标记 tool-calling 能力的聊天模型。');
+  }
+  const service = resolveActiveExternalSearchService(externalSearch);
+  if (!service) {
+    throw new Error('外部联网搜索未就绪：请配置并选择 Tavily / Brave / Grok 服务及 API Key。');
+  }
+
+  const requestMessages = await materializeMessagesForRequest(messages, provider);
+  const openAiMessages: Array<Record<string, unknown>> = requestMessages.map((message) =>
+    toOpenAiMessage(message, provider)
+  );
+  const systemPrompt = getExternalSearchSystemPrompt();
+  if (openAiMessages[0]?.role === 'system' && typeof openAiMessages[0].content === 'string') {
+    openAiMessages[0] = {
+      ...openAiMessages[0],
+      content: `${openAiMessages[0].content}\n\n${systemPrompt}`,
+    };
+  } else {
+    openAiMessages.unshift({ role: 'system', content: systemPrompt });
+  }
+
+  const baseUrl = assertBaseUrl(provider);
+  const tools = [getExternalSearchToolDefinition()];
+  const maxRounds = Math.max(1, Math.min(4, externalSearch.maxToolRounds || 3));
+  const reasoningActivityEnabled = reasoningEffort !== 'off';
+
+  let aggregatedUsage: ChatTokenUsage | undefined;
+  const collectedSearches: ExternalSearchResult[] = [];
+  let toolActivity: ToolActivityItem[] = [];
+  let activityTimeline: ActivityTimelineStep[] = [];
+  let lastPayload: unknown;
+  let finalContent = '';
+  let finalReasoning: string | undefined;
+  let webSearchTriggered = false;
+  let thinkingSegment = 0;
+  let providerRequestCount = 0;
+
+  const requestProviderCompletion = async (
+    body: Record<string, unknown>,
+    label: string,
+    onPartial?: (update: ChatStreamUpdate) => void
+  ): Promise<ToolLoopModelResult> => {
+    const context: ExternalSearchProviderRequestContext = {
+      requestNumber: providerRequestCount + 1,
+      ...(signal ? { signal } : {}),
+    };
+    await beforeProviderRequest?.(context);
+    if (signal?.aborted) {
+      throw createAbortError();
+    }
+    providerRequestCount = context.requestNumber;
+    const response = await providerFetch(
+      `${baseUrl}/chat/completions`,
+      {
+        method: 'POST',
+        headers: {
+          ...authHeaders(provider),
+          Accept: 'text/event-stream, application/json',
+        },
+        body: JSON.stringify(body),
+        signal,
+      },
+      openAiProRequestTimeoutMs
+    );
+    if (!response.ok) {
+      const responseBody = await readLimitedResponseText(response, maxErrorResponseBytes, label);
+      throw new Error(`${label}失败：${response.status} ${compactResponseText(responseBody)}`);
+    }
+    return readStreamingToolLoopCompletion(response, onPartial);
+  };
+
+  const publish = (extra?: Partial<ChatStreamUpdate>) => {
+    onStreamUpdate?.({
+      content: finalContent,
+      reasoningContent: finalReasoning,
+      usage: aggregatedUsage,
+      toolActivity,
+      activityTimeline,
+      ...extra,
+    });
+  };
+
+  const noteThinking = (reasoning: string | undefined, running: boolean) => {
+    const text = reasoning?.trim() ?? '';
+    if (!text && !running) return;
+    // Open a new thinking segment when the previous one was completed by tools.
+    const openThinking = activityTimeline.find(
+      (step) => step.kind === 'thinking' && step.status === 'running'
+    );
+    const needNewSegment = !openThinking;
+    if (needNewSegment) {
+      thinkingSegment += 1;
+    }
+    const id = openThinking?.id ?? `thinking-r${thinkingSegment}`;
+    const sequence = openThinking?.sequence ?? nextTimelineSequence(activityTimeline);
+    const startedAt = openThinking?.startedAt ?? Date.now();
+    const finishedAt = running ? undefined : Date.now();
+    activityTimeline = upsertTimelineStep(activityTimeline, {
+      id,
+      kind: 'thinking',
+      sequence,
+      status: running ? 'running' : 'completed',
+      title: running ? '深度思考' : '深度思考',
+      content: text || openThinking?.content || '',
+      startedAt,
+      ...(finishedAt !== undefined ? { finishedAt } : {}),
+    });
+  };
+
+  for (let round = 0; round < maxRounds; round += 1) {
+    if (signal?.aborted) {
+      throw createAbortError();
+    }
+    finalContent = '';
+    // Only show an idle thinking row when reasoning was not explicitly disabled.
+    if (reasoningActivityEnabled) {
+      noteThinking(undefined, true);
+      publish();
+    }
+
+    const body: Record<string, unknown> = {
+      model: modelId,
+      messages: openAiMessages,
+      tools,
+      tool_choice: 'auto',
+      stream: true,
+      stream_options: { include_usage: true },
+    };
+    const normalizedEffort = normalizeReasoningEffort(provider, requestModel, reasoningEffort);
+    applyModelParameterOptions(body, parameterSettings, provider, requestModel, normalizedEffort);
+    applyOutputTokenLimit(body, provider, maxOutputTokens);
+    applyReasoningOptions(body, provider, modelId, normalizedEffort);
+
+    const usageBeforeRound = aggregatedUsage;
+    let streamedReasoning: string | undefined;
+    const result = await requestProviderCompletion(
+      body,
+      '外部联网搜索对话',
+      (update) => {
+        finalContent = update.content;
+        if (update.reasoningContent !== undefined) {
+          streamedReasoning = update.reasoningContent;
+          if (reasoningActivityEnabled) {
+            finalReasoning = update.reasoningContent;
+            noteThinking(update.reasoningContent, true);
+          }
+        }
+        publish({
+          usage: mergeTokenUsage(usageBeforeRound, update.usage),
+          raw: update.raw,
+        });
+      }
+    );
+    lastPayload = result.raw;
+    aggregatedUsage = mergeTokenUsage(aggregatedUsage, result.usage);
+
+    const toolCalls = result.toolCalls;
+    const content = result.content;
+    const reasoning = result.reasoningContent ?? streamedReasoning;
+    if (content && content !== '模型返回了空内容。') {
+      finalContent = content;
+    }
+    if (reasoningActivityEnabled && reasoning) finalReasoning = reasoning;
+    // Keep thinking open if tools will follow; complete when this is the final answer.
+    if (reasoningActivityEnabled) {
+      noteThinking(reasoning, toolCalls.length > 0);
+    }
+    if (!toolCalls.length) {
+      activityTimeline = completeOpenThinkingSteps(activityTimeline);
+      publish({ raw: result.raw });
+      break;
+    }
+    publish({ raw: result.raw });
+
+    openAiMessages.push({
+      role: 'assistant',
+      content: content === '模型返回了空内容。' || !content ? null : content,
+      tool_calls: toolCalls,
+      ...(reasoning ? { reasoning_content: reasoning } : {}),
+    });
+
+    // Thought finished for this round; tools begin next on the timeline.
+    activityTimeline = completeOpenThinkingSteps(activityTimeline);
+    publish();
+
+    for (let toolIndex = 0; toolIndex < toolCalls.length; toolIndex += 1) {
+      const call = toolCalls[toolIndex];
+      const id = typeof call?.id === 'string' && call.id.trim() ? call.id : `call_${round}_${toolIndex}`;
+      const name =
+        typeof call?.function?.name === 'string'
+          ? call.function.name
+          : typeof call?.name === 'string'
+            ? call.name
+            : '';
+      let args: Record<string, unknown> = {};
+      try {
+        const rawArgs = call?.function?.arguments ?? call?.arguments;
+        if (typeof rawArgs === 'string' && rawArgs.trim()) {
+          const parsed = JSON.parse(rawArgs) as unknown;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            args = parsed as Record<string, unknown>;
+          }
+        } else if (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) {
+          args = rawArgs as Record<string, unknown>;
+        }
+      } catch {
+        args = {};
+      }
+      const startedAt = Date.now();
+      const sequence = nextTimelineSequence(activityTimeline);
+      const title = toolActivityTitle(name || 'tool', args);
+      toolActivity = upsertToolActivity(toolActivity, {
+        id,
+        toolName: name || 'tool',
+        title,
+        arguments: args,
+        status: 'running',
+        summary: '正在调用工具…',
+        startedAt,
+        sequence,
+      });
+      activityTimeline = upsertTimelineStep(activityTimeline, {
+        id,
+        kind: 'tool',
+        sequence,
+        status: 'running',
+        toolName: name || 'tool',
+        title,
+        arguments: args,
+        summary: '正在调用工具…',
+        startedAt,
+      });
+      publish();
+
+      let toolContent: string;
+      let toolStatus: ToolActivityItem['status'] = 'completed';
+      let toolSummary = '';
+      if (name !== EXTERNAL_SEARCH_TOOL_NAME) {
+        toolContent = JSON.stringify({ error: `Unsupported tool: ${name || '(missing)'}` });
+        toolStatus = 'failed';
+        toolSummary = '不支持的工具';
+      } else {
+        try {
+          const query = parseSearchWebToolArguments(call?.function?.arguments ?? call?.arguments);
+          const result = reindexExternalSearchResult(
+            await runExternalSearch({
+              query,
+              service,
+              maxResults: externalSearch.maxResults,
+              fetchImpl: guardedApiFetch,
+              signal,
+            }),
+            collectedSearches.reduce((total, search) => total + search.items.length, 0)
+          );
+          collectedSearches.push(result);
+          webSearchTriggered = true;
+          toolContent = formatExternalSearchToolResult(result);
+          toolSummary = `返回 ${result.items.length} 条结果`;
+          args = { query };
+        } catch (error) {
+          toolContent = JSON.stringify({
+            error: error instanceof Error ? error.message : String(error),
+          });
+          toolStatus = 'failed';
+          toolSummary = error instanceof Error ? error.message : '搜索失败';
+        }
+      }
+      const finishedAt = Date.now();
+      toolActivity = upsertToolActivity(toolActivity, {
+        id,
+        toolName: name || EXTERNAL_SEARCH_TOOL_NAME,
+        title: toolActivityTitle(name || EXTERNAL_SEARCH_TOOL_NAME, args),
+        arguments: args,
+        status: toolStatus,
+        summary: toolSummary,
+        content: toolContent,
+        startedAt,
+        finishedAt,
+        sequence,
+      });
+      activityTimeline = upsertTimelineStep(activityTimeline, {
+        id,
+        kind: 'tool',
+        sequence,
+        status: toolStatus,
+        toolName: name || EXTERNAL_SEARCH_TOOL_NAME,
+        title: toolActivityTitle(name || EXTERNAL_SEARCH_TOOL_NAME, args),
+        arguments: args,
+        summary: toolSummary,
+        content: toolContent,
+        startedAt,
+        finishedAt,
+      });
+      publish();
+      openAiMessages.push({
+        role: 'tool',
+        tool_call_id: id,
+        content: toolContent,
+      });
+    }
+
+    if (round === maxRounds - 1) {
+      // Force one last answer without tools when the budget is exhausted.
+      finalContent = '';
+      if (reasoningActivityEnabled) {
+        noteThinking(undefined, true);
+        publish();
+      }
+      const finalBody: Record<string, unknown> = {
+        model: modelId,
+        messages: openAiMessages,
+        stream: true,
+        stream_options: { include_usage: true },
+      };
+      applyModelParameterOptions(
+        finalBody,
+        parameterSettings,
+        provider,
+        requestModel,
+        normalizeReasoningEffort(provider, requestModel, reasoningEffort)
+      );
+      applyOutputTokenLimit(finalBody, provider, maxOutputTokens);
+      applyReasoningOptions(
+        finalBody,
+        provider,
+        modelId,
+        normalizeReasoningEffort(provider, requestModel, reasoningEffort)
+      );
+      const usageBeforeFinal = aggregatedUsage;
+      let streamedFinalReasoning: string | undefined;
+      const finalResult = await requestProviderCompletion(
+        finalBody,
+        '外部联网搜索收尾',
+        (update) => {
+          finalContent = update.content;
+          if (update.reasoningContent !== undefined) {
+            streamedFinalReasoning = update.reasoningContent;
+            if (reasoningActivityEnabled) {
+              finalReasoning = update.reasoningContent;
+              noteThinking(update.reasoningContent, true);
+            }
+          }
+          publish({
+            usage: mergeTokenUsage(usageBeforeFinal, update.usage),
+            raw: update.raw,
+          });
+        }
+      );
+      lastPayload = finalResult.raw;
+      aggregatedUsage = mergeTokenUsage(aggregatedUsage, finalResult.usage);
+      finalContent = finalResult.content;
+      const finalRoundReasoning = finalResult.reasoningContent ?? streamedFinalReasoning;
+      if (reasoningActivityEnabled && finalRoundReasoning) {
+        finalReasoning = finalRoundReasoning;
+      }
+      if (reasoningActivityEnabled) {
+        noteThinking(finalRoundReasoning, false);
+      }
+      activityTimeline = completeOpenThinkingSteps(activityTimeline);
+      publish({ raw: finalResult.raw });
+      break;
+    }
+  }
+
+  activityTimeline = completeOpenThinkingSteps(activityTimeline);
+
+  return {
+    content: finalContent || '模型未返回文本内容。',
+    ...(finalReasoning ? { reasoningContent: finalReasoning } : {}),
+    ...(aggregatedUsage ? { usage: aggregatedUsage } : {}),
+    citations: citationsFromExternalSearchResults(collectedSearches),
+    webSearchTriggered,
+    ...(toolActivity.length ? { toolActivity } : {}),
+    ...(activityTimeline.length ? { activityTimeline } : {}),
+    raw: lastPayload,
+  };
+}
+
 export async function sendOpenAiCompatibleChat({
   provider,
   modelId,
@@ -1811,6 +2523,8 @@ export async function sendOpenAiCompatibleChat({
   maxOutputTokens,
   onStreamUpdate,
   webSearch,
+  externalSearch,
+  beforeExternalSearchProviderRequest,
   mcp,
   signal,
 }: ChatCompletionArgs): Promise<ChatCompletionResult> {
@@ -1820,9 +2534,13 @@ export async function sendOpenAiCompatibleChat({
 
   const requestModel = model ?? createModelInfoFromId(provider, modelId, 'manual');
   const task = inferModelTask(requestModel);
+  const externalSearchActive = Boolean(externalSearch?.enabled);
 
-  if (webSearch?.enabled && task !== 'chat') {
+  if ((webSearch?.enabled || externalSearchActive) && task !== 'chat') {
     throw new Error('联网搜索只适用于聊天模型，已拒绝发起请求。');
+  }
+  if (webSearch?.enabled && externalSearchActive) {
+    throw new Error('服务商联网搜索与外部搜索不能同时启用。');
   }
 
   if (task === 'image-generation') {
@@ -1848,7 +2566,7 @@ export async function sendOpenAiCompatibleChat({
   assertChatAttachmentsSupported(chatAttachments, requestModel, provider);
 
   if (mcp) {
-    if (webSearch?.enabled) {
+    if (webSearch?.enabled || externalSearchActive) {
       throw new Error('MCP 与联网搜索不能在同一轮启用，已拒绝发起请求。');
     }
     if (!provider.apiKey?.trim()) {
@@ -1990,6 +2708,25 @@ export async function sendOpenAiCompatibleChat({
       webSearchTriggered: result.webSearchTriggered,
       raw: result,
     };
+  }
+
+  if (externalSearchActive && externalSearch) {
+    if (isOpenAiResponsesOnlyModel(provider, modelId)) {
+      throw new Error('当前 Responses-only 模型暂不支持外部 search_web 工具循环，请切换其他聊天模型。');
+    }
+    return sendExternalSearchToolChat({
+      provider,
+      modelId,
+      requestModel,
+      messages,
+      reasoningEffort,
+      parameterSettings,
+      maxOutputTokens,
+      externalSearch,
+      beforeProviderRequest: beforeExternalSearchProviderRequest,
+      onStreamUpdate,
+      signal,
+    });
   }
 
   if (isOpenAiResponsesOnlyModel(provider, modelId)) {

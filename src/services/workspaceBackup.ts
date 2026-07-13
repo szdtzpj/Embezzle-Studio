@@ -45,6 +45,7 @@ import {
   MAX_PROJECT_KNOWLEDGE_TITLE_CHARACTERS,
   MAX_PROJECT_KNOWLEDGE_TOTAL_BYTES,
 } from './projectKnowledge';
+import { externalSearchProviderKinds } from './externalSearch';
 import { providerEndpointFingerprint } from './providerSetup';
 import { unicodeCharacterLengthExceeds } from './textBounds';
 import {
@@ -152,6 +153,7 @@ export interface SanitizedWorkspaceBackup {
   modelPricing: ModelPricing[];
   costGuard?: AppWorkspace['costGuard'];
   webSearch: AppWorkspace['webSearch'];
+  externalSearch?: AppWorkspace['externalSearch'];
   voice: AppWorkspace['voice'];
 }
 
@@ -516,7 +518,12 @@ function validateMessage(value: unknown, path: string): string {
   if (message.citations !== undefined) {
     requireArray(message.citations, `${path}.citations`, 1_000).forEach((citation, index) => {
       const record = requireRecord(citation, `${path}.citations[${index}]`);
-      requireExactKeysWithOptional(record, ['url'], ['title', 'startIndex', 'endIndex'], `${path}.citations[${index}]`);
+      requireExactKeysWithOptional(
+        record,
+        ['url'],
+        ['title', 'text', 'id', 'index', 'startIndex', 'endIndex'],
+        `${path}.citations[${index}]`
+      );
       const citationUrl = requireString(record.url, `${path}.citations[${index}].url`, {
         nonEmpty: true,
         max: 8_192,
@@ -525,6 +532,14 @@ function validateMessage(value: unknown, path: string): string {
         invalidFormat(`${path}.citations[${index}].url 必须是安全公网 HTTPS URL。`);
       }
       requireOptionalString(record.title, `${path}.citations[${index}].title`);
+      requireOptionalString(record.text, `${path}.citations[${index}].text`);
+      requireOptionalString(record.id, `${path}.citations[${index}].id`);
+      if (
+        record.index !== undefined &&
+        (!Number.isSafeInteger(record.index) || Number(record.index) <= 0)
+      ) {
+        invalidFormat(`${path}.citations[${index}].index 必须是正安全整数。`);
+      }
       requireOptionalNumber(record.startIndex, `${path}.citations[${index}].startIndex`);
       requireOptionalNumber(record.endIndex, `${path}.citations[${index}].endIndex`);
     });
@@ -1007,7 +1022,7 @@ function validateBackupWorkspace(value: unknown): asserts value is SanitizedWork
       'webSearch',
       'voice',
     ],
-    ['activeProjectId', 'projects', 'artifacts', 'knowledgeSources', 'costGuard'],
+    ['activeProjectId', 'projects', 'artifacts', 'knowledgeSources', 'costGuard', 'externalSearch'],
     'workspace'
   );
 
@@ -1343,6 +1358,41 @@ function validateBackupWorkspace(value: unknown): asserts value is SanitizedWork
   requireBoolean(webSearch.enabled, 'workspace.webSearch.enabled');
   if (!['low', 'medium', 'high'].includes(String(webSearch.searchContextSize))) invalidFormat('workspace.webSearch.searchContextSize 无效。');
 
+  if (workspace.externalSearch !== undefined) {
+    const externalSearch = requireRecord(workspace.externalSearch, 'workspace.externalSearch');
+    requireBoolean(externalSearch.enabled, 'workspace.externalSearch.enabled');
+    if (externalSearch.selectedServiceId !== undefined) {
+      requireString(externalSearch.selectedServiceId, 'workspace.externalSearch.selectedServiceId', { nonEmpty: true });
+    }
+    if (externalSearch.maxResults !== undefined) {
+      const maxResults = Number(externalSearch.maxResults);
+      if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 10) {
+        invalidFormat('workspace.externalSearch.maxResults 无效。');
+      }
+    }
+    if (externalSearch.maxToolRounds !== undefined) {
+      const maxToolRounds = Number(externalSearch.maxToolRounds);
+      if (!Number.isInteger(maxToolRounds) || maxToolRounds < 1 || maxToolRounds > 4) {
+        invalidFormat('workspace.externalSearch.maxToolRounds 无效。');
+      }
+    }
+    requireArray(externalSearch.services ?? [], 'workspace.externalSearch.services', 16).forEach((service, index) => {
+      const row = requireRecord(service, `workspace.externalSearch.services[${index}]`);
+      requireString(row.id, `workspace.externalSearch.services[${index}].id`, { nonEmpty: true });
+      requireString(row.kind, `workspace.externalSearch.services[${index}].kind`, { nonEmpty: true });
+      if (
+        !externalSearchProviderKinds.includes(
+          String(row.kind) as (typeof externalSearchProviderKinds)[number]
+        )
+      ) {
+        invalidFormat(`workspace.externalSearch.services[${index}].kind 无效。`);
+      }
+      if (row.apiKey !== undefined) {
+        invalidFormat('外部搜索 API Key 不得进入备份。');
+      }
+    });
+  }
+
   const voice = requireRecord(workspace.voice, 'workspace.voice');
   requireExactKeysWithOptional(voice, ['speechVoice', 'speechFormat'], ['transcriptionTarget', 'speechTarget'], 'workspace.voice');
   if (voice.transcriptionTarget !== undefined) validateTarget(voice.transcriptionTarget, 'workspace.voice.transcriptionTarget');
@@ -1528,6 +1578,11 @@ export function sanitizeWorkspaceForBackup(workspace: AppWorkspace): SanitizedWo
     modelPricing: workspace.modelPricing.map((pricing) => ({ ...pricing })),
     costGuard: { ...workspace.costGuard },
     webSearch: { ...workspace.webSearch },
+    externalSearch: {
+      ...workspace.externalSearch,
+      enabled: false,
+      services: workspace.externalSearch.services.map(({ apiKey: _apiKey, ...service }) => ({ ...service })),
+    },
     voice: {
       ...(workspace.voice.transcriptionTarget ? { transcriptionTarget: { ...workspace.voice.transcriptionTarget } } : {}),
       ...(workspace.voice.speechTarget ? { speechTarget: { ...workspace.voice.speechTarget } } : {}),
@@ -1965,6 +2020,25 @@ function mergeImportedWorkspace(
     webSearch: {
       ...imported.webSearch,
       enabled: recoveredFromAllProvidersDisabled ? false : imported.webSearch.enabled,
+    },
+    externalSearch: {
+      enabled: false,
+      maxResults:
+        typeof imported.externalSearch?.maxResults === 'number'
+          ? imported.externalSearch.maxResults
+          : 5,
+      maxToolRounds:
+        typeof imported.externalSearch?.maxToolRounds === 'number'
+          ? imported.externalSearch.maxToolRounds
+          : 3,
+      selectedServiceId: imported.externalSearch?.selectedServiceId,
+      services: (imported.externalSearch?.services ?? []).map((service) => ({
+        id: service.id,
+        kind: service.kind,
+        name: service.name,
+        ...(service.endpoint ? { endpoint: service.endpoint } : {}),
+        ...(service.model ? { model: service.model } : {}),
+      })),
     },
     voice: {
       ...(transcriptionTarget ? { transcriptionTarget } : {}),

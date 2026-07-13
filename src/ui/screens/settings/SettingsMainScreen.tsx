@@ -132,7 +132,7 @@ export function SettingsMainScreen({
             <RowDivider />
             <TactileRow
               icon={<Globe2 size={20} color={iconColor} strokeWidth={2} />}
-              label="联网搜索"
+              label="搜索服务"
               onPress={() => onToolsSection('webSearch')}
             />
             <RowDivider />

@@ -136,7 +136,7 @@ describe('MCP approval UI safety regressions', () => {
     const assistantRequestSource = sliceBetween(
       appSource,
       'async function runAssistantRequest({',
-      'function toggleReasoning'
+      'async function copyMessage'
     );
 
     expect(activityPanelSource).toContain('MCP 工具记录');
@@ -153,12 +153,12 @@ describe('MCP approval UI safety regressions', () => {
     const comparisonToggleSource = sliceBetween(
       appSource,
       'function setComparisonEnabled',
-      'function setWebSearchEnabled'
+      'function hasBlockingMcpForSearch'
     );
     const searchToggleSource = sliceBetween(
       appSource,
-      'function setWebSearchEnabled',
-      'function savePromptTemplate'
+      'function applyComposerSearchMode',
+      'function upsertExternalSearchService'
     );
     const mcpToggleSource = sliceBetween(
       appSource,
@@ -174,15 +174,14 @@ describe('MCP approval UI safety regressions', () => {
     expect(comparisonToggleSource).toContain("plugin.type === 'remote-mcp'");
     expect(comparisonToggleSource).toContain('plugin.enabled === true');
     expect(comparisonToggleSource).toContain('请先关闭对比目标绑定的 MCP');
-    expect(searchToggleSource).toContain("plugin.type === 'remote-mcp'");
-    expect(searchToggleSource).toContain('plugin.enabled === true');
+    expect(searchToggleSource).toContain('hasBlockingMcpForSearch');
     expect(searchToggleSource).toContain('请先关闭当前服务商的 MCP');
 
-    expect(mcpToggleSource).toContain('workspace.webSearch.enabled');
-    expect(mcpToggleSource).toContain('请先关闭联网搜索');
+    expect(mcpToggleSource).toContain('anySearchEnabled(workspace)');
+    expect(mcpToggleSource).toContain('请先关闭联网搜索（服务商或外部）');
     expect(mcpToggleSource).toContain('workspace.comparisonEnabled');
     expect(mcpToggleSource).toContain('请先关闭多模型对比');
-    expect(mcpToggleSource.indexOf('workspace.webSearch.enabled')).toBeLessThan(
+    expect(mcpToggleSource.indexOf('anySearchEnabled(workspace)')).toBeLessThan(
       mcpToggleSource.indexOf('const confirmed = await confirmDestructiveAction(')
     );
     expect(mcpToggleSource.indexOf('workspace.comparisonEnabled')).toBeLessThan(
@@ -211,6 +210,33 @@ describe('MCP approval UI safety regressions', () => {
     expect(continuationSource).toContain('trackedUsageEvent = nextUsageEvent;');
   });
 
+  it('authorizes and records every external-search model continuation', async () => {
+    const appSource = await source('App.tsx');
+    const continuationSource = sliceBetween(
+      appSource,
+      'beforeExternalSearchProviderRequest: async (context) => {',
+      '...(mcpPlugin'
+    );
+
+    const authorizationIndex = continuationSource.indexOf(
+      'const authorized = await authorizeProviderRequestPlan({'
+    );
+    const countIndex = continuationSource.indexOf(
+      'providerRequestCount: context.requestNumber'
+    );
+    const persistenceIndex = continuationSource.indexOf(
+      'await persistProviderUsageEvents([nextUsageEvent]);'
+    );
+    expect(continuationSource).toContain(
+      'if (context.requestNumber <= trackedUsageEvent.providerRequestCount)'
+    );
+    expect(authorizationIndex).toBeGreaterThanOrEqual(0);
+    expect(countIndex).toBeGreaterThan(authorizationIndex);
+    expect(persistenceIndex).toBeGreaterThan(countIndex);
+    expect(continuationSource).toContain('trackedUsageEvent = nextUsageEvent;');
+    expect(continuationSource).toContain('assertCurrentProviderSendAllowed(controller, context.signal);');
+  });
+
   it('passes only enabled provider-bound plugins and revalidates official routing plus model MCP capability', async () => {
     const [appSource, routeSource] = await Promise.all([
       source('App.tsx'),
@@ -224,7 +250,7 @@ describe('MCP approval UI safety regressions', () => {
     const assistantRequestSource = sliceBetween(
       appSource,
       'async function runAssistantRequest({',
-      'function toggleReasoning'
+      'async function copyMessage'
     );
     const mcpRouteSource = sliceBetween(
       routeSource,
