@@ -14,6 +14,8 @@ import {
   isWeakSearchTitle,
   normalizeExternalSearchSettings,
   parseSearchWebToolArguments,
+  reindexExternalSearchResult,
+  resolveMessageMarkdownLink,
   resolveActiveExternalSearchService,
   runExternalSearch,
   stripExternalSearchSecrets,
@@ -90,6 +92,34 @@ describe('search_web tool contract', () => {
   it('parses tool arguments from object or JSON string', () => {
     expect(parseSearchWebToolArguments({ query: ' latest ai news ' })).toBe('latest ai news');
     expect(parseSearchWebToolArguments(JSON.stringify({ query: 'foo' }))).toBe('foo');
+  });
+
+  it('keeps citation ids unique across rounds and resolves inline citation links', () => {
+    const first = reindexExternalSearchResult({
+      items: [
+        { id: 's1', index: 1, title: 'A', url: 'https://example.com/a', text: 'a' },
+        { id: 's2', index: 2, title: 'B', url: 'https://example.com/b', text: 'b' },
+      ],
+    }, 0);
+    const second = reindexExternalSearchResult({
+      items: [
+        { id: 's1', index: 1, title: 'C', url: 'https://example.com/c', text: 'c' },
+      ],
+    }, first.items.length);
+    const citations = citationsFromExternalSearchResults([first, second]);
+
+    expect(second.items[0]).toMatchObject({ index: 3, id: 's3' });
+    expect(citations.map((citation) => [citation.index, citation.id])).toEqual([
+      [1, 's1'],
+      [2, 's2'],
+      [3, 's3'],
+    ]);
+    expect(resolveMessageMarkdownLink('3:s3', citations)).toBe('https://example.com/c');
+    expect(resolveMessageMarkdownLink('https://example.com/direct', citations)).toBe(
+      'https://example.com/direct'
+    );
+    expect(resolveMessageMarkdownLink('intent://unsafe', citations)).toBeNull();
+    expect(resolveMessageMarkdownLink('3:wrong', citations)).toBeNull();
   });
 });
 

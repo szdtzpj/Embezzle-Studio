@@ -144,6 +144,7 @@ import {
   assertProviderWebSearchMessagesSupported,
   resolveProviderWebSearchProtocol,
 } from './src/services/providerWebSearch';
+import { isOpenAiResponsesOnlyModel } from './src/services/openAiResponses';
 import {
   externalSearchProviderLabels,
   externalSearchProviderRequiresApiKey,
@@ -1578,6 +1579,21 @@ function AppContent({
     });
   }
 
+  function assertCurrentProviderSendAllowed(
+    controller: AbortController,
+    signal?: AbortSignal
+  ): void {
+    if (
+      activeRequestRef.current?.controller !== controller ||
+      controller.signal.aborted ||
+      signal?.aborted === true
+    ) {
+      const error = new Error('当前服务商请求已停止。');
+      error.name = 'AbortError';
+      throw error;
+    }
+  }
+
   function beginAudioOperation(kind: ActiveAudioOperation['kind']): ActiveAudioOperation | null {
     if (workspaceReplacementInProgressRef.current) {
       setNotice('正在验证并导入备份，暂时不能开始语音操作。');
@@ -2289,7 +2305,8 @@ function AppContent({
     return runtimes.every(
       (runtime) =>
         Boolean(runtime.provider.apiKey?.trim()) &&
-        runtime.model.capabilities.includes('tool-calling')
+        runtime.model.capabilities.includes('tool-calling') &&
+        !isOpenAiResponsesOnlyModel(runtime.provider, runtime.model.id)
     );
   }, [
     activeModel,
@@ -3187,6 +3204,10 @@ function AppContent({
     const modelSupportsTools = Boolean(activeModel?.capabilities.includes('tool-calling'));
     if (!modelSupportsTools) {
       setNotice('外部搜索需要当前聊天模型具备 tool-calling 能力。');
+      return;
+    }
+    if (activeProvider && activeModel && isOpenAiResponsesOnlyModel(activeProvider, activeModel.id)) {
+      setNotice('当前 Responses-only Pro 模型暂不支持外部搜索，请切换其他聊天模型。');
       return;
     }
     const targetId =
@@ -4898,6 +4919,32 @@ function AppContent({
           : undefined,
         webSearch: workspaceRef.current.webSearch,
         externalSearch: workspaceRef.current.externalSearch,
+        beforeExternalSearchProviderRequest: async (context) => {
+          assertCurrentProviderSendAllowed(controller, context.signal);
+          if (context.requestNumber <= trackedUsageEvent.providerRequestCount) {
+            return;
+          }
+          const authorized = await authorizeProviderRequestPlan({
+            operations: [providerRequestOperation(
+              runtime.provider.id,
+              runtime.modelId,
+              runtime.model,
+              true
+            )],
+          });
+          if (!authorized || context.signal?.aborted) {
+            const cancelled = new Error('外部搜索后续请求已取消。');
+            cancelled.name = 'AbortError';
+            throw cancelled;
+          }
+          const nextUsageEvent: ProviderUsageEvent = {
+            ...trackedUsageEvent,
+            providerRequestCount: context.requestNumber,
+          };
+          await persistProviderUsageEvents([nextUsageEvent]);
+          trackedUsageEvent = nextUsageEvent;
+          assertCurrentProviderSendAllowed(controller, context.signal);
+        },
         ...(mcpPlugin
           ? {
               mcp: {
@@ -6893,7 +6940,7 @@ function AppContent({
       return;
     }
     if (workspace.externalSearch.enabled && !externalSearchReady) {
-      setNotice('对比请求未发出：外部搜索未就绪（需配置 Key 且目标模型支持 tool-calling）。');
+      setNotice('对比请求未发出：外部搜索未就绪（请检查搜索服务、模型 API Key、tool-calling 能力和 Responses-only 限制）。');
       return;
     }
     if (
@@ -7118,7 +7165,7 @@ function AppContent({
       return;
     }
     if (workspace.externalSearch.enabled && !externalSearchReady) {
-      setNotice('请求未发出：外部搜索未就绪（需配置 Key 且当前模型支持 tool-calling）。');
+      setNotice('请求未发出：外部搜索未就绪（请检查搜索服务、模型 API Key、tool-calling 能力和 Responses-only 限制）。');
       return;
     }
     if (
@@ -8674,7 +8721,16 @@ function AppContent({
                           />
                         ) : message.content ? (
                           <View accessibilityLiveRegion="polite">
-                            <MessageMarkdown content={message.content} />
+                            {message.status === 'pending' ? (
+                              <Text selectable style={styles.messageText}>
+                                {message.content}
+                              </Text>
+                            ) : (
+                              <MessageMarkdown
+                                content={message.content}
+                                citations={message.citations}
+                              />
+                            )}
                           </View>
                         ) : null}
                         {message.citations?.length ? (
@@ -8814,7 +8870,9 @@ function AppContent({
                 webSearchReady={webSearchReady}
                 externalSearch={workspace.externalSearch}
                 modelSupportsTools={Boolean(
-                  activeModel?.capabilities.includes('tool-calling')
+                  activeProvider &&
+                  activeModel?.capabilities.includes('tool-calling') &&
+                  !isOpenAiResponsesOnlyModel(activeProvider, activeModel.id)
                 )}
                 onClose={() => setSearchMenuOpen(false)}
                 onSelectOff={() => applyComposerSearchMode('off')}
@@ -8922,11 +8980,13 @@ function AppContent({
                     >
                       <ScrollView
                         testID="parameter-menu-scroll"
-                        style={styles.parameterMenuScroll}
+                        style={[styles.parameterMenuScroll, { maxHeight: parameterMenuMaxHeight }]}
                         contentContainerStyle={styles.parameterMenuContent}
                         keyboardDismissMode={Platform.OS === 'android' ? 'on-drag' : 'interactive'}
                         keyboardShouldPersistTaps="handled"
                         nestedScrollEnabled
+                        bounces
+                        showsVerticalScrollIndicator
                         onScrollBeginDrag={Keyboard.dismiss}
                       >
                         <View style={styles.toolMenuHeader}>
@@ -10304,10 +10364,15 @@ function ParameterSlider({
     }
   };
 
+  // Only claim horizontal pans so the parameter menu ScrollView can still scroll
+  // when the user drags vertically over a slider track.
   const panResponder = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_event, gestureState) =>
+        Math.abs(gestureState.dx) > 4 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy),
+      onPanResponderTerminationRequest: () => true,
+      onShouldBlockNativeResponder: () => false,
       onPanResponderGrant: (event) => {
         setByLocation(event.nativeEvent.locationX);
       },
@@ -13071,9 +13136,11 @@ function createAppStyles(palette: AppPalette) {
     elevation: 8,
   },
   parameterMenuScroll: {
+    flexGrow: 0,
     flexShrink: 1,
   },
   parameterMenuContent: {
+    flexGrow: 0,
     padding: 12,
     gap: 12,
   },

@@ -44,15 +44,9 @@ describe('message activity modules', () => {
     expect(modules[0]?.title).toMatch(/^深度思考/);
   });
 
-  it('shows an idle thinking placeholder while waiting for first tokens', () => {
+  it('does not invent a thinking module before reasoning evidence arrives', () => {
     const modules = buildMessageActivityModules(message({ status: 'pending', content: '' }));
-    expect(modules).toEqual([
-      expect.objectContaining({
-        kind: 'thinking',
-        status: 'running',
-      }),
-    ]);
-    expect(modules[0]?.title).toMatch(/^深度思考/);
+    expect(modules).toEqual([]);
   });
 
   it('preserves thought → tool → thought order from activityTimeline', () => {
@@ -219,6 +213,13 @@ describe('message activity modules', () => {
       ],
     });
     expect(items).toEqual([]);
+  });
+
+  it('does not render a failed search when the model simply skipped web search', () => {
+    expect(toolItemsFromWebSearchEvidence({ triggered: false })).toEqual([]);
+    expect(
+      buildMessageActivityModules(message({ content: 'answer', webSearchTriggered: false }))
+    ).toEqual([]);
   });
 
   it('upserts tool activity and timeline steps by id', () => {

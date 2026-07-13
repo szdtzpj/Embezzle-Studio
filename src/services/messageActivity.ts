@@ -428,18 +428,6 @@ export function toolItemsFromWebSearchEvidence(args: {
       },
     ];
   }
-  if (args.triggered === false) {
-    return [
-      {
-        id: 'web-search-no-evidence',
-        toolName: 'web_search',
-        title: '联网检索',
-        status: 'failed',
-        summary: '响应未提供已触发联网搜索的证据',
-        sequence: 0,
-      },
-    ];
-  }
   return [];
 }
 
@@ -532,24 +520,8 @@ export function buildMessageActivityModules(message: ChatMessage): MessageActivi
   const reasoning = message.reasoningContent?.trim() ?? '';
   const thinkingRunning =
     message.role === 'assistant' && message.status === 'pending' && Boolean(reasoning);
-  const thinkingIdleRunning =
-    message.role === 'assistant' &&
-    message.status === 'pending' &&
-    !message.content.trim() &&
-    !reasoning &&
-    !(message.toolActivity?.length);
 
-  if (thinkingIdleRunning) {
-    modules.push({
-      kind: 'thinking',
-      id: `${message.id}:thinking-pending`,
-      status: 'running',
-      title: formatThinkingRowTitle('running', message.createdAt),
-      content: '',
-      startedAt: message.createdAt,
-      sequence: 0,
-    });
-  } else if (reasoning || thinkingRunning) {
+  if (reasoning || thinkingRunning) {
     const status =
       thinkingRunning || message.status === 'pending' ? 'running' : 'completed';
     const finishedAt =

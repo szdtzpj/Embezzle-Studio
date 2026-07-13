@@ -518,7 +518,12 @@ function validateMessage(value: unknown, path: string): string {
   if (message.citations !== undefined) {
     requireArray(message.citations, `${path}.citations`, 1_000).forEach((citation, index) => {
       const record = requireRecord(citation, `${path}.citations[${index}]`);
-      requireExactKeysWithOptional(record, ['url'], ['title', 'startIndex', 'endIndex'], `${path}.citations[${index}]`);
+      requireExactKeysWithOptional(
+        record,
+        ['url'],
+        ['title', 'text', 'id', 'index', 'startIndex', 'endIndex'],
+        `${path}.citations[${index}]`
+      );
       const citationUrl = requireString(record.url, `${path}.citations[${index}].url`, {
         nonEmpty: true,
         max: 8_192,
@@ -527,6 +532,14 @@ function validateMessage(value: unknown, path: string): string {
         invalidFormat(`${path}.citations[${index}].url 必须是安全公网 HTTPS URL。`);
       }
       requireOptionalString(record.title, `${path}.citations[${index}].title`);
+      requireOptionalString(record.text, `${path}.citations[${index}].text`);
+      requireOptionalString(record.id, `${path}.citations[${index}].id`);
+      if (
+        record.index !== undefined &&
+        (!Number.isSafeInteger(record.index) || Number(record.index) <= 0)
+      ) {
+        invalidFormat(`${path}.citations[${index}].index 必须是正安全整数。`);
+      }
       requireOptionalNumber(record.startIndex, `${path}.citations[${index}].startIndex`);
       requireOptionalNumber(record.endIndex, `${path}.citations[${index}].endIndex`);
     });

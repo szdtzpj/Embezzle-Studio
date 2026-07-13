@@ -589,10 +589,16 @@ function normalizeCitations(value: unknown, label: string): WebCitation[] | unde
     const startIndex = nonNegativeFiniteNumber(citation.startIndex);
     const endIndex = nonNegativeFiniteNumber(citation.endIndex);
     const text = nonEmptyString(citation.text);
+    const citationId = nonEmptyString(citation.id);
+    const citationIndex = nonNegativeFiniteNumber(citation.index);
     return [{
       url: url.toString(),
       ...(nonEmptyString(citation.title) ? { title: nonEmptyString(citation.title) } : {}),
       ...(text ? { text: text.slice(0, 400) } : {}),
+      ...(citationId ? { id: citationId.slice(0, 120) } : {}),
+      ...(citationIndex !== undefined && Number.isSafeInteger(citationIndex) && citationIndex > 0
+        ? { index: citationIndex }
+        : {}),
       ...(startIndex !== undefined ? { startIndex: Math.trunc(startIndex) } : {}),
       ...(endIndex !== undefined ? { endIndex: Math.trunc(endIndex) } : {}),
     }];

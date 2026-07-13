@@ -351,6 +351,22 @@ function withItemIds(items: Array<{ title: string; url: string; text: string }>)
   return out;
 }
 
+/** Rebase one tool result so every search round uses globally unique citation ids/indexes. */
+export function reindexExternalSearchResult(
+  result: ExternalSearchResult,
+  offset: number
+): ExternalSearchResult {
+  const safeOffset = Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+  return {
+    ...result,
+    items: result.items.map((item, itemIndex) => ({
+      ...item,
+      index: safeOffset + itemIndex + 1,
+      id: shortId(safeOffset + itemIndex),
+    })),
+  };
+}
+
 function mergeSearchItems(
   primary: Array<{ title: string; url: string; text: string }>,
   secondary: Array<{ title: string; url: string; text: string }>,
@@ -1142,19 +1158,41 @@ export function citationsFromExternalSearchResults(
   results: readonly ExternalSearchResult[]
 ): WebCitation[] {
   const out: WebCitation[] = [];
-  const seen = new Set<string>();
   for (const result of results) {
     for (const item of result.items) {
-      if (seen.has(item.url)) continue;
-      seen.add(item.url);
       out.push({
         url: item.url,
         title: item.title,
+        id: item.id,
+        index: item.index,
         ...(item.text?.trim() ? { text: item.text.trim().slice(0, 400) } : {}),
       });
     }
   }
   return out;
+}
+
+/** Resolve normal HTTPS links and the search prompt's one-based `index:id` links. */
+export function resolveMessageMarkdownLink(
+  raw: string,
+  citations: readonly WebCitation[] = []
+): string | null {
+  const value = raw.trim();
+  if (!value) return null;
+  const direct = normalizePublicHttpsUrl(value);
+  if (direct) return direct;
+
+  const match = /^(\d+):([A-Za-z0-9_-]{1,120})$/.exec(value);
+  if (!match) return null;
+  const index = Number(match[1]);
+  const id = match[2];
+  if (!Number.isSafeInteger(index) || index <= 0) return null;
+  const hasStableMetadata = citations.some((item) => item.id || item.index !== undefined);
+  const citation =
+    citations.find((item) => item.index === index && item.id === id) ??
+    citations.find((item) => item.id === id) ??
+    (!hasStableMetadata ? citations[index - 1] : undefined);
+  return citation ? normalizePublicHttpsUrl(citation.url) : null;
 }
 
 export function parseSearchWebToolArguments(raw: unknown): string {

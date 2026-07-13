@@ -247,6 +247,10 @@ export interface WebCitation {
   title?: string;
   /** Optional snippet / body text from search adapters. */
   text?: string;
+  /** Stable external-search result id used by inline citation links. */
+  id?: string;
+  /** One-based external-search result index used by inline citation links. */
+  index?: number;
   startIndex?: number;
   endIndex?: number;
 }

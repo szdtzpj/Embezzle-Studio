@@ -173,8 +173,17 @@ describe('Android mobile UI regressions', () => {
     expect(menuSource).toContain('keyboardShouldPersistTaps="handled"');
     expect(menuSource).toContain('onScrollBeginDrag={Keyboard.dismiss}');
     expect(menuSource).toContain('maxHeight: parameterMenuMaxHeight');
+    // ScrollView itself must be height-bounded; maxHeight only on the MotiView parent
+    // clips content without enabling scroll on native.
+    expect(menuSource).toContain('style={[styles.parameterMenuScroll, { maxHeight: parameterMenuMaxHeight }]}');
+    expect(menuSource).toContain('showsVerticalScrollIndicator');
     expect(appSource).toContain('onSubmitEditing={Keyboard.dismiss}');
     expect(appSource).toMatch(/accessibilityLabel="调整生成参数"[\s\S]*?Keyboard\.dismiss\(\);/);
+    // Slider pans must not steal vertical scrolls inside the parameter menu.
+    expect(appSource).toContain('onStartShouldSetPanResponder: () => false');
+    expect(appSource).toContain(
+      'Math.abs(gestureState.dx) > 4 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy)'
+    );
   });
 
   it('exposes a composer search sheet with service rows and dynamic globe icon', async () => {
@@ -209,6 +218,7 @@ describe('Android mobile UI regressions', () => {
     expect(panelSource).toContain('testID="search-service-row-builtin"');
     expect(panelSource).toContain('testID="search-service-actions"');
     expect(panelSource).toContain('测试连接');
+    expect(panelSource).toContain('fetchImpl: guardedApiFetch');
     expect(panelSource).toContain('onLongPress');
     expect(panelSource).toContain('openEditForm(service)');
     expect(panelSource).toContain('对话页点地球图标');
@@ -234,9 +244,12 @@ describe('Android mobile UI regressions', () => {
       source('src/ui/components/MessageMarkdown.tsx'),
     ]);
     expect(appSource).toContain('MessageMarkdown');
-    expect(appSource).toContain('<MessageMarkdown content={message.content} />');
+    expect(appSource).toContain('citations={message.citations}');
+    expect(appSource).toContain("message.status === 'pending'");
+    expect(appSource).toContain('<Text selectable style={styles.messageText}>');
     expect(mdSource).toContain('react-native-markdown-display');
     expect(mdSource).toContain('export function MessageMarkdown');
+    expect(mdSource).toContain('resolveMessageMarkdownLink');
   });
 
   it('renders modular thinking and tool activity cards instead of three bouncing dots', async () => {
@@ -399,8 +412,8 @@ describe('Android mobile UI regressions', () => {
     expect(appSource).toContain('个引用');
     expect(appSource).toContain('搜索结果');
     expect(appSource).toContain('accessibilityRole="link"');
-    expect(await source('src/services/messageActivity.ts')).toContain(
-      '响应未提供已触发联网搜索的证据'
+    expect(await source('src/services/messageActivity.ts')).not.toContain(
+      'web-search-no-evidence'
     );
     expect(searchSource).toContain("item.type === 'web_search_call'");
     expect(searchSource).toContain('usage.x_tools.web_search.count');

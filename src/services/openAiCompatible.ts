@@ -49,6 +49,7 @@ import {
   getExternalSearchSystemPrompt,
   getExternalSearchToolDefinition,
   parseSearchWebToolArguments,
+  reindexExternalSearchResult,
   resolveActiveExternalSearchService,
   runExternalSearch,
   type ExternalSearchResult,
@@ -87,6 +88,11 @@ export interface ChatMcpOptions {
   onProviderRequestStarted?: (context: ProviderMcpSendContext) => void;
 }
 
+export interface ExternalSearchProviderRequestContext {
+  requestNumber: number;
+  signal?: AbortSignal;
+}
+
 interface ChatCompletionArgs {
   provider: ProviderProfile;
   modelId: string;
@@ -101,6 +107,9 @@ interface ChatCompletionArgs {
     searchContextSize: OpenAiWebSearchContextSize;
   };
   externalSearch?: ExternalSearchSettings;
+  beforeExternalSearchProviderRequest?: (
+    context: ExternalSearchProviderRequestContext
+  ) => Promise<void> | void;
   mcp?: ChatMcpOptions;
   signal?: AbortSignal;
 }
@@ -112,6 +121,22 @@ interface ChatStreamUpdate {
   toolActivity?: ToolActivityItem[];
   activityTimeline?: ActivityTimelineStep[];
   raw?: unknown;
+}
+
+interface ToolLoopModelResult {
+  content: string;
+  reasoningContent?: string;
+  usage?: ChatTokenUsage;
+  toolCalls: Array<Record<string, any>>;
+  raw: unknown;
+}
+
+interface StreamToolCallAccumulator {
+  index: number;
+  id?: string;
+  type?: string;
+  name: string;
+  arguments: string;
 }
 
 interface RemoteModel extends RemoteModelMetadata {
@@ -428,6 +453,20 @@ async function providerFetch(
     throw error;
   }
 }
+
+/**
+ * Shared API transport for direct native requests and the explicitly enabled
+ * local Web development proxy. Production Web builds fail closed.
+ */
+export const guardedApiFetch: typeof fetch = async (input, init) => {
+  const url =
+    typeof input === 'string'
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : (input as Request).url;
+  return providerFetch(url, init ?? {});
+};
 
 function imageContent(attachment: MediaAttachment) {
   if (attachment.kind !== 'image') {
@@ -908,6 +947,223 @@ async function readStreamingChatCompletion(
     }
 
     return finalizeStreamResult(state);
+  } finally {
+    reader?.releaseLock();
+    responseAbortCleanups.get(response)?.();
+    responseAbortCleanups.delete(response);
+  }
+}
+
+function appendStreamFragment(current: string, fragment: unknown): string {
+  if (typeof fragment !== 'string' || !fragment) return current;
+  if (!current || fragment.startsWith(current)) return fragment;
+  return current + fragment;
+}
+
+function collectStreamToolCalls(
+  payload: any,
+  calls: Map<number, StreamToolCallAccumulator>
+): void {
+  const choice = payload?.choices?.[0];
+  const snapshotCalls = Array.isArray(choice?.message?.tool_calls)
+    ? choice.message.tool_calls
+    : undefined;
+  const deltaCalls = Array.isArray(choice?.delta?.tool_calls)
+    ? choice.delta.tool_calls
+    : undefined;
+  const rows = snapshotCalls ?? deltaCalls ?? [];
+  const snapshot = Boolean(snapshotCalls);
+
+  rows.forEach((row: any, position: number) => {
+    const index = Number.isSafeInteger(row?.index) ? row.index : position;
+    const current = calls.get(index) ?? {
+      index,
+      name: '',
+      arguments: '',
+    };
+    const nextName = row?.function?.name ?? row?.name;
+    const nextArguments = row?.function?.arguments ?? row?.arguments;
+    calls.set(index, {
+      ...current,
+      ...(typeof row?.id === 'string' && row.id ? { id: row.id } : {}),
+      ...(typeof row?.type === 'string' && row.type ? { type: row.type } : {}),
+      name: snapshot
+        ? (typeof nextName === 'string' ? nextName : current.name)
+        : appendStreamFragment(current.name, nextName),
+      arguments: snapshot
+        ? (typeof nextArguments === 'string' ? nextArguments : current.arguments)
+        : appendStreamFragment(current.arguments, nextArguments),
+    });
+  });
+
+  const legacy = choice?.delta?.function_call;
+  if (legacy && typeof legacy === 'object') {
+    const current = calls.get(0) ?? { index: 0, name: '', arguments: '' };
+    calls.set(0, {
+      ...current,
+      name: appendStreamFragment(current.name, legacy.name),
+      arguments: appendStreamFragment(current.arguments, legacy.arguments),
+    });
+  }
+}
+
+function materializeStreamToolCalls(
+  calls: ReadonlyMap<number, StreamToolCallAccumulator>
+): Array<Record<string, any>> {
+  return Array.from(calls.values())
+    .sort((left, right) => left.index - right.index)
+    .map((call) => ({
+      id: call.id || `call_stream_${call.index}`,
+      type: call.type || 'function',
+      function: {
+        name: call.name,
+        arguments: call.arguments,
+      },
+    }));
+}
+
+function readToolLoopJsonPayload(payload: any): ToolLoopModelResult {
+  const message = payload?.choices?.[0]?.message ?? {};
+  const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+  const content = readAssistantText(payload);
+  return {
+    content: content === '模型返回了空内容。' && toolCalls.length ? '' : content,
+    reasoningContent: readReasoningText(payload),
+    usage: readTokenUsage(payload),
+    toolCalls,
+    raw: payload,
+  };
+}
+
+async function readStreamingToolLoopCompletion(
+  response: Response,
+  onStreamUpdate?: (update: ChatStreamUpdate) => void
+): Promise<ToolLoopModelResult> {
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+  if (
+    contentType.includes('application/json') ||
+    !contentType.includes('text/event-stream')
+  ) {
+    const body = await readLimitedResponseText(response, maxJsonResponseBytes, '外部联网搜索对话');
+    if (looksLikeHtmlResponse(body, contentType)) {
+      throw new Error('外部联网搜索对话返回了 HTML 页面，请检查 Base URL。');
+    }
+    try {
+      return readToolLoopJsonPayload(JSON.parse(body));
+    } catch (error) {
+      throw new Error(
+        `外部联网搜索对话返回的 JSON 无法解析：${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  const state = {
+    content: '',
+    reasoningContent: '',
+    usage: undefined as ChatTokenUsage | undefined,
+    lastPayload: undefined as unknown,
+    sawStreamPayload: false,
+    done: false,
+    toolCalls: new Map<number, StreamToolCallAccumulator>(),
+  };
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  const processBlock = (block: string) => {
+    const data = block
+      .split('\n')
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n')
+      .trim();
+    if (!data) return;
+    if (data === '[DONE]') {
+      state.done = true;
+      return;
+    }
+    if (new TextEncoder().encode(data).byteLength > maxStreamEventBytes) {
+      throw new Error('模型返回的单个流事件过大，已停止接收。');
+    }
+    let payload: any;
+    try {
+      payload = JSON.parse(data);
+    } catch (error) {
+      throw new Error(`无法解析模型流事件：${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (payload?.error) {
+      const message =
+        typeof payload.error?.message === 'string'
+          ? payload.error.message
+          : compactResponseText(JSON.stringify(payload.error));
+      throw new Error(`外部联网搜索流式请求失败：${message}`);
+    }
+    state.sawStreamPayload = true;
+    state.lastPayload = payload;
+    const contentUpdate = readStreamContentUpdate(payload);
+    const reasoningDelta = readStreamReasoningDelta(payload);
+    const usage = readTokenUsage(payload);
+    if (contentUpdate) {
+      state.content = contentUpdate.snapshot
+        ? contentUpdate.text
+        : state.content + contentUpdate.text;
+    }
+    if (typeof reasoningDelta === 'string') {
+      state.reasoningContent += reasoningDelta;
+    }
+    if (usage) state.usage = usage;
+    collectStreamToolCalls(payload, state.toolCalls);
+    if (state.content.length + state.reasoningContent.length > maxStreamOutputCharacters) {
+      throw new Error('模型输出过长，已停止接收以保护应用内存。');
+    }
+    if (contentUpdate?.text || reasoningDelta || usage) {
+      onStreamUpdate?.({
+        content: state.content,
+        reasoningContent: state.reasoningContent || undefined,
+        usage: state.usage,
+        raw: payload,
+      });
+    }
+  };
+
+  const consumeText = (text: string) => {
+    buffer += text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    if (new TextEncoder().encode(buffer).byteLength > maxStreamEventBytes) {
+      throw new Error('模型流缓冲区过大或事件分隔符无效，已停止接收。');
+    }
+    let separatorIndex = buffer.indexOf('\n\n');
+    while (separatorIndex >= 0) {
+      const block = buffer.slice(0, separatorIndex);
+      buffer = buffer.slice(separatorIndex + 2);
+      processBlock(block);
+      separatorIndex = buffer.indexOf('\n\n');
+    }
+  };
+
+  const reader = response.body?.getReader();
+  try {
+    if (!reader) {
+      consumeText(await response.text());
+    } else {
+      while (!state.done) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        consumeText(decoder.decode(value, { stream: true }));
+      }
+      if (state.done) await reader.cancel();
+      consumeText(decoder.decode());
+    }
+    if (buffer.trim() && !state.done) processBlock(buffer);
+    if (!state.sawStreamPayload) {
+      throw new Error('模型没有返回有效的流式事件。');
+    }
+    const toolCalls = materializeStreamToolCalls(state.toolCalls);
+    return {
+      content: state.content || (toolCalls.length || state.reasoningContent ? '' : '模型返回了空内容。'),
+      reasoningContent: state.reasoningContent || undefined,
+      usage: state.usage,
+      toolCalls,
+      raw: state.lastPayload,
+    };
   } finally {
     reader?.releaseLock();
     responseAbortCleanups.get(response)?.();
@@ -1848,55 +2104,6 @@ function mergeTokenUsage(a?: ChatTokenUsage, b?: ChatTokenUsage): ChatTokenUsage
   };
 }
 
-function readUsageFromChatCompletion(payload: any): ChatTokenUsage | undefined {
-  const usage = payload?.usage;
-  if (!usage || typeof usage !== 'object') return undefined;
-  const inputTokens =
-    typeof usage.prompt_tokens === 'number'
-      ? usage.prompt_tokens
-      : typeof usage.input_tokens === 'number'
-        ? usage.input_tokens
-        : undefined;
-  const outputTokens =
-    typeof usage.completion_tokens === 'number'
-      ? usage.completion_tokens
-      : typeof usage.output_tokens === 'number'
-        ? usage.output_tokens
-        : undefined;
-  const reasoningTokens =
-    typeof usage.completion_tokens_details?.reasoning_tokens === 'number'
-      ? usage.completion_tokens_details.reasoning_tokens
-      : typeof usage.reasoning_tokens === 'number'
-        ? usage.reasoning_tokens
-        : undefined;
-  const cachedInputTokens =
-    typeof usage.prompt_tokens_details?.cached_tokens === 'number'
-      ? usage.prompt_tokens_details.cached_tokens
-      : undefined;
-  const totalTokens =
-    typeof usage.total_tokens === 'number'
-      ? usage.total_tokens
-      : inputTokens !== undefined || outputTokens !== undefined
-        ? (inputTokens ?? 0) + (outputTokens ?? 0)
-        : undefined;
-  if (
-    inputTokens === undefined &&
-    outputTokens === undefined &&
-    reasoningTokens === undefined &&
-    cachedInputTokens === undefined &&
-    totalTokens === undefined
-  ) {
-    return undefined;
-  }
-  return {
-    ...(inputTokens !== undefined ? { inputTokens } : {}),
-    ...(outputTokens !== undefined ? { outputTokens } : {}),
-    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
-    ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
-    ...(totalTokens !== undefined ? { totalTokens } : {}),
-  };
-}
-
 async function sendExternalSearchToolChat({
   provider,
   modelId,
@@ -1906,6 +2113,7 @@ async function sendExternalSearchToolChat({
   parameterSettings,
   maxOutputTokens,
   externalSearch,
+  beforeProviderRequest,
   onStreamUpdate,
   signal,
 }: {
@@ -1917,6 +2125,9 @@ async function sendExternalSearchToolChat({
   parameterSettings?: ModelParameterSettings;
   maxOutputTokens?: number;
   externalSearch: ExternalSearchSettings;
+  beforeProviderRequest?: (
+    context: ExternalSearchProviderRequestContext
+  ) => Promise<void> | void;
   onStreamUpdate?: (update: ChatStreamUpdate) => void;
   signal?: AbortSignal;
 }): Promise<ChatCompletionResult> {
@@ -1948,15 +2159,7 @@ async function sendExternalSearchToolChat({
   const baseUrl = assertBaseUrl(provider);
   const tools = [getExternalSearchToolDefinition()];
   const maxRounds = Math.max(1, Math.min(4, externalSearch.maxToolRounds || 3));
-  const searchFetch: typeof fetch = async (input, init) => {
-    const url =
-      typeof input === 'string'
-        ? input
-        : input instanceof URL
-          ? input.toString()
-          : (input as Request).url;
-    return providerFetch(url, init ?? {}, 30_000);
-  };
+  const reasoningActivityEnabled = reasoningEffort !== 'off';
 
   let aggregatedUsage: ChatTokenUsage | undefined;
   const collectedSearches: ExternalSearchResult[] = [];
@@ -1967,6 +2170,41 @@ async function sendExternalSearchToolChat({
   let finalReasoning: string | undefined;
   let webSearchTriggered = false;
   let thinkingSegment = 0;
+  let providerRequestCount = 0;
+
+  const requestProviderCompletion = async (
+    body: Record<string, unknown>,
+    label: string,
+    onPartial?: (update: ChatStreamUpdate) => void
+  ): Promise<ToolLoopModelResult> => {
+    const context: ExternalSearchProviderRequestContext = {
+      requestNumber: providerRequestCount + 1,
+      ...(signal ? { signal } : {}),
+    };
+    await beforeProviderRequest?.(context);
+    if (signal?.aborted) {
+      throw createAbortError();
+    }
+    providerRequestCount = context.requestNumber;
+    const response = await providerFetch(
+      `${baseUrl}/chat/completions`,
+      {
+        method: 'POST',
+        headers: {
+          ...authHeaders(provider),
+          Accept: 'text/event-stream, application/json',
+        },
+        body: JSON.stringify(body),
+        signal,
+      },
+      openAiProRequestTimeoutMs
+    );
+    if (!response.ok) {
+      const responseBody = await readLimitedResponseText(response, maxErrorResponseBytes, label);
+      throw new Error(`${label}失败：${response.status} ${compactResponseText(responseBody)}`);
+    }
+    return readStreamingToolLoopCompletion(response, onPartial);
+  };
 
   const publish = (extra?: Partial<ChatStreamUpdate>) => {
     onStreamUpdate?.({
@@ -2010,73 +2248,72 @@ async function sendExternalSearchToolChat({
     if (signal?.aborted) {
       throw createAbortError();
     }
-    // Placeholder thinking while waiting for this model round.
-    noteThinking(finalReasoning, true);
-    publish();
+    finalContent = '';
+    // Only show an idle thinking row when reasoning was not explicitly disabled.
+    if (reasoningActivityEnabled) {
+      noteThinking(undefined, true);
+      publish();
+    }
 
     const body: Record<string, unknown> = {
       model: modelId,
       messages: openAiMessages,
       tools,
       tool_choice: 'auto',
-      stream: false,
+      stream: true,
+      stream_options: { include_usage: true },
     };
     const normalizedEffort = normalizeReasoningEffort(provider, requestModel, reasoningEffort);
     applyModelParameterOptions(body, parameterSettings, provider, requestModel, normalizedEffort);
     applyOutputTokenLimit(body, provider, maxOutputTokens);
     applyReasoningOptions(body, provider, modelId, normalizedEffort);
 
-    const response = await providerFetch(
-      `${baseUrl}/chat/completions`,
-      {
-        method: 'POST',
-        headers: authHeaders(provider),
-        body: JSON.stringify(body),
-        signal,
-      },
-      openAiProRequestTimeoutMs
+    const usageBeforeRound = aggregatedUsage;
+    let streamedReasoning: string | undefined;
+    const result = await requestProviderCompletion(
+      body,
+      '外部联网搜索对话',
+      (update) => {
+        finalContent = update.content;
+        if (update.reasoningContent !== undefined) {
+          streamedReasoning = update.reasoningContent;
+          if (reasoningActivityEnabled) {
+            finalReasoning = update.reasoningContent;
+            noteThinking(update.reasoningContent, true);
+          }
+        }
+        publish({
+          usage: mergeTokenUsage(usageBeforeRound, update.usage),
+          raw: update.raw,
+        });
+      }
     );
-    const responseBody = await readLimitedResponseText(
-      response,
-      response.ok ? 2_000_000 : maxErrorResponseBytes,
-      '外部联网搜索对话'
-    );
-    if (!response.ok) {
-      throw new Error(`外部联网搜索对话失败：${response.status} ${compactResponseText(responseBody)}`);
-    }
-    let payload: any;
-    try {
-      payload = JSON.parse(responseBody);
-    } catch {
-      throw new Error('外部联网搜索对话返回了无效 JSON。');
-    }
-    lastPayload = payload;
-    aggregatedUsage = mergeTokenUsage(aggregatedUsage, readUsageFromChatCompletion(payload));
+    lastPayload = result.raw;
+    aggregatedUsage = mergeTokenUsage(aggregatedUsage, result.usage);
 
-    const choice = payload?.choices?.[0];
-    const message = choice?.message ?? {};
-    const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
-    const content = readAssistantText(payload);
-    const reasoning = readReasoningText(payload);
+    const toolCalls = result.toolCalls;
+    const content = result.content;
+    const reasoning = result.reasoningContent ?? streamedReasoning;
     if (content && content !== '模型返回了空内容。') {
       finalContent = content;
     }
-    if (reasoning) finalReasoning = reasoning;
+    if (reasoningActivityEnabled && reasoning) finalReasoning = reasoning;
     // Keep thinking open if tools will follow; complete when this is the final answer.
-    noteThinking(reasoning ?? finalReasoning, toolCalls.length > 0);
+    if (reasoningActivityEnabled) {
+      noteThinking(reasoning, toolCalls.length > 0);
+    }
     if (!toolCalls.length) {
       activityTimeline = completeOpenThinkingSteps(activityTimeline);
-      noteThinking(finalReasoning, false);
-      publish({ raw: payload });
+      publish({ raw: result.raw });
       break;
     }
-    publish({ raw: payload });
+    publish({ raw: result.raw });
 
     openAiMessages.push({
       role: 'assistant',
-      content: typeof message.content === 'string' ? message.content : content === '模型返回了空内容。' ? null : content,
+      content: content === '模型返回了空内容。' || !content ? null : content,
       tool_calls: toolCalls,
-      ...(message.reasoning_content ? { reasoning_content: message.reasoning_content } : {}),
+      ...(reasoning ? { reasoning_content: reasoning } : {}),
     });
 
     // Thought finished for this round; tools begin next on the timeline.
@@ -2142,13 +2379,16 @@ async function sendExternalSearchToolChat({
       } else {
         try {
           const query = parseSearchWebToolArguments(call?.function?.arguments ?? call?.arguments);
-          const result = await runExternalSearch({
-            query,
-            service,
-            maxResults: externalSearch.maxResults,
-            fetchImpl: searchFetch,
-            signal,
-          });
+          const result = reindexExternalSearchResult(
+            await runExternalSearch({
+              query,
+              service,
+              maxResults: externalSearch.maxResults,
+              fetchImpl: guardedApiFetch,
+              signal,
+            }),
+            collectedSearches.reduce((total, search) => total + search.items.length, 0)
+          );
           collectedSearches.push(result);
           webSearchTriggered = true;
           toolContent = formatExternalSearchToolResult(result);
@@ -2198,12 +2438,16 @@ async function sendExternalSearchToolChat({
 
     if (round === maxRounds - 1) {
       // Force one last answer without tools when the budget is exhausted.
-      noteThinking(finalReasoning, true);
-      publish();
+      finalContent = '';
+      if (reasoningActivityEnabled) {
+        noteThinking(undefined, true);
+        publish();
+      }
       const finalBody: Record<string, unknown> = {
         model: modelId,
         messages: openAiMessages,
-        stream: false,
+        stream: true,
+        stream_options: { include_usage: true },
       };
       applyModelParameterOptions(
         finalBody,
@@ -2219,34 +2463,38 @@ async function sendExternalSearchToolChat({
         modelId,
         normalizeReasoningEffort(provider, requestModel, reasoningEffort)
       );
-      const finalResponse = await providerFetch(
-        `${baseUrl}/chat/completions`,
-        {
-          method: 'POST',
-          headers: authHeaders(provider),
-          body: JSON.stringify(finalBody),
-          signal,
-        },
-        openAiProRequestTimeoutMs
+      const usageBeforeFinal = aggregatedUsage;
+      let streamedFinalReasoning: string | undefined;
+      const finalResult = await requestProviderCompletion(
+        finalBody,
+        '外部联网搜索收尾',
+        (update) => {
+          finalContent = update.content;
+          if (update.reasoningContent !== undefined) {
+            streamedFinalReasoning = update.reasoningContent;
+            if (reasoningActivityEnabled) {
+              finalReasoning = update.reasoningContent;
+              noteThinking(update.reasoningContent, true);
+            }
+          }
+          publish({
+            usage: mergeTokenUsage(usageBeforeFinal, update.usage),
+            raw: update.raw,
+          });
+        }
       );
-      const finalResponseBody = await readLimitedResponseText(
-        finalResponse,
-        finalResponse.ok ? 2_000_000 : maxErrorResponseBytes,
-        '外部联网搜索收尾'
-      );
-      if (!finalResponse.ok) {
-        throw new Error(
-          `外部联网搜索收尾失败：${finalResponse.status} ${compactResponseText(finalResponseBody)}`
-        );
+      lastPayload = finalResult.raw;
+      aggregatedUsage = mergeTokenUsage(aggregatedUsage, finalResult.usage);
+      finalContent = finalResult.content;
+      const finalRoundReasoning = finalResult.reasoningContent ?? streamedFinalReasoning;
+      if (reasoningActivityEnabled && finalRoundReasoning) {
+        finalReasoning = finalRoundReasoning;
       }
-      const finalPayload = JSON.parse(finalResponseBody);
-      lastPayload = finalPayload;
-      aggregatedUsage = mergeTokenUsage(aggregatedUsage, readUsageFromChatCompletion(finalPayload));
-      finalContent = readAssistantText(finalPayload);
-      finalReasoning = readReasoningText(finalPayload) ?? finalReasoning;
+      if (reasoningActivityEnabled) {
+        noteThinking(finalRoundReasoning, false);
+      }
       activityTimeline = completeOpenThinkingSteps(activityTimeline);
-      noteThinking(finalReasoning, false);
-      publish({ raw: finalPayload });
+      publish({ raw: finalResult.raw });
       break;
     }
   }
@@ -2276,6 +2524,7 @@ export async function sendOpenAiCompatibleChat({
   onStreamUpdate,
   webSearch,
   externalSearch,
+  beforeExternalSearchProviderRequest,
   mcp,
   signal,
 }: ChatCompletionArgs): Promise<ChatCompletionResult> {
@@ -2462,6 +2711,9 @@ export async function sendOpenAiCompatibleChat({
   }
 
   if (externalSearchActive && externalSearch) {
+    if (isOpenAiResponsesOnlyModel(provider, modelId)) {
+      throw new Error('当前 Responses-only 模型暂不支持外部 search_web 工具循环，请切换其他聊天模型。');
+    }
     return sendExternalSearchToolChat({
       provider,
       modelId,
@@ -2471,6 +2723,7 @@ export async function sendOpenAiCompatibleChat({
       parameterSettings,
       maxOutputTokens,
       externalSearch,
+      beforeProviderRequest: beforeExternalSearchProviderRequest,
       onStreamUpdate,
       signal,
     });

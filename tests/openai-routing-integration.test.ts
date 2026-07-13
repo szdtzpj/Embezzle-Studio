@@ -617,6 +617,167 @@ describe('official OpenAI MCP routing integration', () => {
   });
 });
 
+describe('external search tool-loop routing', () => {
+  const externalSearch = {
+    enabled: true,
+    selectedServiceId: 'tavily-test',
+    maxResults: 3,
+    maxToolRounds: 1,
+    services: [{
+      id: 'tavily-test',
+      kind: 'tavily' as const,
+      name: 'Tavily',
+      apiKey: 'tvly-test',
+    }],
+  };
+
+  it('rejects Responses-only Pro models before contacting Chat Completions', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(sendOpenAiCompatibleChat({
+      provider,
+      modelId: 'gpt-5.2-pro',
+      model: createModelInfoFromId(provider, 'gpt-5.2-pro', 'manual'),
+      messages: [message],
+      reasoningEffort: 'default',
+      externalSearch,
+    })).rejects.toThrow(/Responses-only.*暂不支持外部/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('authorizes every model request and emits one thinking step per model round', async () => {
+    const sse = (payloads: unknown[]) => new Response(
+      `${payloads.map((payload) => `data: ${JSON.stringify(payload)}\n\n`).join('')}data: [DONE]\n\n`,
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } }
+    );
+    let chatRequest = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === 'https://api.tavily.com/search') {
+        return new Response(JSON.stringify({
+          results: [{ title: 'Source', url: 'https://example.com/source', content: 'evidence' }],
+        }), { status: 200 });
+      }
+      chatRequest += 1;
+      if (chatRequest === 1) {
+        return sse([
+          { choices: [{ delta: { reasoning_content: 'Need current ' } }] },
+          {
+            choices: [{
+              delta: {
+                reasoning_content: 'evidence.',
+                tool_calls: [{
+                  index: 0,
+                  id: 'call-search-1',
+                  type: 'function',
+                  function: { name: 'search_', arguments: '{"query":' },
+                }],
+              },
+            }],
+          },
+          {
+            choices: [{
+              delta: { tool_calls: [{
+                index: 0,
+                id: 'call-search-1',
+                function: { name: 'web', arguments: '"latest evidence"}' },
+              }] },
+            }],
+          },
+          { choices: [], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } },
+        ]);
+      }
+      return sse([
+        { choices: [{ delta: { reasoning_content: 'Evidence checked.' } }] },
+        { choices: [{ delta: { content: 'Final answer ' } }] },
+        { choices: [{ delta: { content: '[citation](1:s1).' } }] },
+        { choices: [], usage: { prompt_tokens: 8, completion_tokens: 3, total_tokens: 11 } },
+      ]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const beforeProviderRequest = vi.fn(async (_context: { requestNumber: number }) => undefined);
+    const streamedContent: string[] = [];
+
+    const result = await sendOpenAiCompatibleChat({
+      provider,
+      modelId: 'gpt-4.1',
+      model: createModelInfoFromId(provider, 'gpt-4.1', 'manual'),
+      messages: [message],
+      reasoningEffort: 'default',
+      externalSearch,
+      beforeExternalSearchProviderRequest: beforeProviderRequest,
+      onStreamUpdate: (update) => streamedContent.push(update.content),
+    });
+
+    expect(beforeProviderRequest.mock.calls.map(([context]) => context.requestNumber)).toEqual([1, 2]);
+    expect(result.activityTimeline?.map((step) => step.kind)).toEqual([
+      'thinking',
+      'tool',
+      'thinking',
+    ]);
+    expect(result.activityTimeline?.filter((step) => step.kind === 'thinking')).toHaveLength(2);
+    expect(result.activityTimeline?.at(-1)).toMatchObject({
+      kind: 'thinking',
+      status: 'completed',
+      content: 'Evidence checked.',
+    });
+    expect(result.citations?.[0]).toMatchObject({ id: 's1', index: 1 });
+    expect(result.usage).toMatchObject({ inputTokens: 13, outputTokens: 5, totalTokens: 18 });
+    expect(streamedContent).toContain('Final answer ');
+    expect(streamedContent.at(-1)).toBe('Final answer [citation](1:s1).');
+  });
+
+  it('does not duplicate a final thinking step when the model skips search', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{
+        message: { content: 'No search needed.', reasoning_content: 'The answer is already known.' },
+      }],
+    }), { status: 200 })));
+
+    const result = await sendOpenAiCompatibleChat({
+      provider,
+      modelId: 'gpt-4.1',
+      model: createModelInfoFromId(provider, 'gpt-4.1', 'manual'),
+      messages: [message],
+      reasoningEffort: 'default',
+      externalSearch,
+    });
+
+    expect(result.activityTimeline).toHaveLength(1);
+    expect(result.activityTimeline?.[0]).toMatchObject({
+      kind: 'thinking',
+      status: 'completed',
+      content: 'The answer is already known.',
+    });
+  });
+
+  it('does not expose thinking or search activity when reasoning is disabled', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{
+        message: {
+          content: 'Plain answer.',
+          reasoning_content: 'Provider returned this despite reasoning being disabled.',
+        },
+      }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const result = await sendOpenAiCompatibleChat({
+      provider,
+      modelId: 'gpt-4.1',
+      model: createModelInfoFromId(provider, 'gpt-4.1', 'manual'),
+      messages: [message],
+      reasoningEffort: 'off',
+      externalSearch,
+    });
+
+    expect(result.activityTimeline).toBeUndefined();
+    expect(result.toolActivity).toBeUndefined();
+    expect(result.reasoningContent).toBeUndefined();
+    expect(result.webSearchTriggered).toBe(false);
+  });
+});
+
 describe('provider Responses Web Search integration', () => {
   it.each([
     {

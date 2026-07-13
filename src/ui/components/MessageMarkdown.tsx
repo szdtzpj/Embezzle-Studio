@@ -2,12 +2,15 @@ import { useMemo } from 'react';
 import { Linking, Platform, StyleSheet } from 'react-native';
 import Markdown from 'react-native-markdown-display';
 
+import type { WebCitation } from '../../domain/types';
+import { resolveMessageMarkdownLink } from '../../services/externalSearch';
 import { useKelivoTheme, type KelivoTheme } from '../theme';
 
 export interface MessageMarkdownProps {
   content: string;
   /** Optional color override for body text (e.g. error state). */
   color?: string;
+  citations?: readonly WebCitation[];
   /**
    * `muted` — smaller, secondary colors for thinking / process text.
    * `default` — full assistant body styling.
@@ -28,6 +31,7 @@ const monoFont = Platform.select({
 export function MessageMarkdown({
   content,
   color,
+  citations,
   variant = 'default',
 }: MessageMarkdownProps) {
   const theme = useKelivoTheme();
@@ -40,8 +44,9 @@ export function MessageMarkdown({
     <Markdown
       style={markdownStyles}
       onLinkPress={(url) => {
-        if (!url?.trim()) return false;
-        void Linking.openURL(url).catch(() => undefined);
+        const target = resolveMessageMarkdownLink(url ?? '', citations);
+        if (!target) return false;
+        void Linking.openURL(target).catch(() => undefined);
         // Return false so the library does not also try to handle navigation.
         return false;
       }}

@@ -45,6 +45,7 @@ import {
   isExternalSearchServiceConfigured,
   runExternalSearch,
 } from '../../services/externalSearch';
+import { guardedApiFetch } from '../../services/openAiCompatible';
 import { useKelivoTheme, type KelivoTheme } from '../theme';
 import { AnimatedPressable } from './AnimatedPressable';
 import { BraveMark, DuckDuckGoMark, FirecrawlMark } from './SearchBrandMarks';
@@ -356,6 +357,7 @@ export const SearchServicesPanel = forwardRef<
         service,
         maxResults: 1,
         timeoutMs: 15_000,
+        fetchImpl: guardedApiFetch,
       });
       setConnectionStatus((current) => ({ ...current, [service.id]: 'ok' }));
     } catch {

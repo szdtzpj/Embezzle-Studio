@@ -210,6 +210,33 @@ describe('MCP approval UI safety regressions', () => {
     expect(continuationSource).toContain('trackedUsageEvent = nextUsageEvent;');
   });
 
+  it('authorizes and records every external-search model continuation', async () => {
+    const appSource = await source('App.tsx');
+    const continuationSource = sliceBetween(
+      appSource,
+      'beforeExternalSearchProviderRequest: async (context) => {',
+      '...(mcpPlugin'
+    );
+
+    const authorizationIndex = continuationSource.indexOf(
+      'const authorized = await authorizeProviderRequestPlan({'
+    );
+    const countIndex = continuationSource.indexOf(
+      'providerRequestCount: context.requestNumber'
+    );
+    const persistenceIndex = continuationSource.indexOf(
+      'await persistProviderUsageEvents([nextUsageEvent]);'
+    );
+    expect(continuationSource).toContain(
+      'if (context.requestNumber <= trackedUsageEvent.providerRequestCount)'
+    );
+    expect(authorizationIndex).toBeGreaterThanOrEqual(0);
+    expect(countIndex).toBeGreaterThan(authorizationIndex);
+    expect(persistenceIndex).toBeGreaterThan(countIndex);
+    expect(continuationSource).toContain('trackedUsageEvent = nextUsageEvent;');
+    expect(continuationSource).toContain('assertCurrentProviderSendAllowed(controller, context.signal);');
+  });
+
   it('passes only enabled provider-bound plugins and revalidates official routing plus model MCP capability', async () => {
     const [appSource, routeSource] = await Promise.all([
       source('App.tsx'),

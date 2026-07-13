@@ -2173,7 +2173,15 @@ describe('versioned and ordered saves', () => {
       comparisonGroupId: 'compare-1',
       selectedForContext: true,
       webSearchTriggered: true,
-      citations: [{ url: 'https://example.com/source', title: 'Source', startIndex: 0, endIndex: 6 }],
+      citations: [{
+        url: 'https://example.com/source',
+        title: 'Source',
+        text: 'Evidence snippet',
+        id: 's1',
+        index: 1,
+        startIndex: 0,
+        endIndex: 6,
+      }],
       requestMetrics: { durationMs: 1200, timeToFirstTokenMs: 200 },
       usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
     };
@@ -2195,6 +2203,11 @@ describe('versioned and ordered saves', () => {
       selectedForContext: true,
       webSearchTriggered: true,
       requestMetrics: { durationMs: 1200, timeToFirstTokenMs: 200 },
+    });
+    expect(loaded?.messages[0].citations?.[0]).toMatchObject({
+      text: 'Evidence snippet',
+      id: 's1',
+      index: 1,
     });
     expect(loaded?.plugins[0].authorization).toBe('Bearer plugin-secret');
   });
