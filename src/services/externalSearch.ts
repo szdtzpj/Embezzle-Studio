@@ -12,6 +12,11 @@ export const MAX_EXTERNAL_SEARCH_RESULTS = 10;
 export const MAX_EXTERNAL_SEARCH_TOOL_ROUNDS = 4;
 export const DEFAULT_EXTERNAL_SEARCH_MAX_RESULTS = 5;
 export const DEFAULT_EXTERNAL_SEARCH_MAX_TOOL_ROUNDS = 3;
+export const DEFAULT_GROK_SEARCH_MODEL = 'grok-4.5';
+
+const MAX_EXTERNAL_SEARCH_JSON_BYTES = 5 * 1024 * 1024;
+const MAX_EXTERNAL_SEARCH_HTML_BYTES = 3 * 1024 * 1024;
+const MAX_EXTERNAL_SEARCH_ERROR_BYTES = 64 * 1024;
 
 export const externalSearchProviderKinds = [
   'bing',
@@ -36,27 +41,40 @@ export const externalSearchProviderHints: Record<ExternalSearchProviderKind, str
   duckduckgo: '本地匿名搜索，无需 API Key',
   tavily: '需 API Key · 面向 AI 的搜索 API',
   brave: '需 API Key · Brave Search API',
-  firecrawl: 'API Key 可选 · 可留空使用免费额度，填写可提升配额',
+  firecrawl: '云端需 API Key · 无鉴权自建实例可留空',
   grok: '需 API Key · xAI web_search / x_search',
 };
 
-/** Kinds that can run without a user API key (HTML scrape or open self-host). */
+/** Kinds/endpoints that can run without a user API key (HTML scrape or open self-host). */
 export function externalSearchProviderAllowsAnonymous(
-  kind: ExternalSearchProviderKind
+  kind: ExternalSearchProviderKind,
+  endpoint?: string
 ): boolean {
-  return kind === 'bing' || kind === 'duckduckgo' || kind === 'firecrawl';
+  if (kind === 'bing' || kind === 'duckduckgo') return true;
+  if (kind !== 'firecrawl' || !endpoint?.trim()) return false;
+  try {
+    return new URL(endpoint.trim()).hostname.toLowerCase() !== 'api.firecrawl.dev';
+  } catch {
+    return false;
+  }
 }
 
-/** Kinds that refuse to start without an API key. */
+/** Kinds/endpoints that refuse to start without an API key. */
 export function externalSearchProviderRequiresApiKey(
-  kind: ExternalSearchProviderKind
+  kind: ExternalSearchProviderKind,
+  endpoint?: string
 ): boolean {
-  return kind === 'tavily' || kind === 'brave' || kind === 'grok';
+  return (
+    kind === 'tavily' ||
+    kind === 'brave' ||
+    kind === 'grok' ||
+    (kind === 'firecrawl' && !externalSearchProviderAllowsAnonymous(kind, endpoint))
+  );
 }
 
 export function isExternalSearchServiceConfigured(service: ExternalSearchService): boolean {
   if (service.apiKey?.trim()) return true;
-  return externalSearchProviderAllowsAnonymous(service.kind);
+  return externalSearchProviderAllowsAnonymous(service.kind, service.endpoint);
 }
 
 export const defaultExternalSearchSettings: ExternalSearchSettings = {
@@ -115,11 +133,15 @@ export function normalizeExternalSearchSettings(value: unknown): ExternalSearchS
     MAX_EXTERNAL_SEARCH_TOOL_ROUNDS,
     DEFAULT_EXTERNAL_SEARCH_MAX_TOOL_ROUNDS
   );
-  const services = normalizeExternalSearchServices(raw.services);
+  const services = normalizeExternalSearchServices(
+    Array.isArray(raw.services) ? raw.services : catalogDefaultExternalSearch.services
+  );
   const selectedServiceId =
     typeof raw.selectedServiceId === 'string' &&
     services.some((service) => service.id === raw.selectedServiceId)
       ? raw.selectedServiceId
+      : services.some((service) => service.id === catalogDefaultExternalSearch.selectedServiceId)
+        ? catalogDefaultExternalSearch.selectedServiceId
       : services[0]?.id;
 
   return {
@@ -397,6 +419,47 @@ function mergeSearchItems(
   return Array.from(byUrl.values()).slice(0, maxItems);
 }
 
+function isBlockedEndpointHostname(rawHost: string): boolean {
+  const host = rawHost.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local') ||
+    host === '::' ||
+    host === '::1'
+  ) {
+    return true;
+  }
+  if (
+    host.includes(':') &&
+    (host.startsWith('fc') ||
+      host.startsWith('fd') ||
+      /^fe[89ab]/.test(host) ||
+      host.startsWith('ff'))
+  ) {
+    return true;
+  }
+
+  const ipv4Candidate = host.startsWith('::ffff:') ? host.slice('::ffff:'.length) : host;
+  const parts = ipv4Candidate.split('.');
+  if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part))) return false;
+  const bytes = parts.map(Number);
+  if (bytes.some((byte) => byte < 0 || byte > 255)) return true;
+  const [a, b] = bytes;
+  return Boolean(
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 0) ||
+    (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    a >= 224
+  );
+}
+
 function assertSafePublicHttpsEndpoint(raw: string, label: string): URL {
   let url: URL;
   try {
@@ -407,14 +470,7 @@ function assertSafePublicHttpsEndpoint(raw: string, label: string): URL {
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
     return searchError(`${label} Endpoint 必须是无凭据、无查询参数的 HTTPS 地址。`);
   }
-  const host = url.hostname.toLowerCase();
-  if (
-    host === 'localhost' ||
-    host.endsWith('.localhost') ||
-    host === '127.0.0.1' ||
-    host === '::1' ||
-    host.endsWith('.local')
-  ) {
+  if (isBlockedEndpointHostname(url.hostname)) {
     return searchError(`${label} Endpoint 不能指向本机或私网主机名。`);
   }
   return url;
@@ -509,7 +565,11 @@ async function fetchText(
   const timeout = setTimeout(() => controller.abort(new Error('搜索超时。')), timeoutMs);
   try {
     const response = await fetchImpl(url, { ...init, signal: controller.signal });
-    const text = await response.text();
+    const text = await readLimitedSearchResponseText(
+      response,
+      response.ok ? MAX_EXTERNAL_SEARCH_HTML_BYTES : MAX_EXTERNAL_SEARCH_ERROR_BYTES,
+      label
+    );
     if (!response.ok) {
       return searchError(`${label} 失败：HTTP ${response.status} ${text.slice(0, 240)}`);
     }
@@ -517,6 +577,46 @@ async function fetchText(
   } finally {
     clearTimeout(timeout);
     signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+async function readLimitedSearchResponseText(
+  response: Response,
+  maxBytes: number,
+  label: string
+): Promise<string> {
+  const contentLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    return searchError(`${label} 响应过大（上限 ${Math.round(maxBytes / 1024)} KiB）。`);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const text = await response.text();
+    if (new TextEncoder().encode(text).byteLength > maxBytes) {
+      return searchError(`${label} 响应过大（上限 ${Math.round(maxBytes / 1024)} KiB）。`);
+    }
+    return text;
+  }
+
+  const decoder = new TextDecoder();
+  let totalBytes = 0;
+  let text = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      totalBytes += value?.byteLength ?? 0;
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        return searchError(`${label} 响应过大（上限 ${Math.round(maxBytes / 1024)} KiB）。`);
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+    return text;
+  } finally {
+    reader.releaseLock();
   }
 }
 
@@ -812,7 +912,11 @@ async function readJson(
   response: Response,
   label: string
 ): Promise<Record<string, unknown>> {
-  const text = await response.text();
+  const text = await readLimitedSearchResponseText(
+    response,
+    response.ok ? MAX_EXTERNAL_SEARCH_JSON_BYTES : MAX_EXTERNAL_SEARCH_ERROR_BYTES,
+    label
+  );
   if (!response.ok) {
     return searchError(`${label} 失败：HTTP ${response.status} ${text.slice(0, 240)}`);
   }
@@ -1001,7 +1105,7 @@ async function searchGrok(
   signal?: AbortSignal
 ): Promise<ExternalSearchResult> {
   const endpoint = defaultEndpoint('grok', service.endpoint);
-  const model = (service.model?.trim() || 'grok-4-1-fast-reasoning').slice(0, 120);
+  const model = (service.model?.trim() || DEFAULT_GROK_SEARCH_MODEL).slice(0, 120);
   const controller = new AbortController();
   const onAbort = () => controller.abort(signal?.reason);
   if (signal?.aborted) throw signal.reason ?? new Error('搜索已取消。');
@@ -1108,7 +1212,7 @@ export async function runExternalSearch(args: ExternalSearchRunArgs): Promise<Ex
   if (!query) return searchError('搜索 query 不能为空。');
   if (query.length > 500) return searchError('搜索 query 过长（最多 500 字符）。');
   if (
-    externalSearchProviderRequiresApiKey(args.service.kind) &&
+    externalSearchProviderRequiresApiKey(args.service.kind, args.service.endpoint) &&
     !args.service.apiKey?.trim()
   ) {
     return searchError(`${externalSearchProviderLabels[args.service.kind]} 需要配置 API Key。`);

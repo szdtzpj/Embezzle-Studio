@@ -247,7 +247,10 @@ describe('Android mobile UI regressions', () => {
     expect(appSource).toContain('citations={message.citations}');
     expect(appSource).toContain("message.status === 'pending'");
     expect(appSource).toContain('<Text selectable style={styles.messageText}>');
-    expect(mdSource).toContain('react-native-markdown-display');
+    expect(mdSource).not.toContain('react-native-markdown-display');
+    expect(mdSource).toContain('MAX_MARKDOWN_RENDER_CHARS');
+    expect(mdSource).toContain('parseMarkdownBlocks');
+    expect(mdSource).toContain('resolveMessageMarkdownLink');
     expect(mdSource).toContain('export function MessageMarkdown');
     expect(mdSource).toContain('resolveMessageMarkdownLink');
   });

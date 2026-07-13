@@ -37,6 +37,7 @@ import type {
   WebSearchSettings,
 } from '../../domain/types';
 import {
+  DEFAULT_GROK_SEARCH_MODEL,
   externalSearchProviderAllowsAnonymous,
   externalSearchProviderHints,
   externalSearchProviderKinds,
@@ -277,7 +278,7 @@ export const SearchServicesPanel = forwardRef<
   const [formKind, setFormKind] = useState<ExternalSearchProviderKind | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [endpoint, setEndpoint] = useState('');
-  const [model, setModel] = useState('grok-4-1-fast-reasoning');
+  const [model, setModel] = useState(DEFAULT_GROK_SEARCH_MODEL);
   const [editingServiceId, setEditingServiceId] = useState<string | null>(null);
   const [actionService, setActionService] = useState<ExternalSearchService | null>(null);
   const [testingServiceId, setTestingServiceId] = useState<string | null>(null);
@@ -297,7 +298,7 @@ export const SearchServicesPanel = forwardRef<
     setEditingServiceId(null);
     setApiKey('');
     setEndpoint('');
-    setModel('grok-4-1-fast-reasoning');
+    setModel(DEFAULT_GROK_SEARCH_MODEL);
   };
 
   const openAddForm = (kind: ExternalSearchProviderKind) => {
@@ -306,7 +307,7 @@ export const SearchServicesPanel = forwardRef<
     setEditingServiceId(null);
     setApiKey('');
     setEndpoint('');
-    setModel(kind === 'grok' ? 'grok-4-1-fast-reasoning' : '');
+    setModel(kind === 'grok' ? DEFAULT_GROK_SEARCH_MODEL : '');
   };
 
   const openEditForm = (service: ExternalSearchService) => {
@@ -316,12 +317,14 @@ export const SearchServicesPanel = forwardRef<
     setEditingServiceId(service.id);
     setApiKey(service.apiKey ?? '');
     setEndpoint(service.endpoint ?? '');
-    setModel(service.model ?? (service.kind === 'grok' ? 'grok-4-1-fast-reasoning' : ''));
+    setModel(service.model ?? (service.kind === 'grok' ? DEFAULT_GROK_SEARCH_MODEL : ''));
   };
 
-  const formRequiresKey = formKind ? externalSearchProviderRequiresApiKey(formKind) : true;
+  const formRequiresKey = formKind
+    ? externalSearchProviderRequiresApiKey(formKind, endpoint)
+    : true;
   const formAllowsAnonymous = formKind
-    ? externalSearchProviderAllowsAnonymous(formKind)
+    ? externalSearchProviderAllowsAnonymous(formKind, endpoint)
     : false;
   const canSubmitForm = Boolean(formKind) && (formRequiresKey ? Boolean(apiKey.trim()) : true);
 
@@ -338,8 +341,8 @@ export const SearchServicesPanel = forwardRef<
   };
 
   const addProviderKind = (kind: ExternalSearchProviderKind) => {
-    // Pure free local engines: one-tap. Firecrawl / key services open config sheet
-    // so the user can optionally fill API Key (or leave blank for free tier).
+    // Pure free local engines are one-tap. Firecrawl and keyed services need
+    // a form because Firecrawl cloud requires a key while self-host may not.
     if (kind === 'bing' || kind === 'duckduckgo') {
       onAddExternalService({ kind });
       closeForms();
@@ -645,7 +648,7 @@ export const SearchServicesPanel = forwardRef<
                     formRequiresKey
                       ? '粘贴你的 API Key'
                       : formKind === 'firecrawl'
-                        ? '可留空使用免费额度；填写可提升配额'
+                        ? '云端需 API Key；无鉴权自建实例填写 URL 后可留空'
                         : '可留空'
                   }
                   placeholderTextColor={colors.placeholder}
@@ -661,7 +664,7 @@ export const SearchServicesPanel = forwardRef<
                   <TextInput
                     value={model}
                     onChangeText={setModel}
-                    placeholder="grok-4-1-fast-reasoning"
+                    placeholder={DEFAULT_GROK_SEARCH_MODEL}
                     placeholderTextColor={colors.placeholder}
                     autoCapitalize="none"
                     style={styles.formInput}

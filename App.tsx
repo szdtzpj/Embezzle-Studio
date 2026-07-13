@@ -146,6 +146,7 @@ import {
 } from './src/services/providerWebSearch';
 import { isOpenAiResponsesOnlyModel } from './src/services/openAiResponses';
 import {
+  DEFAULT_GROK_SEARCH_MODEL,
   externalSearchProviderLabels,
   externalSearchProviderRequiresApiKey,
   isExternalSearchReady,
@@ -3282,7 +3283,7 @@ function AppContent({
   }) {
     if (!ensureWorkspaceWritable()) return;
     const apiKey = input.apiKey?.trim() || undefined;
-    if (externalSearchProviderRequiresApiKey(input.kind) && !apiKey) {
+    if (externalSearchProviderRequiresApiKey(input.kind, input.endpoint) && !apiKey) {
       setNotice(`请填写 ${externalSearchProviderLabels[input.kind]} 的 API Key。`);
       return;
     }
@@ -3305,7 +3306,7 @@ function AppContent({
         ...(input.kind === 'grok' && input.model?.trim()
           ? { model: input.model.trim() }
           : input.kind === 'grok'
-            ? { model: 'grok-4-1-fast-reasoning' }
+            ? { model: DEFAULT_GROK_SEARCH_MODEL }
             : {}),
       };
       const services = sameKind
