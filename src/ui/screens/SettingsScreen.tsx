@@ -61,6 +61,8 @@ export interface SettingsScreenProps {
   hasMoreCandidates?: boolean;
   /** Main-branch feature cards, keyed by settings section. */
   renderToolsSection?: (section: SettingsToolsSection) => ReactNode;
+  /** Optional trailing control for tools sub-pages (e.g. search services +). */
+  renderToolsHeaderRight?: (section: SettingsToolsSection) => ReactNode;
   onSelectProvider: (providerId: string) => void;
   onToggleProviderEnabled: (providerId: string) => void;
   onDeleteProvider: (providerId: string, onDeleted?: () => void) => void;
@@ -90,6 +92,7 @@ export interface SettingsScreenHandle {
   resetNavigation: () => void;
   openProviders: () => void;
   openActiveProviderModels: () => void;
+  /** Jump from composer (etc.) into a tools sub-page without manual drill-down. */
   openToolsSection: (section: SettingsToolsSection) => void;
 }
 
@@ -201,7 +204,7 @@ export const SettingsScreen = forwardRef<SettingsScreenHandle, SettingsScreenPro
         { key: 'providerModels' },
       ]);
     },
-    openToolsSection: (section) => {
+    openToolsSection: (section: SettingsToolsSection) => {
       setPendingProviderDeletion(null);
       setNavigationDirection('forward');
       setStack([{ key: 'main' }, { key: 'tools', section }]);
@@ -249,6 +252,7 @@ export const SettingsScreen = forwardRef<SettingsScreenHandle, SettingsScreenPro
           <ToolsPanelScreen
             title={settingsToolsSectionTitles[current.section]}
             onBack={pop}
+            headerRight={props.renderToolsHeaderRight?.(current.section)}
           >
             {props.renderToolsSection?.(current.section) ?? null}
           </ToolsPanelScreen>
