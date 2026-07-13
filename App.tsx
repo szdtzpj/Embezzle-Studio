@@ -66,6 +66,7 @@ import { Bailian, ChatGLM, Claude, DeepSeek, Doubao, Gemini, Kimi, Minimax, NewA
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/arkModels';
 import { appInfo } from './src/data/appInfo';
 import { createDefaultWorkspace, defaultParameterSettings } from './src/data/providerCatalog';
+import { workspaceProjectPresets, type WorkspaceProjectPreset } from './src/data/workspaceProjectPresets';
 import type {
   AppWorkspace,
   ChatCompletionResult,
@@ -1309,6 +1310,11 @@ type SettingsToolsSection =
   | 'voice'
   | 'mcp';
 
+type SettingsDestination =
+  | { key: 'providers' }
+  | { key: 'providerModels' }
+  | { key: 'tools'; section: SettingsToolsSection };
+
 function AppContent({
   colorMode,
   onSetColorMode,
@@ -1336,10 +1342,14 @@ function AppContent({
   const [persistenceLoadError, setPersistenceLoadError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsMounted, setSettingsMounted] = useState(false);
+  const [pendingSettingsDestination, setPendingSettingsDestination] =
+    useState<SettingsDestination | null>(null);
+  const [comparisonConfigProviderId, setComparisonConfigProviderId] = useState<string | null>(null);
   const settingsScreenRef = useRef<SettingsScreenHandle>(null);
   const workspaceReadOnly = isWorkspaceReadOnly(booting, persistenceReady);
   const closeSettings = useCallback(() => {
     settingsScreenRef.current?.resetNavigation();
+    setPendingSettingsDestination(null);
     setSettingsOpen(false);
     if (workspaceReadOnly) {
       return;
@@ -1364,6 +1374,10 @@ function AppContent({
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
   const [parameterMenuOpen, setParameterMenuOpen] = useState(false);
+  const [composerLayoutY, setComposerLayoutY] = useState(0);
+  const parameterMenuMaxHeight = composerLayoutY > 0
+    ? Math.min(520, Math.max(0, Math.floor(composerLayoutY - 12)))
+    : 420;
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [input, setInput] = useState('');
   const [manualModelId, setManualModelId] = useState('');
@@ -1832,6 +1846,24 @@ function AppContent({
       modelPricing: workspace.modelPricing,
     });
   }, [busy, settingsOpen, workspace.conversations, workspace.modelPricing]);
+
+  useEffect(() => {
+    if (!settingsOpen || !settingsMounted || !pendingSettingsDestination) {
+      return;
+    }
+    const settings = settingsScreenRef.current;
+    if (!settings) {
+      return;
+    }
+    if (pendingSettingsDestination.key === 'providers') {
+      settings.openProviders();
+    } else if (pendingSettingsDestination.key === 'providerModels') {
+      settings.openActiveProviderModels();
+    } else {
+      settings.openToolsSection(pendingSettingsDestination.section);
+    }
+    setPendingSettingsDestination(null);
+  }, [pendingSettingsDestination, settingsMounted, settingsOpen]);
 
   useEffect(() => {
     if (!sidebarOpen) {
@@ -2554,9 +2586,13 @@ function AppContent({
     }
   }
 
-  function createProject() {
+  function createProjectFromInput(
+    input: { name: string; systemPrompt?: string },
+    successNotice: string
+  ) {
     if (!ensureWorkspaceWritable()) return;
-    if (workspace.conversations.length >= maxSavedConversations) {
+    const currentWorkspace = workspaceRef.current;
+    if (currentWorkspace.conversations.length >= maxSavedConversations) {
       setNotice(`本机最多保存 ${maxSavedConversations} 个对话；请先导出备份并删除不需要的对话，再创建项目。`);
       return;
     }
@@ -2564,32 +2600,52 @@ function AppContent({
       const id = createId('project');
       const now = Date.now();
       const projects = createWorkspaceProject(
-        workspace.projects,
-        { name: projectNewName },
+        currentWorkspace.projects,
+        input,
         { id, now }
       );
+      const project = projects.find((candidate) => candidate.id === id);
+      if (!project) {
+        throw new Error('项目创建后无法读取。');
+      }
+      const instruction = projectInstructionMessage(project, now);
+      const messages = instruction ? [instruction] : [];
       const conversation: ChatConversation = {
         id: createId('conversation'),
         title: '新对话',
         projectId: id,
         createdAt: now,
         updatedAt: now,
-        messages: [],
+        messages,
       };
-      setWorkspace((current) => ({
-        ...current,
+      setWorkspace({
+        ...currentWorkspace,
         projects,
         activeProjectId: id,
         activeConversationId: conversation.id,
-        conversations: sortConversations([conversation, ...current.conversations]),
-        messages: [],
-      }));
+        conversations: sortConversations([conversation, ...currentWorkspace.conversations]),
+        messages,
+      });
       resetComposerForConversationChange();
       setProjectNewName('');
-      setNotice('项目已在本机创建；创建本身不会调用模型或产生费用。');
+      setNotice(successNotice);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '项目创建失败。');
     }
+  }
+
+  function createCustomProject() {
+    createProjectFromInput(
+      { name: projectNewName },
+      '项目已在本机创建；创建本身不会调用模型或产生费用。'
+    );
+  }
+
+  function createPresetProject(preset: WorkspaceProjectPreset) {
+    createProjectFromInput(
+      { name: preset.suggestedName, systemPrompt: preset.systemPrompt },
+      `已创建“${preset.title}”本地预设项目；尚未调用模型或产生费用。`
+    );
   }
 
   function saveActiveProject() {
@@ -3058,6 +3114,33 @@ function AppContent({
         ? `已开启 ${workspace.comparisonTargets.length} 模型对比；每次发送会产生同等数量的独立服务商请求。`
         : ''
     );
+  }
+
+  async function handleComposerComparisonPress() {
+    if (comparisonActive) {
+      setComparisonEnabled(false);
+      return;
+    }
+    if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
+      return;
+    }
+    if (comparisonRuntimes.length >= 2) {
+      setComparisonEnabled(true);
+      return;
+    }
+
+    const openSettings = await requestConfirm({
+      title: '先设置对比模型',
+      description: `请选择至少 2 个聊天模型。每次发送会向各服务商分别发起请求，并由你的服务商账户承担相应费用。`,
+      confirmLabel: '去设置',
+      cancelLabel: '暂不',
+      tone: 'primary',
+    });
+    if (!openSettings) {
+      return;
+    }
+    setNotice('');
+    openSettingsDestination({ key: 'tools', section: 'comparison' });
   }
 
   function setWebSearchEnabled(enabled: boolean) {
@@ -3924,7 +4007,12 @@ function AppContent({
       }));
       setModelSearchQuery('');
       setModelCapabilityFilter('all');
-      setNotice(result.notice);
+      if (result.tone === 'success') {
+        setNotice('');
+        showToast(result.notice);
+      } else {
+        setNotice(result.notice);
+      }
     } catch (error) {
       if (isAbortError(error) || controller.signal.aborted) {
         setNotice('已停止刷新模型列表。');
@@ -6981,6 +7069,10 @@ function AppContent({
     if (!activeProvider) {
       return null;
     }
+    const comparisonConfigProvider = workspace.providers.find(
+      (provider) => provider.id === comparisonConfigProviderId && isProviderEnabled(provider)
+    ) ?? activeProvider;
+    const comparisonConfigModels = getSelectableModels(comparisonConfigProvider);
     switch (section) {
       case 'workspace':
         return (
@@ -7008,7 +7100,29 @@ function AppContent({
                   ))}
                 </ScrollView>
                 <View style={styles.fieldGroup}>
-                  <Text style={styles.fieldLabel}>新项目名称</Text>
+                  <Text style={styles.fieldLabel}>从本地预设开始</Text>
+                  <View style={styles.projectPresetGrid}>
+                    {workspaceProjectPresets.map((preset) => (
+                      <AnimatedPressable
+                        key={preset.id}
+                        accessibilityRole="button"
+                        accessibilityLabel={`创建${preset.title}预设项目`}
+                        accessibilityState={{ disabled: workspaceReadOnly }}
+                        disabled={workspaceReadOnly}
+                        onPress={() => createPresetProject(preset)}
+                        style={[styles.projectPresetCard, workspaceReadOnly && styles.buttonDisabled]}
+                      >
+                        <Text style={styles.projectPresetTitle}>{preset.title}</Text>
+                        <Text style={styles.projectPresetDescription}>{preset.description}</Text>
+                      </AnimatedPressable>
+                    ))}
+                  </View>
+                  <Text style={styles.modelOverrideHint}>
+                    预设只写入本机项目指令，不绑定模型、联网搜索或 MCP；只有你主动发送消息时才会交给所选服务商。
+                  </Text>
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>创建空白项目</Text>
                   <TextInput
                     value={projectNewName}
                     editable={!workspaceReadOnly}
@@ -7021,7 +7135,7 @@ function AppContent({
                 <AnimatedPressable
                   accessibilityRole="button"
                   disabled={workspaceReadOnly || !projectNewName.trim()}
-                  onPress={createProject}
+                  onPress={createCustomProject}
                   style={[styles.secondaryButton, (workspaceReadOnly || !projectNewName.trim()) && styles.buttonDisabled]}
                 >
                   <Text style={styles.secondaryButtonText}>创建本地项目</Text>
@@ -7079,35 +7193,75 @@ function AppContent({
                 <Text style={styles.modelOverrideHint}>
                   在各服务商标签间切换并选择 2–{comparisonTargetLimit} 个聊天模型。发送一次会产生同等数量的独立调用，费用由你的服务商账户结算。
                 </Text>
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.providerRow}
-                >
-                  {addedModels
-                    .filter((model) => inferModelTask(model) === 'chat')
-                    .map((model) => {
-                      const selected = workspace.comparisonTargets.some(
-                        (target) => target.providerId === activeProvider.id && target.modelId === model.id
-                      );
-                      return (
-                        <AnimatedPressable
-                          key={`compare:${activeProvider.id}:${model.id}`}
-                          accessibilityRole="checkbox"
-                          accessibilityState={{ checked: selected }}
-                          onPress={() => toggleComparisonTarget(activeProvider.id, model.id)}
-                          style={[styles.providerChip, selected && styles.providerChipActive]}
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>服务商</Text>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.providerRow}
+                  >
+                    {workspace.providers.filter(isProviderEnabled).map((provider) => (
+                      <AnimatedPressable
+                        key={`compare-provider:${provider.id}`}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: provider.id === comparisonConfigProvider.id }}
+                        onPress={() => setComparisonConfigProviderId(provider.id)}
+                        style={[
+                          styles.providerChip,
+                          provider.id === comparisonConfigProvider.id && styles.providerChipActive,
+                        ]}
+                      >
+                        <Text
+                          numberOfLines={1}
+                          style={[
+                            styles.providerChipText,
+                            provider.id === comparisonConfigProvider.id && styles.providerChipTextActive,
+                          ]}
                         >
-                          <Text
-                            numberOfLines={1}
-                            style={[styles.providerChipText, selected && styles.providerChipTextActive]}
-                          >
-                            {formatCompactModelName(model.id, activeProvider.name)}
-                          </Text>
-                        </AnimatedPressable>
-                      );
-                    })}
-                </ScrollView>
+                          {provider.name}
+                        </Text>
+                      </AnimatedPressable>
+                    ))}
+                  </ScrollView>
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>{comparisonConfigProvider.name} 的聊天模型</Text>
+                  {comparisonConfigModels.some((model) => inferModelTask(model) === 'chat') ? (
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={styles.providerRow}
+                    >
+                      {comparisonConfigModels
+                        .filter((model) => inferModelTask(model) === 'chat')
+                        .map((model) => {
+                          const selected = workspace.comparisonTargets.some(
+                            (target) => target.providerId === comparisonConfigProvider.id && target.modelId === model.id
+                          );
+                          return (
+                            <AnimatedPressable
+                              key={`compare:${comparisonConfigProvider.id}:${model.id}`}
+                              accessibilityRole="checkbox"
+                              accessibilityState={{ checked: selected }}
+                              onPress={() => toggleComparisonTarget(comparisonConfigProvider.id, model.id)}
+                              style={[styles.providerChip, selected && styles.providerChipActive]}
+                            >
+                              <Text
+                                numberOfLines={1}
+                                style={[styles.providerChipText, selected && styles.providerChipTextActive]}
+                              >
+                                {formatCompactModelName(model.id, activeProvider.name)}
+                              </Text>
+                            </AnimatedPressable>
+                          );
+                        })}
+                    </ScrollView>
+                  ) : (
+                    <View style={styles.settingsEmptyState}>
+                      <Text style={styles.modelOverrideHint}>这个服务商尚未添加聊天模型，请先到模型配置中添加。</Text>
+                    </View>
+                  )}
+                </View>
                 <AnimatedPressable
                   accessibilityRole="switch"
                   accessibilityState={{ checked: comparisonActive }}
@@ -7897,6 +8051,19 @@ function AppContent({
     }
   }
 
+  function openSettingsDestination(destination: SettingsDestination) {
+    Keyboard.dismiss();
+    setAttachMenuOpen(false);
+    setReasoningMenuOpen(false);
+    setParameterMenuOpen(false);
+    setActiveVideoAttachmentId(null);
+    setSidebarOpen(false);
+    setModelPickerOpen(false);
+    setPendingSettingsDestination(destination);
+    setSettingsMounted(true);
+    setSettingsOpen(true);
+  }
+
   function toggleSettingsScreen() {
     Keyboard.dismiss();
     setAttachMenuOpen(false);
@@ -8036,6 +8203,8 @@ function AppContent({
             activeModelId={activeModelId}
             onClose={() => setModelPickerOpen(false)}
             onSelect={selectProviderModel}
+            onOpenProviders={() => openSettingsDestination({ key: 'providers' })}
+            onOpenModels={() => openSettingsDestination({ key: 'providerModels' })}
           />
 
           {settingsMounted && activeProvider ? (
@@ -8459,13 +8628,17 @@ function AppContent({
                 <Pressable
                   style={styles.attachMenuBackdrop}
                   onPress={() => {
+                    Keyboard.dismiss();
                     setAttachMenuOpen(false);
                     setReasoningMenuOpen(false);
                     setParameterMenuOpen(false);
                   }}
                 />
               ) : null}
-              <View style={styles.composerWrapper}>
+              <View
+                style={styles.composerWrapper}
+                onLayout={(event) => setComposerLayoutY(event.nativeEvent.layout.y)}
+              >
                 <AnimatePresence>
                   {reasoningMenuOpen && canConfigureReasoning ? (
                     <MotiView
@@ -8556,9 +8729,18 @@ function AppContent({
                       animate={{ opacity: 1, translateY: 0, scale: 1 }}
                       exit={{ opacity: 0, translateY: 8, scale: 0.96 }}
                       transition={{ type: 'timing', duration: 160 }}
-                      style={styles.parameterMenu}
+                      style={[styles.parameterMenu, { maxHeight: parameterMenuMaxHeight }]}
                     >
-                      <View style={styles.toolMenuHeader}>
+                      <ScrollView
+                        testID="parameter-menu-scroll"
+                        style={styles.parameterMenuScroll}
+                        contentContainerStyle={styles.parameterMenuContent}
+                        keyboardDismissMode={Platform.OS === 'android' ? 'on-drag' : 'interactive'}
+                        keyboardShouldPersistTaps="handled"
+                        nestedScrollEnabled
+                        onScrollBeginDrag={Keyboard.dismiss}
+                      >
+                        <View style={styles.toolMenuHeader}>
                         <SlidersHorizontal size={18} color={palette.text} strokeWidth={2.2} />
                         <View style={styles.toolMenuTitleBlock}>
                           <Text style={styles.toolMenuTitle}>参数调整</Text>
@@ -8566,9 +8748,9 @@ function AppContent({
                             {parameterRuntimeSummary(effectiveParameterSettings)}
                           </Text>
                         </View>
-                      </View>
+                        </View>
 
-                      <View style={styles.toolMenuSection}>
+                        <View style={styles.toolMenuSection}>
                         <Text style={styles.toolMenuSectionTitle}>模式</Text>
                         <View style={styles.toolSegmentRow}>
                           <AnimatedPressable
@@ -8598,10 +8780,10 @@ function AppContent({
                             当前模型的思考模式会优先；本次请求不会发送采样与惩罚参数。
                           </Text>
                         ) : null}
-                      </View>
+                        </View>
 
-                      {parametersActive ? (
-                        <>
+                        {parametersActive ? (
+                          <>
                           {activeParameterControls.map((control) => (
                             <ParameterControl
                               key={`${control.key}:${control.min}:${control.max}`}
@@ -8618,8 +8800,9 @@ function AppContent({
                             <RefreshCw size={15} color={palette.text} strokeWidth={2.2} />
                             <Text style={styles.parameterResetButtonText}>还原默认设置</Text>
                           </AnimatedPressable>
-                        </>
-                      ) : null}
+                          </>
+                        ) : null}
+                      </ScrollView>
                     </MotiView>
                   ) : null}
                 </AnimatePresence>
@@ -8680,7 +8863,7 @@ function AppContent({
                         accessibilityRole="button"
                         accessibilityLabel={comparisonActive ? '关闭多模型对比' : '开启多模型对比'}
                         accessibilityState={{ selected: comparisonActive }}
-                        onPress={() => setComparisonEnabled(!comparisonActive)}
+                        onPress={() => { void handleComposerComparisonPress(); }}
                         style={[
                           styles.composerToolButton,
                           comparisonActive && styles.composerToolButtonActive,
@@ -8789,6 +8972,7 @@ function AppContent({
                           accessibilityLabel="调整生成参数"
                           accessibilityState={{ expanded: parameterMenuOpen }}
                           onPress={() => {
+                            Keyboard.dismiss();
                             setReasoningMenuOpen(false);
                             setAttachMenuOpen(false);
                             setParameterMenuOpen((current) => !current);
@@ -9856,6 +10040,8 @@ function ParameterControl({
           }}
           onBlur={() => setDraft(formatParameterValue(value))}
           keyboardType="default"
+          returnKeyType="done"
+          onSubmitEditing={Keyboard.dismiss}
           selectTextOnFocus
           style={styles.parameterValueInput}
         />
@@ -9886,6 +10072,8 @@ interface ModelPickerModalProps {
   activeModelId: string;
   onClose: () => void;
   onSelect: (providerId: string, modelId: string) => void;
+  onOpenProviders: () => void;
+  onOpenModels: () => void;
 }
 
 function ModelPickerModal({
@@ -9895,6 +10083,8 @@ function ModelPickerModal({
   activeModelId,
   onClose,
   onSelect,
+  onOpenProviders,
+  onOpenModels,
 }: ModelPickerModalProps) {
   const { styles } = useAppTheme();
   const [mounted, setMounted] = useState(visible);
@@ -10022,6 +10212,29 @@ function ModelPickerModal({
                 ) : (
                   <View style={styles.modelPickerEmpty}>
                     <Text style={styles.modelPickerEmptyText}>暂无已添加模型</Text>
+                    <Text style={styles.modelPickerEmptyDescription}>
+                      先配置自己的服务商，再从模型目录添加需要的模型。
+                    </Text>
+                    <View style={styles.modelPickerEmptyActions}>
+                      <AnimatedPressable
+                        accessibilityRole="button"
+                        accessibilityLabel="前往配置供应商"
+                        testID="model-picker-open-providers"
+                        onPress={onOpenProviders}
+                        style={styles.modelPickerEmptyPrimaryButton}
+                      >
+                        <Text style={styles.modelPickerEmptyPrimaryText}>配置供应商</Text>
+                      </AnimatedPressable>
+                      <AnimatedPressable
+                        accessibilityRole="button"
+                        accessibilityLabel="前往模型配置"
+                        testID="model-picker-open-models"
+                        onPress={onOpenModels}
+                        style={styles.modelPickerEmptySecondaryButton}
+                      >
+                        <Text style={styles.modelPickerEmptySecondaryText}>模型配置</Text>
+                      </AnimatedPressable>
+                    </View>
                   </View>
                 )}
               </ScrollView>
@@ -10816,6 +11029,34 @@ function createAppStyles(palette: AppPalette) {
     paddingRight: 18,
     paddingVertical: 2,
   },
+  projectPresetGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  projectPresetCard: {
+    width: '48%',
+    minHeight: 92,
+    flexGrow: 1,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.bg,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    gap: 5,
+  },
+  projectPresetTitle: {
+    color: palette.text,
+    fontSize: 14,
+    lineHeight: 19,
+    fontWeight: '700',
+  },
+  projectPresetDescription: {
+    color: palette.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+  },
   providerChip: {
     height: 36,
     paddingHorizontal: 14,
@@ -10857,6 +11098,14 @@ function createAppStyles(palette: AppPalette) {
   },
   fieldGroup: {
     gap: 8,
+  },
+  settingsEmptyState: {
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.bg,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
   },
   fieldLabel: {
     color: palette.textSecondary,
@@ -11396,18 +11645,62 @@ function createAppStyles(palette: AppPalette) {
     fontWeight: '700',
   },
   modelPickerEmpty: {
-    minHeight: 84,
+    minHeight: 164,
     borderRadius: radii.md,
     borderWidth: 1,
     borderColor: palette.border,
     backgroundColor: palette.surfaceAlt,
     alignItems: 'center',
     justifyContent: 'center',
+    padding: 16,
+    gap: 8,
   },
   modelPickerEmptyText: {
+    color: palette.text,
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  modelPickerEmptyDescription: {
     color: palette.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+    textAlign: 'center',
+  },
+  modelPickerEmptyActions: {
+    alignSelf: 'stretch',
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 4,
+  },
+  modelPickerEmptyPrimaryButton: {
+    flex: 1,
+    minHeight: 40,
+    borderRadius: radii.pill,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: palette.accent,
+    paddingHorizontal: 12,
+  },
+  modelPickerEmptyPrimaryText: {
+    color: palette.textOnAccent,
     fontSize: 13,
-    fontWeight: '600',
+    fontWeight: '700',
+  },
+  modelPickerEmptySecondaryButton: {
+    flex: 1,
+    minHeight: 40,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: palette.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: palette.bg,
+    paddingHorizontal: 12,
+  },
+  modelPickerEmptySecondaryText: {
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '700',
   },
   messageBubble: {
     maxWidth: '100%',
@@ -12243,13 +12536,19 @@ function createAppStyles(palette: AppPalette) {
     marginBottom: 8,
     backgroundColor: palette.bg,
     borderRadius: radii.md,
-    padding: 12,
-    gap: 12,
+    overflow: 'hidden',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.12,
     shadowRadius: 16,
     elevation: 8,
+  },
+  parameterMenuScroll: {
+    flexShrink: 1,
+  },
+  parameterMenuContent: {
+    padding: 12,
+    gap: 12,
   },
   toolMenuHeader: {
     flexDirection: 'row',
