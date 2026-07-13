@@ -1,10 +1,10 @@
-# Continuation Checkpoint — 2026-07-13 (`1.7.0` release source)
+# Continuation Checkpoint — 2026-07-13 (`1.7.0` formal release)
 
 ## Identity and source truth
 
 - Application metadata is `1.7.0`, Android versionCode `13`, package `com.szdtzpj.embezzlestudio`, minSdk `24`, targetSdk `36`.
 - Source starts from BlueOcean223's merged PR [#21](https://github.com/szdtzpj/Embezzle-Studio/pull/21), merge commit `350f3330083cdd82ab09722e77d1c1c4fa3e2e2b`.
-- Public stable Latest remains immutable [`v1.6.0`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.6.0) until the protected `v1.7.0` workflow completes. The local APK below is an acceptance candidate, not a GitHub Release asset.
+- Public stable Latest is the immutable [`v1.7.0`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.7.0). The local APK below remains an acceptance candidate and is not substituted for the independently rebuilt Actions asset.
 - User-owned untracked product-feedback Markdown/images and ignored local credentials remain outside the release diff. No reset, checkout overwrite, broad `git add -A`, production-key copy, or secret output was used.
 
 ## `1.7.0` scope
@@ -52,16 +52,28 @@ Official references checked on 2026-07-13:
   - exactly one signer, production certificate SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`; v2/v3 signatures and zipalign pass
   - final APK timestamp is later than every changed tracked source file
 
+## Formal publication evidence
+
+- Release-source PR [#22](https://github.com/szdtzpj/Embezzle-Studio/pull/22) passed the required Quality check and merged as `f32a6bcf72f1599885d30b50457e9b52e5c6991b`. Remote `main`, the Release target, and the annotated `v1.7.0` tag's peeled commit match that SHA.
+- main Quality run [`29248074227`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29248074227), protected Android run [`29249471821`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29249471821), and post-release Pages run [`29250790845`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29250790845) completed successfully.
+- The formal Release is stable Latest, immutable, non-draft, and non-prerelease. Its three assets are all in `uploaded` state and were uploaded by `github-actions[bot]`; `gh release verify` and `gh release verify-asset` for every downloaded asset validate GitHub's signed release attestation.
+- Formal assets are stored under `D:\EmbezzleStudio-Releases\v1.7.0`:
+  - `Embezzle-Studio-v1.7.0-release.apk`: 97,731,031 bytes, SHA-256 `638fd7cbe378d76476f1147f3cd7fbbe491e8dfb048553491387ba77319938bf`
+  - `Embezzle-Studio-v1.7.0-release.apk.sha256`: 101 bytes, GitHub digest `a081e769491ab24389bb84945d892f67d349ba33618bce288dc04893fe08b6a9`
+  - `apksigner-report.txt`: 998 bytes, GitHub digest `864d896cd0dbb2ce91183de0121a23d064e0ed4e03988fc15f2411ec0785583f`
+- Independent Build Tools 36.0.0 inspection of the formal APK confirms `com.szdtzpj.embezzlestudio` / version `1.7.0` / code `13`, minSdk `24`, targetSdk `36`, `allowBackup=false`, and `adjustResize`. Permissions are `INTERNET`, `MODIFY_AUDIO_SETTINGS`, intentional `RECORD_AUDIO`, `VIBRATE`, `ACCESS_NETWORK_STATE`, `WAKE_LOCK`, biometric/fingerprint, legacy storage capped at SDK 32, and the package-scoped dynamic-receiver permission; `CAMERA`, `SYSTEM_ALERT_WINDOW`, and `REQUEST_INSTALL_PACKAGES` are absent.
+- `apksigner` confirms exactly one signer with production certificate SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`; v2/v3 pass and zipalign succeeds.
+- The public Pages manifest, trusted `release.html`, and APK `HEAD` return anonymous HTTP 200 and match the formal Release version, size, SHA-256, and managed URL. A complete anonymous Pages download stored at `D:\EmbezzleStudio-Releases\v1.7.0-pages-public-verify-20260713-204649` is 97,731,031 bytes with the same SHA-256.
+- A headed browser rendered the public release page title, formal version, timestamp, filename, byte size, SHA-256, trust explanation, and download control. It exposed one console error because browsers ignore `frame-ancestors` when delivered through a meta CSP; the follow-up source removes that unsupported directive while keeping the enforceable restrictive meta policy, and adds a regression assertion.
+
 ## Not yet verified at this checkpoint
 
-- `adb devices -l` is empty. The candidate has not been installed in this session, so Android rendering, search-provider network behavior, Markdown/table scrolling, activity animation, process memory, keyboard/inset behavior, and upgrade acceptance are not claimed from a connected device.
+- `adb devices -l` is empty. The formal Actions APK has not been installed in this session, so Android rendering, search-provider network behavior, Markdown/table scrolling, activity animation, process memory, keyboard/inset behavior, and upgrade acceptance are not claimed from a connected device.
 - The browser smoke does not exhaust every Markdown construct, narrow-screen layout, long-table horizontal scrolling, animation, or local proxy path. Production Web intentionally rejects provider/search calls; only local explicit proxy mode can exercise them.
 - No real Tavily, Brave, xAI, Firecrawl, Bing, or DuckDuckGo request was made. Entitlement, billing, quotas, provider-side retention, anti-bot behavior, regional availability, and live response variants remain user-account/network boundaries.
 
-## Publication boundary after local acceptance
+## Remaining external acceptance boundary
 
-1. Commit only the tracked `1.7.0` release-source diff and push `codex/release-external-search-v1.7.0`.
-2. Open a ready PR, wait for the required Quality workflow, and merge through the protected main branch.
-3. Re-run Quality/Pages checks on the exact merge commit, create an annotated `v1.7.0` tag plus empty Draft Release, and dispatch the protected Android workflow.
-4. Verify the immutable formal Release, three bot-uploaded assets and digests, formal APK identity/signature/permissions, Pages manifest, trusted `release.html`, anonymous HEAD, and a complete anonymous APK download.
-5. Update README/checkpoint publication truth after the formal asset exists; never substitute the local candidate's size or digest for the Actions-built APK.
+1. Install the formal Actions APK on representative Android devices, including an upgrade from the preceding production signature, and exercise keyboard/insets, Markdown/table scrolling, activity animation, media, search, memory pressure, and settings/chat switching.
+2. Use explicitly authorized test accounts to exercise Tavily, Brave, xAI, Firecrawl, Bing, and DuckDuckGo, checking entitlement, quotas, billing, provider-side retention, regional behavior, and live response variants.
+3. Keep the local candidate and formal Actions asset distinct; all public release claims and distribution must continue to use the formal 97,731,031-byte APK and its `638fd7...938bf` digest.

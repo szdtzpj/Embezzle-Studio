@@ -145,6 +145,8 @@ describe('stageReleaseForPages', () => {
     expect(html).toContain('&lt;script&gt;alert(&quot;release notes&quot;)&lt;/script&gt;\nUse A &amp; B.');
     expect(html).not.toContain('<script>alert');
     expect(html).not.toContain('<img src=x');
+    expect(html).toContain('Content-Security-Policy');
+    expect(html).not.toContain("frame-ancestors 'none'");
     expect(html).toContain('<div><dt>版本</dt><dd>1.0.5</dd></div>');
     expect(html).toContain(`<div><dt>大小</dt><dd>${apkBytes.byteLength} 字节</dd></div>`);
     expect(html).toContain(`<code>${sha256}</code>`);
