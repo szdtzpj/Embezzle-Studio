@@ -112,6 +112,68 @@ describe('Android mobile UI regressions', () => {
     expect(appSource).toMatch(/modelPickerScroll:\s*\{[\s\S]*?flexShrink:\s*1,[\s\S]*?minHeight:\s*0,/);
   });
 
+  it('turns empty model selection and provider discovery into navigable settings flows', async () => {
+    const [appSource, settingsSource, providerDetailSource] = await Promise.all([
+      source('App.tsx'),
+      source('src/ui/screens/SettingsScreen.tsx'),
+      source('src/ui/screens/settings/ProviderDetailScreen.tsx'),
+    ]);
+
+    expect(appSource).toContain('testID="model-picker-open-providers"');
+    expect(appSource).toContain('testID="model-picker-open-models"');
+    expect(appSource).toContain("onOpenProviders={() => openSettingsDestination({ key: 'providers' })}");
+    expect(appSource).toContain("onOpenModels={() => openSettingsDestination({ key: 'providerModels' })}");
+    expect(appSource).toContain('pendingSettingsDestination');
+    expect(appSource).toContain('settings.openActiveProviderModels()');
+
+    expect(settingsSource).toContain("| { key: 'providerModels' }");
+    expect(settingsSource).toContain('openProviders: () => void;');
+    expect(settingsSource).toContain('openActiveProviderModels: () => void;');
+    expect(settingsSource).toContain('openToolsSection: (section: SettingsToolsSection) => void;');
+    expect(settingsSource).toContain("{ key: 'providerDetail' },");
+    expect(settingsSource).toContain("{ key: 'providerModels' },");
+
+    expect(providerDetailSource).toContain('testID="provider-models-entry"');
+    expect(providerDetailSource).toContain('已获取 ${candidateModelCount} 个模型候选');
+    expect(providerDetailSource).toContain('前往模型配置');
+    expect(providerDetailSource).toContain('export function ProviderModelsScreen');
+    expect(providerDetailSource).not.toContain('bottomTabs');
+    expect(providerDetailSource).not.toContain('function TabButton(');
+  });
+
+  it('keeps model discovery success transient while preserving Ark risk warnings', async () => {
+    const appSource = await source('App.tsx');
+    const refreshSource = appSource.slice(
+      appSource.indexOf('async function refreshModels()'),
+      appSource.indexOf('function resetComposerForConversationChange()')
+    );
+
+    expect(refreshSource).toContain("if (result.tone === 'success')");
+    expect(refreshSource).toContain("setNotice('');");
+    expect(refreshSource).toContain('showToast(result.notice);');
+    expect(refreshSource).toMatch(/else \{\s*setNotice\(result\.notice\);\s*\}/);
+  });
+
+  it('keeps the parameter panel reachable and dismisses the keyboard by dragging', async () => {
+    const appSource = await source('App.tsx');
+    const menuSource = appSource.slice(
+      appSource.indexOf('{parameterMenuOpen && canConfigureParameters ? ('),
+      appSource.indexOf('<View style={styles.composer}>')
+    );
+
+    expect(appSource).toContain('const parameterMenuMaxHeight = composerLayoutY > 0');
+    expect(appSource).toContain('Math.max(0, Math.floor(composerLayoutY - 12))');
+    expect(appSource).not.toContain('Math.max(120, Math.floor(composerLayoutY - 12))');
+    expect(appSource).toContain('onLayout={(event) => setComposerLayoutY(event.nativeEvent.layout.y)}');
+    expect(menuSource).toContain('testID="parameter-menu-scroll"');
+    expect(menuSource).toContain("keyboardDismissMode={Platform.OS === 'android' ? 'on-drag' : 'interactive'}");
+    expect(menuSource).toContain('keyboardShouldPersistTaps="handled"');
+    expect(menuSource).toContain('onScrollBeginDrag={Keyboard.dismiss}');
+    expect(menuSource).toContain('maxHeight: parameterMenuMaxHeight');
+    expect(appSource).toContain('onSubmitEditing={Keyboard.dismiss}');
+    expect(appSource).toMatch(/accessibilityLabel="调整生成参数"[\s\S]*?Keyboard\.dismiss\(\);/);
+  });
+
   it('uses one seamless folding glyph instead of three bouncing thinking dots', async () => {
     const appSource = await source('App.tsx');
 
@@ -210,6 +272,38 @@ describe('Android mobile UI regressions', () => {
     expect(comparisonSource.indexOf('assertProviderWebSearchMessagesSupported')).toBeLessThan(
       comparisonSource.indexOf("beginActiveRequest('多模型对比')")
     );
+  });
+
+  it('guides unconfigured comparison and offers local project presets without network defaults', async () => {
+    const [appSource, presetSource] = await Promise.all([
+      source('App.tsx'),
+      source('src/data/workspaceProjectPresets.ts'),
+    ]);
+    const comparisonHandler = appSource.slice(
+      appSource.indexOf('async function handleComposerComparisonPress()'),
+      appSource.indexOf('function setWebSearchEnabled(')
+    );
+    const projectCreation = appSource.slice(
+      appSource.indexOf('function createProjectFromInput('),
+      appSource.indexOf('function saveActiveProject(')
+    );
+
+    expect(comparisonHandler).toContain("title: '先设置对比模型'");
+    expect(comparisonHandler).toContain("confirmLabel: '去设置'");
+    expect(comparisonHandler).toContain("openSettingsDestination({ key: 'tools', section: 'comparison' })");
+    expect(appSource).toContain('onPress={() => { void handleComposerComparisonPress(); }}');
+    expect(appSource).toContain('key={`compare-provider:${provider.id}`}');
+    expect(appSource).toContain('workspace.providers.filter(isProviderEnabled)');
+    expect(appSource).toContain('onPress={() => setComparisonConfigProviderId(provider.id)}');
+    expect(appSource).not.toContain('onPress={() => selectProvider(provider.id)}');
+
+    expect(appSource).toContain('workspaceProjectPresets.map((preset) => (');
+    expect(appSource).toContain('预设只写入本机项目指令');
+    expect(projectCreation).toContain('projectInstructionMessage(project, now)');
+    expect(projectCreation).toContain('conversations: sortConversations');
+    expect(presetSource).not.toContain('defaultTarget');
+    expect(presetSource).not.toContain('apiKey');
+    expect(presetSource).not.toContain('baseUrl');
   });
 
   it('exposes only evidence-backed provider search with visible clickable citations', async () => {

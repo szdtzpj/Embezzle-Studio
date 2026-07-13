@@ -6,7 +6,6 @@ import {
   EyeOff,
   Plus,
   Search,
-  Settings2,
   Trash2,
   X,
 } from 'lucide-react-native';
@@ -22,7 +21,8 @@ import { AnimatedPressable } from '../../components/AnimatedPressable';
 import { CandidateModelRow } from '../../components/CandidateModelRow';
 import { ModelAvatar } from '../../components/ModelAvatar';
 import { ModelManageRow } from '../../components/ModelManageRow';
-import { MotionItem, MotionPresence, MotionSwap, MotionSwitch } from '../../components/Motion';
+import { MotionItem, MotionPresence, MotionSwap } from '../../components/Motion';
+import { TactileRow } from '../../components/settings/SettingsList';
 import { SettingsSelect } from '../../components/settings/SettingsSelect';
 import { useKelivoTheme, type KelivoTheme } from '../../theme';
 import type {
@@ -53,6 +53,29 @@ const providerKindOptions: Array<{ key: ProviderKind; label: string }> = [
 export interface ProviderDetailScreenProps {
   readOnly: boolean;
   provider: ProviderProfile;
+  addedModelCount: number;
+  candidateModelCount: number;
+  refreshingModels: boolean;
+  notice: string;
+  /** Draft-based setup wizard fields (main v1.2+ binding flow). */
+  nameDraft: string;
+  kindDraft: ProviderKind;
+  baseUrlDraft: string;
+  apiKeyDraft: string;
+  endpointInspection: ProviderEndpointInspection;
+  onBack: () => void;
+  onOpenModels: () => void;
+  onSetNameDraft: (name: string) => void;
+  onChangeBindingDraft: (patch: { kind?: ProviderKind; baseUrl?: string }) => void;
+  onSetApiKeyDraft: (apiKey: string) => void;
+  onSaveProviderDraft: () => void;
+  onRefreshModels: () => void;
+  onDeleteProvider?: () => void;
+}
+
+export interface ProviderModelsScreenProps {
+  readOnly: boolean;
+  provider: ProviderProfile;
   activeModelId: string;
   activeModel: ModelInfo | undefined;
   addedModels: ModelInfo[];
@@ -65,19 +88,8 @@ export interface ProviderDetailScreenProps {
   candidateModelFilters: Array<{ key: ModelCapabilityFilter; label: string }>;
   manualModelId: string;
   refreshingModels: boolean;
-  notice: string;
-  /** Draft-based setup wizard fields (main v1.2+ binding flow). */
-  nameDraft: string;
-  kindDraft: ProviderKind;
-  baseUrlDraft: string;
-  apiKeyDraft: string;
-  endpointInspection: ProviderEndpointInspection;
   hasMoreCandidates?: boolean;
   onBack: () => void;
-  onSetNameDraft: (name: string) => void;
-  onChangeBindingDraft: (patch: { kind?: ProviderKind; baseUrl?: string }) => void;
-  onSetApiKeyDraft: (apiKey: string) => void;
-  onSaveProviderDraft: () => void;
   onRefreshModels: () => void;
   onSetModelSearchQuery: (query: string) => void;
   onSetModelCapabilityFilter: (filter: ModelCapabilityFilter) => void;
@@ -90,23 +102,13 @@ export interface ProviderDetailScreenProps {
   onSetActiveModelTask: (task: ModelTask) => void;
   onToggleActiveModelCapability: (capability: Capability) => void;
   onLoadMoreCandidates?: () => void;
-  onDeleteProvider?: () => void;
 }
 
 export function ProviderDetailScreen({
   readOnly,
   provider,
-  activeModelId,
-  activeModel,
-  addedModels,
-  addedModelIds,
-  modelCandidates,
-  filteredModelCandidates,
-  renderedModelCandidates,
-  modelSearchQuery,
-  modelCapabilityFilter,
-  candidateModelFilters,
-  manualModelId,
+  addedModelCount,
+  candidateModelCount,
   refreshingModels,
   notice,
   nameDraft,
@@ -114,46 +116,22 @@ export function ProviderDetailScreen({
   baseUrlDraft,
   apiKeyDraft,
   endpointInspection,
-  hasMoreCandidates = false,
   onBack,
+  onOpenModels,
   onSetNameDraft,
   onChangeBindingDraft,
   onSetApiKeyDraft,
   onSaveProviderDraft,
   onRefreshModels,
-  onSetModelSearchQuery,
-  onSetModelCapabilityFilter,
-  onAddCandidateModel,
-  onClearCandidates,
-  onSetManualModelId,
-  onAddManualModel,
-  onSelectModel,
-  onRemoveModel,
-  onSetActiveModelTask,
-  onToggleActiveModelCapability,
-  onLoadMoreCandidates,
   onDeleteProvider,
 }: ProviderDetailScreenProps) {
   const theme = useKelivoTheme();
   const styles = getStyles(theme);
-  const [tab, setTab] = useState<'config' | 'models'>('config');
-  const [tabDirection, setTabDirection] =
-    useState<'forward' | 'backward' | 'none'>('none');
   const [showKey, setShowKey] = useState(false);
 
   useEffect(() => {
-    setTab('config');
-    setTabDirection('none');
     setShowKey(false);
   }, [provider.id]);
-
-  const selectTab = (nextTab: 'config' | 'models') => {
-    if (nextTab === tab) {
-      return;
-    }
-    setTabDirection(nextTab === 'models' ? 'forward' : 'backward');
-    setTab(nextTab);
-  };
 
   return (
     <View style={styles.container}>
@@ -204,121 +182,27 @@ export function ProviderDetailScreen({
         </View>
       </MotionPresence>
 
-      <MotionSwitch
-        motionKey={tab}
-        direction={tabDirection}
-        distance={14}
-        duration={190}
-        style={styles.body}
-      >
-        {tab === 'config' ? (
-          <ConfigTab
-            readOnly={readOnly}
-            showKey={showKey}
-            nameDraft={nameDraft}
-            kindDraft={kindDraft}
-            baseUrlDraft={baseUrlDraft}
-            apiKeyDraft={apiKeyDraft}
-            endpointInspection={endpointInspection}
-            refreshingModels={refreshingModels}
-            onToggleShowKey={() => setShowKey((v) => !v)}
-            onSetNameDraft={onSetNameDraft}
-            onChangeBindingDraft={onChangeBindingDraft}
-            onSetApiKeyDraft={onSetApiKeyDraft}
-            onSaveProviderDraft={onSaveProviderDraft}
-            onRefreshModels={onRefreshModels}
-          />
-        ) : (
-          <ModelsTab
-            key={provider.id}
-            readOnly={readOnly}
-            providerName={provider.name}
-            activeModelId={activeModelId}
-            activeModel={activeModel}
-            addedModels={addedModels}
-            addedModelIds={addedModelIds}
-            modelCandidates={modelCandidates}
-            filteredModelCandidates={filteredModelCandidates}
-            renderedModelCandidates={renderedModelCandidates}
-            modelSearchQuery={modelSearchQuery}
-            modelCapabilityFilter={modelCapabilityFilter}
-            candidateModelFilters={candidateModelFilters}
-            manualModelId={manualModelId}
-            refreshingModels={refreshingModels}
-            hasMoreCandidates={hasMoreCandidates}
-            onRefreshModels={onRefreshModels}
-            onSetModelSearchQuery={onSetModelSearchQuery}
-            onSetModelCapabilityFilter={onSetModelCapabilityFilter}
-            onAddCandidateModel={onAddCandidateModel}
-            onClearCandidates={onClearCandidates}
-            onSetManualModelId={onSetManualModelId}
-            onAddManualModel={onAddManualModel}
-            onSelectModel={onSelectModel}
-            onRemoveModel={onRemoveModel}
-            onSetActiveModelTask={onSetActiveModelTask}
-            onToggleActiveModelCapability={onToggleActiveModelCapability}
-            onLoadMoreCandidates={onLoadMoreCandidates}
-          />
-        )}
-      </MotionSwitch>
-
-      <View style={styles.bottomTabs}>
-        <TabButton
-          icon={<Settings2 size={18} color={tab === 'config' ? theme.colors.primary : theme.colors.textSecondary} strokeWidth={2} />}
-          label="配置"
-          active={tab === 'config'}
-          onPress={() => selectTab('config')}
-        />
-        <TabButton
-          icon={<Boxes size={18} color={tab === 'models' ? theme.colors.primary : theme.colors.textSecondary} strokeWidth={2} />}
-          label="模型"
-          active={tab === 'models'}
-          onPress={() => selectTab('models')}
-        />
-      </View>
+      <ConfigTab
+        key={provider.id}
+        readOnly={readOnly}
+        showKey={showKey}
+        nameDraft={nameDraft}
+        kindDraft={kindDraft}
+        baseUrlDraft={baseUrlDraft}
+        apiKeyDraft={apiKeyDraft}
+        endpointInspection={endpointInspection}
+        refreshingModels={refreshingModels}
+        addedModelCount={addedModelCount}
+        candidateModelCount={candidateModelCount}
+        onOpenModels={onOpenModels}
+        onToggleShowKey={() => setShowKey((v) => !v)}
+        onSetNameDraft={onSetNameDraft}
+        onChangeBindingDraft={onChangeBindingDraft}
+        onSetApiKeyDraft={onSetApiKeyDraft}
+        onSaveProviderDraft={onSaveProviderDraft}
+        onRefreshModels={onRefreshModels}
+      />
     </View>
-  );
-}
-
-function TabButton({
-  icon,
-  label,
-  active,
-  onPress,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  active: boolean;
-  onPress: () => void;
-}) {
-  const theme = useKelivoTheme();
-  const styles = getStyles(theme);
-
-  return (
-    <AnimatedPressable
-      accessibilityRole="button"
-      accessibilityLabel={`${label}选项卡`}
-      accessibilityState={{ selected: active }}
-      onPress={onPress}
-      haptic="selection"
-      style={styles.tabButton}
-    >
-      <MotionSwap
-        motionKey={active ? 'active' : 'idle'}
-        style={styles.tabButtonSwap}
-        contentStyle={styles.tabButtonContent}
-      >
-        {icon}
-        <Text
-          style={[
-            styles.tabLabel,
-            active && styles.tabLabelActive,
-          ]}
-        >
-          {label}
-        </Text>
-      </MotionSwap>
-    </AnimatedPressable>
   );
 }
 
@@ -331,6 +215,9 @@ function ConfigTab({
   apiKeyDraft,
   endpointInspection,
   refreshingModels,
+  addedModelCount,
+  candidateModelCount,
+  onOpenModels,
   onToggleShowKey,
   onSetNameDraft,
   onChangeBindingDraft,
@@ -346,6 +233,9 @@ function ConfigTab({
   apiKeyDraft: string;
   endpointInspection: ProviderEndpointInspection;
   refreshingModels: boolean;
+  addedModelCount: number;
+  candidateModelCount: number;
+  onOpenModels: () => void;
   onToggleShowKey: () => void;
   onSetNameDraft: (name: string) => void;
   onChangeBindingDraft: (patch: { kind?: ProviderKind; baseUrl?: string }) => void;
@@ -481,13 +371,28 @@ function ConfigTab({
           </AnimatedPressable>
         </View>
       </MotionItem>
+
+      <MotionItem index={1} distance={8}>
+        <View style={[styles.card, styles.modelsEntryCard]} testID="provider-models-entry">
+          <TactileRow
+            icon={<Boxes size={20} color={theme.colors.primary} strokeWidth={2} />}
+            label={candidateModelCount > 0
+              ? `已获取 ${candidateModelCount} 个模型候选`
+              : '模型配置'}
+            detail={candidateModelCount > 0
+              ? '前往模型配置'
+              : `已添加 ${addedModelCount} 个`}
+            onPress={onOpenModels}
+          />
+        </View>
+      </MotionItem>
     </ScrollView>
   );
 }
 
-function ModelsTab({
+export function ProviderModelsScreen({
   readOnly,
-  providerName,
+  provider,
   activeModelId,
   activeModel,
   addedModels,
@@ -500,7 +405,8 @@ function ModelsTab({
   candidateModelFilters,
   manualModelId,
   refreshingModels,
-  hasMoreCandidates,
+  hasMoreCandidates = false,
+  onBack,
   onSetModelSearchQuery,
   onSetModelCapabilityFilter,
   onAddCandidateModel,
@@ -513,37 +419,10 @@ function ModelsTab({
   onSetActiveModelTask,
   onToggleActiveModelCapability,
   onLoadMoreCandidates,
-}: {
-  readOnly: boolean;
-  providerName: string;
-  activeModelId: string;
-  activeModel: ModelInfo | undefined;
-  addedModels: ModelInfo[];
-  addedModelIds: Set<string>;
-  modelCandidates: ModelInfo[];
-  filteredModelCandidates: ModelInfo[];
-  renderedModelCandidates: ModelInfo[];
-  modelSearchQuery: string;
-  modelCapabilityFilter: ModelCapabilityFilter;
-  candidateModelFilters: Array<{ key: ModelCapabilityFilter; label: string }>;
-  manualModelId: string;
-  refreshingModels: boolean;
-  hasMoreCandidates: boolean;
-  onSetModelSearchQuery: (query: string) => void;
-  onSetModelCapabilityFilter: (filter: ModelCapabilityFilter) => void;
-  onAddCandidateModel: (model: ModelInfo) => void;
-  onClearCandidates: () => void;
-  onSetManualModelId: (id: string) => void;
-  onAddManualModel: () => void;
-  onRefreshModels: () => void;
-  onSelectModel: (modelId: string) => void;
-  onRemoveModel: (modelId: string) => void;
-  onSetActiveModelTask: (task: ModelTask) => void;
-  onToggleActiveModelCapability: (capability: Capability) => void;
-  onLoadMoreCandidates?: () => void;
-}) {
+}: ProviderModelsScreenProps) {
   const theme = useKelivoTheme();
   const styles = getStyles(theme);
+  const providerName = provider.name;
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [showManualInput, setShowManualInput] = useState(false);
 
@@ -576,7 +455,29 @@ function ModelsTab({
   const hasCandidates = modelCandidates.length > 0;
 
   return (
-    <View style={styles.tabContent}>
+    <View style={styles.container}>
+      <View style={styles.header}>
+        <AnimatedPressable
+          accessibilityRole="button"
+          accessibilityLabel="返回服务商配置"
+          onPress={onBack}
+          style={styles.headerButton}
+        >
+          <ArrowLeft size={22} color={theme.colors.text} strokeWidth={2.2} />
+        </AnimatedPressable>
+        <View style={styles.headerTitleBlock}>
+          <ModelAvatar
+            modelId={undefined}
+            providerName={providerName}
+            size={20}
+            containerSize={28}
+          />
+          <Text style={styles.headerTitle} numberOfLines={1}>模型配置</Text>
+        </View>
+        <View style={styles.headerButton} />
+      </View>
+
+      <View style={styles.tabContent}>
       <ScrollView
         contentContainerStyle={[
           styles.tabContentInner,
@@ -884,6 +785,7 @@ function ModelsTab({
           </Text>
         </AnimatedPressable>
       </View>
+      </View>
     </View>
   );
 }
@@ -928,9 +830,6 @@ function createStyles(theme: KelivoTheme) {
     flexDirection: 'row',
     alignItems: 'center',
   },
-  body: {
-    flex: 1,
-  },
   noticeWrap: {
     paddingHorizontal: 12,
     paddingTop: 8,
@@ -972,6 +871,11 @@ function createStyles(theme: KelivoTheme) {
     padding: 12,
     gap: 12,
     ...theme.shadows.soft,
+  },
+  modelsEntryCard: {
+    padding: 0,
+    gap: 0,
+    overflow: 'hidden',
   },
   inputGroup: {
     gap: 6,
@@ -1320,38 +1224,6 @@ function createStyles(theme: KelivoTheme) {
     fontSize: 14,
     fontWeight: '600',
     color: theme.colors.textOnAccent,
-  },
-  bottomTabs: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-around',
-    paddingVertical: 8,
-    borderTopWidth: 0.6,
-    borderTopColor: theme.colors.outlineVariant,
-    backgroundColor: theme.colors.card,
-  },
-  tabButton: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    minWidth: 70,
-    paddingVertical: 4,
-  },
-  tabButtonSwap: {
-    minWidth: 70,
-    minHeight: 34,
-  },
-  tabButtonContent: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 3,
-  },
-  tabLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: theme.colors.textSecondary,
-  },
-  tabLabelActive: {
-    color: theme.colors.primary,
   },
   tabContentCenter: {
     flexGrow: 1,

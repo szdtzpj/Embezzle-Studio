@@ -3,7 +3,10 @@ import { StyleSheet, Text, View } from 'react-native';
 import { SettingsMainScreen } from './settings/SettingsMainScreen';
 import { ColorModeScreen } from './settings/ColorModeScreen';
 import { ProviderListScreen } from './settings/ProviderListScreen';
-import { ProviderDetailScreen } from './settings/ProviderDetailScreen';
+import {
+  ProviderDetailScreen,
+  ProviderModelsScreen,
+} from './settings/ProviderDetailScreen';
 import { AboutScreen } from './settings/AboutScreen';
 import { ToolsPanelScreen } from './settings/ToolsPanelScreen';
 import {
@@ -85,6 +88,9 @@ export interface SettingsScreenProps {
 export interface SettingsScreenHandle {
   handleBack: () => boolean;
   resetNavigation: () => void;
+  openProviders: () => void;
+  openActiveProviderModels: () => void;
+  openToolsSection: (section: SettingsToolsSection) => void;
 }
 
 type ScreenState =
@@ -92,6 +98,7 @@ type ScreenState =
   | { key: 'colorMode' }
   | { key: 'providers' }
   | { key: 'providerDetail' }
+  | { key: 'providerModels' }
   | { key: 'tools'; section: SettingsToolsSection }
   | { key: 'about' };
 
@@ -179,6 +186,26 @@ export const SettingsScreen = forwardRef<SettingsScreenHandle, SettingsScreenPro
       setNavigationDirection('none');
       setStack([{ key: 'main' }]);
     },
+    openProviders: () => {
+      setPendingProviderDeletion(null);
+      setNavigationDirection('forward');
+      setStack([{ key: 'main' }, { key: 'providers' }]);
+    },
+    openActiveProviderModels: () => {
+      setPendingProviderDeletion(null);
+      setNavigationDirection('forward');
+      setStack([
+        { key: 'main' },
+        { key: 'providers' },
+        { key: 'providerDetail' },
+        { key: 'providerModels' },
+      ]);
+    },
+    openToolsSection: (section) => {
+      setPendingProviderDeletion(null);
+      setNavigationDirection('forward');
+      setStack([{ key: 'main' }, { key: 'tools', section }]);
+    },
   }), [pendingProviderDeletion, stack.length]);
 
   const renderScreen = () => {
@@ -244,6 +271,35 @@ export const SettingsScreen = forwardRef<SettingsScreenHandle, SettingsScreenPro
           <ProviderDetailScreen
             readOnly={props.readOnly}
             provider={props.activeProvider}
+            addedModelCount={props.addedModels.length}
+            candidateModelCount={props.modelCandidates.length}
+            refreshingModels={props.refreshingModels}
+            notice={props.notice}
+            nameDraft={props.providerNameDraft}
+            kindDraft={props.providerKindDraft}
+            baseUrlDraft={props.providerBaseUrlDraft}
+            apiKeyDraft={props.providerApiKeyDraft}
+            endpointInspection={props.providerEndpointInspection}
+            onBack={pop}
+            onOpenModels={() => push({ key: 'providerModels' })}
+            onSetNameDraft={props.onSetProviderNameDraft}
+            onChangeBindingDraft={props.onChangeProviderBindingDraft}
+            onSetApiKeyDraft={props.onSetProviderApiKeyDraft}
+            onSaveProviderDraft={props.onSaveProviderDraft}
+            onRefreshModels={props.onRefreshModels}
+            onDeleteProvider={
+              props.providers.length > 1 && isUserCreatedProvider(props.activeProvider)
+                ? () => requestDeleteProvider(props.activeProvider.id, pop)
+                : undefined
+            }
+          />
+        );
+      case 'providerModels':
+        return (
+          <ProviderModelsScreen
+            key={props.activeProvider.id}
+            readOnly={props.readOnly}
+            provider={props.activeProvider}
             activeModelId={props.activeModelId}
             activeModel={props.activeModel}
             addedModels={props.addedModels}
@@ -256,18 +312,8 @@ export const SettingsScreen = forwardRef<SettingsScreenHandle, SettingsScreenPro
             candidateModelFilters={props.candidateModelFilters}
             manualModelId={props.manualModelId}
             refreshingModels={props.refreshingModels}
-            notice={props.notice}
-            nameDraft={props.providerNameDraft}
-            kindDraft={props.providerKindDraft}
-            baseUrlDraft={props.providerBaseUrlDraft}
-            apiKeyDraft={props.providerApiKeyDraft}
-            endpointInspection={props.providerEndpointInspection}
             hasMoreCandidates={props.hasMoreCandidates}
             onBack={pop}
-            onSetNameDraft={props.onSetProviderNameDraft}
-            onChangeBindingDraft={props.onChangeProviderBindingDraft}
-            onSetApiKeyDraft={props.onSetProviderApiKeyDraft}
-            onSaveProviderDraft={props.onSaveProviderDraft}
             onRefreshModels={props.onRefreshModels}
             onSetModelSearchQuery={props.onSetModelSearchQuery}
             onSetModelCapabilityFilter={props.onSetModelCapabilityFilter}
@@ -280,11 +326,6 @@ export const SettingsScreen = forwardRef<SettingsScreenHandle, SettingsScreenPro
             onSetActiveModelTask={props.onSetActiveModelTask}
             onToggleActiveModelCapability={props.onToggleActiveModelCapability}
             onLoadMoreCandidates={props.onLoadMoreCandidates}
-            onDeleteProvider={
-              props.providers.length > 1 && isUserCreatedProvider(props.activeProvider)
-                ? () => requestDeleteProvider(props.activeProvider.id, pop)
-                : undefined
-            }
           />
         );
       default:

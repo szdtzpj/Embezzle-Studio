@@ -328,6 +328,7 @@ describe('model discovery', () => {
     expect(result.notice).toContain('未列入官方 API 参考的兼容 /models 响应');
     expect(result.notice).toContain('不保证当前账号均可调用');
     expect(result.notice).toContain('Endpoint ID 仍可手动添加');
+    expect(result.tone).toBe('warning');
   });
 
   it('also recognizes an Ark data-plane host when the provider kind is custom', async () => {
@@ -351,6 +352,7 @@ describe('model discovery', () => {
       expect.arrayContaining(['reasoning', 'image-input', 'tool-calling'])
     );
     expect(result.models[0].capabilities).not.toContain('video-input');
+    expect(result.tone).toBe('warning');
   });
 
   it('never sends an Ark API key to a non-official host during automatic discovery', async () => {
@@ -365,6 +367,7 @@ describe('model discovery', () => {
     expect(mocks.fetchModels).not.toHaveBeenCalled();
     expect(result.models).toHaveLength(arkPresetModels.length);
     expect(result.notice).toContain('未发送 API Key');
+    expect(result.tone).toBe('warning');
   });
 
   it('drops a remote entry when its task conflicts with the curated preset', async () => {
@@ -392,6 +395,7 @@ describe('model discovery', () => {
     const result = await refreshProviderModels(ark);
 
     expect(result.models.map((model) => model.id)).toEqual(['safe-remote-model']);
+    expect(result.tone).toBe('warning');
   });
 
   it('falls back to the curated catalog when Ark /models is unavailable', async () => {
@@ -408,6 +412,7 @@ describe('model discovery', () => {
     expect(result.models.map((model) => model.id)).toEqual(arkPresetModels.map((model) => model.id));
     expect(result.notice).toContain('/models 响应暂不可用');
     expect(result.notice).toContain('本地精选候选（可能滞后）');
+    expect(result.tone).toBe('warning');
   });
 
   it.each([
@@ -429,6 +434,7 @@ describe('model discovery', () => {
     expect(mocks.fetchModels).toHaveBeenCalledOnce();
     expect(mocks.fetchModels).toHaveBeenCalledWith(relay, undefined);
     expect(result.models).toBe(remoteModels);
+    expect(result.tone).toBe('success');
   });
 
   it('keeps OpenAI-compatible remote discovery unchanged for non-Ark providers', async () => {
@@ -451,6 +457,7 @@ describe('model discovery', () => {
     expect(mocks.fetchModels).toHaveBeenCalledWith(other, signal);
     expect(result.models).toBe(remoteModels);
     expect(result.notice).toBe('已获取 1 个可添加模型。');
+    expect(result.tone).toBe('success');
   });
 
   it('honors an already-aborted refresh without attempting network discovery', async () => {

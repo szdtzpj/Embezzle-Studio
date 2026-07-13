@@ -6,9 +6,10 @@ import {
 } from '../data/arkModels';
 import { fetchOpenAiCompatibleModels, isAbortError } from './openAiCompatible';
 
-interface ModelDiscoveryResult {
+export interface ModelDiscoveryResult {
   models: ModelInfo[];
   notice: string;
+  tone: 'success' | 'warning';
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -72,6 +73,7 @@ export async function refreshProviderModels(
             return {
               models,
               notice: `已通过未列入官方 API 参考的兼容 /models 响应获取 ${models.length} 个模型候选；结果不保证当前账号均可调用，控制台 Endpoint ID 仍可手动添加。`,
+              tone: 'warning',
             };
           }
         }
@@ -90,6 +92,7 @@ export async function refreshProviderModels(
       notice: `${canProbeCompatibleModels
         ? '火山方舟兼容 /models 响应暂不可用'
         : '当前 Base URL 不是火山方舟精确官方数据面主机，未发送 API Key 做兼容模型探测'}，已回退到根据官方模型目录维护的 ${models.length} 个本地精选候选（可能滞后）；目录不会校验当前账号权限，Endpoint ID 请手动添加。`,
+      tone: 'warning',
     };
   }
 
@@ -98,5 +101,6 @@ export async function refreshProviderModels(
   return {
     models,
     notice: `已获取 ${models.length} 个可添加模型。`,
+    tone: 'success',
   };
 }
