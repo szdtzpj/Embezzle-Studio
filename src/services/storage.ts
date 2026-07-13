@@ -40,11 +40,21 @@ import type {
   VoiceSettings,
   WebCitation,
   WebSearchSettings,
+  ExternalSearchSettings,
+  ExternalSearchService,
   WorkspaceProject,
   WorkspaceArtifact,
   WorkspaceArtifactFormat,
   WorkspaceArtifactRevision,
 } from '../domain/types';
+import {
+  normalizeExternalSearchSettings,
+  stripExternalSearchSecrets,
+} from './externalSearch';
+import {
+  normalizeActivityTimeline,
+  normalizeToolActivityItems,
+} from './messageActivity';
 import {
   MAX_MCP_ALLOWED_TOOLS,
   MAX_PLUGIN_MANIFESTS,
@@ -126,6 +136,7 @@ const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v6';
 const COLOR_MODE_KEY = '@embezzle-studio/color-mode-v1';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
 const PLUGIN_SECRET_PREFIX = 'embezzle-studio.plugin-authorization';
+const EXTERNAL_SEARCH_SECRET_PREFIX = 'embezzle-studio.external-search';
 const BOUND_SECRET_SCHEMA_VERSION = 1;
 const STORAGE_SCHEMA_VERSION = 6;
 const INTERRUPTED_MESSAGE = '上次请求在应用退出前未完成，已标记为中断。';
@@ -228,6 +239,7 @@ let saveQueue: Promise<void> = Promise.resolve();
 let requestedRevision = 0;
 const secretValues = new Map<string, BoundSecretEnvelope | undefined>();
 const pluginSecretValues = new Map<string, BoundSecretEnvelope | undefined>();
+const externalSearchSecretValues = new Map<string, BoundSecretEnvelope | undefined>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -576,9 +588,11 @@ function normalizeCitations(value: unknown, label: string): WebCitation[] | unde
     }
     const startIndex = nonNegativeFiniteNumber(citation.startIndex);
     const endIndex = nonNegativeFiniteNumber(citation.endIndex);
+    const text = nonEmptyString(citation.text);
     return [{
       url: url.toString(),
       ...(nonEmptyString(citation.title) ? { title: nonEmptyString(citation.title) } : {}),
+      ...(text ? { text: text.slice(0, 400) } : {}),
       ...(startIndex !== undefined ? { startIndex: Math.trunc(startIndex) } : {}),
       ...(endIndex !== undefined ? { endIndex: Math.trunc(endIndex) } : {}),
     }];
@@ -706,6 +720,8 @@ function normalizeMessage(value: unknown, label: string, fallbackCreatedAt: numb
   const requestMetrics = normalizeRequestMetrics(value.requestMetrics, `${label}.requestMetrics`);
   const costEstimate = normalizeCostEstimate(value.costEstimate, `${label}.costEstimate`);
   const mcpActivity = normalizeMcpActivity(value.mcpActivity, `${label}.mcpActivity`);
+  const toolActivity = normalizeToolActivityItems(value.toolActivity);
+  const activityTimeline = normalizeActivityTimeline(value.activityTimeline);
 
   return {
     id: nonEmptyString(value.id) ?? label.replace(/[^A-Za-z0-9]+/g, '-'),
@@ -723,6 +739,8 @@ function normalizeMessage(value: unknown, label: string, fallbackCreatedAt: numb
     ...(typeof value.webSearchTriggered === 'boolean'
       ? { webSearchTriggered: value.webSearchTriggered }
       : {}),
+    ...(toolActivity ? { toolActivity } : {}),
+    ...(activityTimeline ? { activityTimeline } : {}),
     ...(nonEmptyString(value.promptTemplateId) ? { promptTemplateId: nonEmptyString(value.promptTemplateId) } : {}),
     ...(nonEmptyString(value.projectInstructionId)
       ? { projectInstructionId: nonEmptyString(value.projectInstructionId) }
@@ -1506,6 +1524,18 @@ function normalizeWebSearchSettings(value: unknown): WebSearchSettings {
   };
 }
 
+function externalSearchBindingFingerprint(service: Pick<ExternalSearchService, 'kind' | 'endpoint' | 'model'>): string {
+  return JSON.stringify({
+    kind: service.kind,
+    endpoint: (service.endpoint ?? '').trim().toLowerCase(),
+    model: (service.model ?? '').trim(),
+  });
+}
+
+function externalSearchSecretKey(serviceId: string): string {
+  return `${EXTERNAL_SEARCH_SECRET_PREFIX}.${serviceId}`;
+}
+
 function normalizeVoiceSettings(value: unknown, providers: ProviderProfile[]): VoiceSettings {
   const settings = recordField(value, 'voice');
   const transcriptionTarget = normalizeModelTarget(
@@ -1787,6 +1817,9 @@ function normalizeWorkspace(snapshot: Record<string, unknown>, providers: Provid
     costGuard: normalizeCostGuardSettings(snapshot.costGuard),
     providerUsageEvents: normalizeProviderUsageEvents(snapshot.providerUsageEvents, conversations),
     webSearch: normalizeWebSearchSettings(snapshot.webSearch),
+    externalSearch: normalizeExternalSearchSettings(
+      (snapshot as { externalSearch?: unknown }).externalSearch
+    ),
     voice: normalizeVoiceSettings(snapshot.voice, normalizedProviders),
   };
 }
@@ -2034,6 +2067,70 @@ async function writePluginSecret(
   pluginSecretValues.set(pluginId, envelope);
 }
 
+async function readExternalSearchSecret(
+  service: ExternalSearchService
+): Promise<string | undefined> {
+  const bindingFingerprint = externalSearchBindingFingerprint(service);
+  if (externalSearchSecretValues.has(service.id)) {
+    return secretForBinding(externalSearchSecretValues.get(service.id), bindingFingerprint);
+  }
+  const key = externalSearchSecretKey(service.id);
+  let value: string | null;
+  if (Platform.OS === 'web') {
+    value = browserSessionStorage()?.getItem(key) ?? null;
+  } else {
+    await requireNativeSecureStore();
+    value = await SecureStore.getItemAsync(key);
+  }
+  let envelope = decodeBoundSecret(value);
+  if (value !== null && !envelope && bindingFingerprint) {
+    await writeExternalSearchSecret(service.id, bindingFingerprint, value);
+    envelope = externalSearchSecretValues.get(service.id);
+  } else if (value !== null && !envelope) {
+    try {
+      if (Platform.OS === 'web') {
+        browserSessionStorage()?.removeItem(key);
+      } else {
+        await SecureStore.deleteItemAsync(key);
+      }
+    } catch {
+      // best-effort
+    }
+  }
+  externalSearchSecretValues.set(service.id, envelope);
+  return secretForBinding(envelope, bindingFingerprint);
+}
+
+async function writeExternalSearchSecret(
+  serviceId: string,
+  bindingFingerprint: string | undefined,
+  value?: string
+): Promise<void> {
+  const key = externalSearchSecretKey(serviceId);
+  const envelope = value ? boundSecret(bindingFingerprint, value) : undefined;
+  const serialized = envelope ? JSON.stringify(envelope) : undefined;
+  if (Platform.OS === 'web') {
+    const session = browserSessionStorage();
+    try {
+      if (serialized) {
+        session?.setItem(key, serialized);
+      } else {
+        session?.removeItem(key);
+      }
+    } catch {
+      // in-memory only
+    }
+  } else {
+    await requireNativeSecureStore();
+    if (serialized) {
+      await SecureStore.setItemAsync(key, serialized);
+    } else {
+      await SecureStore.deleteItemAsync(key);
+    }
+  }
+  externalSearchSecretValues.set(serviceId, envelope);
+}
+
 function decodeWorkspace(raw: string): DecodedWorkspace {
   let parsed: unknown;
   try {
@@ -2105,6 +2202,15 @@ async function hydrateWorkspace(decoded: DecodedWorkspace): Promise<AppWorkspace
       authorization: await readPluginSecret(plugin, providerBindings),
     }))
   );
+  workspace.externalSearch = {
+    ...workspace.externalSearch,
+    services: await Promise.all(
+      workspace.externalSearch.services.map(async (service) => ({
+        ...service,
+        apiKey: await readExternalSearchSecret(service),
+      }))
+    ),
+  };
   requestedRevision = Math.max(requestedRevision, decoded.revision);
   return workspace;
 }
@@ -2301,6 +2407,7 @@ function createEnvelope(
         ...(event.knownCostEstimate ? { knownCostEstimate: { ...event.knownCostEstimate } } : {}),
       })),
       webSearch: { ...workspace.webSearch },
+      externalSearch: stripExternalSearchSecrets(workspace.externalSearch),
       voice: {
         ...workspace.voice,
         ...(workspace.voice.transcriptionTarget
@@ -2312,7 +2419,11 @@ function createEnvelope(
   };
 }
 
-async function persistSecrets(providers: ProviderProfile[], plugins: PluginManifest[]): Promise<void> {
+async function persistSecrets(
+  providers: ProviderProfile[],
+  plugins: PluginManifest[],
+  externalSearch?: ExternalSearchSettings
+): Promise<void> {
   const providersById = new Map(providers.map((provider) => [provider.id, provider] as const));
   const providerBindings = providerBindingsById(providers);
   for (const providerId of Array.from(secretValues.keys())) {
@@ -2365,6 +2476,30 @@ async function persistSecrets(providers: ProviderProfile[], plugins: PluginManif
       await writePluginSecret(plugin.id, bindingFingerprint, value);
     }
   }
+
+  const services = externalSearch?.services ?? [];
+  const servicesById = new Map(services.map((service) => [service.id, service] as const));
+  for (const serviceId of Array.from(externalSearchSecretValues.keys())) {
+    if (!servicesById.has(serviceId)) {
+      const cached = externalSearchSecretValues.get(serviceId);
+      if (cached) {
+        await writeExternalSearchSecret(serviceId, undefined, undefined);
+      }
+      externalSearchSecretValues.delete(serviceId);
+    }
+  }
+  for (const service of services) {
+    const value = service.apiKey?.trim() || undefined;
+    const bindingFingerprint = externalSearchBindingFingerprint(service);
+    const cached = externalSearchSecretValues.get(service.id);
+    if (
+      !externalSearchSecretValues.has(service.id) ||
+      cached?.bindingFingerprint !== bindingFingerprint ||
+      cached?.secret !== value
+    ) {
+      await writeExternalSearchSecret(service.id, bindingFingerprint, value);
+    }
+  }
 }
 
 export function saveWorkspace(workspace: AppWorkspace): Promise<void> {
@@ -2414,7 +2549,7 @@ export function saveWorkspace(workspace: AppWorkspace): Promise<void> {
         // its credentials intact. If SecureStore fails afterward, this save
         // still rejects, while binding fingerprints prevent the newly committed
         // configuration from hydrating a stale credential on restart.
-        await persistSecrets(providers, plugins);
+        await persistSecrets(providers, plugins, workspace.externalSearch);
         const referencedAttachments = persistedConversations(workspace).flatMap((conversation) =>
           conversation.messages.flatMap((message) => message.attachments ?? [])
         );

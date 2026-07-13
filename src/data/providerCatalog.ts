@@ -2,9 +2,22 @@ import type {
   AppWorkspace,
   Capability,
   CostGuardSettings,
+  ExternalSearchSettings,
   ModelParameterSettings,
   ProviderProfile,
 } from '../domain/types';
+
+export const defaultExternalSearchSettings: ExternalSearchSettings = {
+  enabled: false,
+  maxResults: 5,
+  maxToolRounds: 3,
+  // Free anonymous engines available out of the box (no API key).
+  selectedServiceId: 'ext-search-bing',
+  services: [
+    { id: 'ext-search-bing', kind: 'bing', name: 'Bing（免费）' },
+    { id: 'ext-search-ddg', kind: 'duckduckgo', name: 'DuckDuckGo' },
+  ],
+};
 
 const textOnly: Capability[] = ['text', 'streaming'];
 const vision: Capability[] = ['text', 'image-input', 'streaming'];
@@ -133,6 +146,12 @@ export function createDefaultWorkspace(): AppWorkspace {
     webSearch: {
       enabled: false,
       searchContextSize: 'medium',
+    },
+    externalSearch: {
+      enabled: false,
+      maxResults: 5,
+      maxToolRounds: 3,
+      services: [],
     },
     voice: {
       speechVoice: 'alloy',

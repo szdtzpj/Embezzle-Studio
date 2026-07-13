@@ -1,7 +1,9 @@
 import type {
+  ActivityTimelineStep,
   ChatCompletionResult,
   ChatMessage,
   ChatTokenUsage,
+  ExternalSearchSettings,
   GenerationTaskInfo,
   MediaAttachment,
   ModelParameterSettings,
@@ -9,6 +11,7 @@ import type {
   PluginManifest,
   ProviderProfile,
   ReasoningEffort,
+  ToolActivityItem,
 } from '../domain/types';
 import { Platform } from 'react-native';
 import { isVolcengineArkProvider } from '../data/arkModels';
@@ -39,6 +42,24 @@ import {
   resolveProviderWebSearchProtocol,
   type OpenAiWebSearchContextSize,
 } from './providerWebSearch';
+import {
+  citationsFromExternalSearchResults,
+  EXTERNAL_SEARCH_TOOL_NAME,
+  formatExternalSearchToolResult,
+  getExternalSearchSystemPrompt,
+  getExternalSearchToolDefinition,
+  parseSearchWebToolArguments,
+  resolveActiveExternalSearchService,
+  runExternalSearch,
+  type ExternalSearchResult,
+} from './externalSearch';
+import {
+  completeOpenThinkingSteps,
+  nextTimelineSequence,
+  toolActivityTitle,
+  upsertTimelineStep,
+  upsertToolActivity,
+} from './messageActivity';
 import { getRemoteMcpExecutableReadiness } from '../plugins/contracts';
 import { isExactOfficialOpenAiProvider } from './providerSetup';
 import {
@@ -79,6 +100,7 @@ interface ChatCompletionArgs {
     enabled: boolean;
     searchContextSize: OpenAiWebSearchContextSize;
   };
+  externalSearch?: ExternalSearchSettings;
   mcp?: ChatMcpOptions;
   signal?: AbortSignal;
 }
@@ -87,6 +109,8 @@ interface ChatStreamUpdate {
   content: string;
   reasoningContent?: string;
   usage?: ChatTokenUsage;
+  toolActivity?: ToolActivityItem[];
+  activityTimeline?: ActivityTimelineStep[];
   raw?: unknown;
 }
 
@@ -1801,6 +1825,446 @@ export function assertChatAttachmentsSupported(
   }
 }
 
+function mergeTokenUsage(a?: ChatTokenUsage, b?: ChatTokenUsage): ChatTokenUsage | undefined {
+  if (!a && !b) return undefined;
+  const sum = (left?: number, right?: number) =>
+    left === undefined && right === undefined ? undefined : (left ?? 0) + (right ?? 0);
+  return {
+    ...(sum(a?.inputTokens, b?.inputTokens) !== undefined
+      ? { inputTokens: sum(a?.inputTokens, b?.inputTokens) }
+      : {}),
+    ...(sum(a?.outputTokens, b?.outputTokens) !== undefined
+      ? { outputTokens: sum(a?.outputTokens, b?.outputTokens) }
+      : {}),
+    ...(sum(a?.reasoningTokens, b?.reasoningTokens) !== undefined
+      ? { reasoningTokens: sum(a?.reasoningTokens, b?.reasoningTokens) }
+      : {}),
+    ...(sum(a?.cachedInputTokens, b?.cachedInputTokens) !== undefined
+      ? { cachedInputTokens: sum(a?.cachedInputTokens, b?.cachedInputTokens) }
+      : {}),
+    ...(sum(a?.totalTokens, b?.totalTokens) !== undefined
+      ? { totalTokens: sum(a?.totalTokens, b?.totalTokens) }
+      : {}),
+  };
+}
+
+function readUsageFromChatCompletion(payload: any): ChatTokenUsage | undefined {
+  const usage = payload?.usage;
+  if (!usage || typeof usage !== 'object') return undefined;
+  const inputTokens =
+    typeof usage.prompt_tokens === 'number'
+      ? usage.prompt_tokens
+      : typeof usage.input_tokens === 'number'
+        ? usage.input_tokens
+        : undefined;
+  const outputTokens =
+    typeof usage.completion_tokens === 'number'
+      ? usage.completion_tokens
+      : typeof usage.output_tokens === 'number'
+        ? usage.output_tokens
+        : undefined;
+  const reasoningTokens =
+    typeof usage.completion_tokens_details?.reasoning_tokens === 'number'
+      ? usage.completion_tokens_details.reasoning_tokens
+      : typeof usage.reasoning_tokens === 'number'
+        ? usage.reasoning_tokens
+        : undefined;
+  const cachedInputTokens =
+    typeof usage.prompt_tokens_details?.cached_tokens === 'number'
+      ? usage.prompt_tokens_details.cached_tokens
+      : undefined;
+  const totalTokens =
+    typeof usage.total_tokens === 'number'
+      ? usage.total_tokens
+      : inputTokens !== undefined || outputTokens !== undefined
+        ? (inputTokens ?? 0) + (outputTokens ?? 0)
+        : undefined;
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    reasoningTokens === undefined &&
+    cachedInputTokens === undefined &&
+    totalTokens === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+    ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+    ...(totalTokens !== undefined ? { totalTokens } : {}),
+  };
+}
+
+async function sendExternalSearchToolChat({
+  provider,
+  modelId,
+  requestModel,
+  messages,
+  reasoningEffort,
+  parameterSettings,
+  maxOutputTokens,
+  externalSearch,
+  onStreamUpdate,
+  signal,
+}: {
+  provider: ProviderProfile;
+  modelId: string;
+  requestModel: ModelInfo;
+  messages: ChatMessage[];
+  reasoningEffort: ReasoningEffort;
+  parameterSettings?: ModelParameterSettings;
+  maxOutputTokens?: number;
+  externalSearch: ExternalSearchSettings;
+  onStreamUpdate?: (update: ChatStreamUpdate) => void;
+  signal?: AbortSignal;
+}): Promise<ChatCompletionResult> {
+  if (!provider.apiKey?.trim()) {
+    throw new Error('外部联网搜索需要当前聊天服务商的 API Key（用于主模型 tool 循环）。');
+  }
+  if (!requestModel.capabilities.includes('tool-calling')) {
+    throw new Error('外部联网搜索需要明确标记 tool-calling 能力的聊天模型。');
+  }
+  const service = resolveActiveExternalSearchService(externalSearch);
+  if (!service) {
+    throw new Error('外部联网搜索未就绪：请配置并选择 Tavily / Brave / Grok 服务及 API Key。');
+  }
+
+  const requestMessages = await materializeMessagesForRequest(messages, provider);
+  const openAiMessages: Array<Record<string, unknown>> = requestMessages.map((message) =>
+    toOpenAiMessage(message, provider)
+  );
+  const systemPrompt = getExternalSearchSystemPrompt();
+  if (openAiMessages[0]?.role === 'system' && typeof openAiMessages[0].content === 'string') {
+    openAiMessages[0] = {
+      ...openAiMessages[0],
+      content: `${openAiMessages[0].content}\n\n${systemPrompt}`,
+    };
+  } else {
+    openAiMessages.unshift({ role: 'system', content: systemPrompt });
+  }
+
+  const baseUrl = assertBaseUrl(provider);
+  const tools = [getExternalSearchToolDefinition()];
+  const maxRounds = Math.max(1, Math.min(4, externalSearch.maxToolRounds || 3));
+  const searchFetch: typeof fetch = async (input, init) => {
+    const url =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : (input as Request).url;
+    return providerFetch(url, init ?? {}, 30_000);
+  };
+
+  let aggregatedUsage: ChatTokenUsage | undefined;
+  const collectedSearches: ExternalSearchResult[] = [];
+  let toolActivity: ToolActivityItem[] = [];
+  let activityTimeline: ActivityTimelineStep[] = [];
+  let lastPayload: unknown;
+  let finalContent = '';
+  let finalReasoning: string | undefined;
+  let webSearchTriggered = false;
+  let thinkingSegment = 0;
+
+  const publish = (extra?: Partial<ChatStreamUpdate>) => {
+    onStreamUpdate?.({
+      content: finalContent,
+      reasoningContent: finalReasoning,
+      usage: aggregatedUsage,
+      toolActivity,
+      activityTimeline,
+      ...extra,
+    });
+  };
+
+  const noteThinking = (reasoning: string | undefined, running: boolean) => {
+    const text = reasoning?.trim() ?? '';
+    if (!text && !running) return;
+    // Open a new thinking segment when the previous one was completed by tools.
+    const openThinking = activityTimeline.find(
+      (step) => step.kind === 'thinking' && step.status === 'running'
+    );
+    const needNewSegment = !openThinking;
+    if (needNewSegment) {
+      thinkingSegment += 1;
+    }
+    const id = openThinking?.id ?? `thinking-r${thinkingSegment}`;
+    const sequence = openThinking?.sequence ?? nextTimelineSequence(activityTimeline);
+    const startedAt = openThinking?.startedAt ?? Date.now();
+    const finishedAt = running ? undefined : Date.now();
+    activityTimeline = upsertTimelineStep(activityTimeline, {
+      id,
+      kind: 'thinking',
+      sequence,
+      status: running ? 'running' : 'completed',
+      title: running ? '深度思考' : '深度思考',
+      content: text || openThinking?.content || '',
+      startedAt,
+      ...(finishedAt !== undefined ? { finishedAt } : {}),
+    });
+  };
+
+  for (let round = 0; round < maxRounds; round += 1) {
+    if (signal?.aborted) {
+      throw createAbortError();
+    }
+    // Placeholder thinking while waiting for this model round.
+    noteThinking(finalReasoning, true);
+    publish();
+
+    const body: Record<string, unknown> = {
+      model: modelId,
+      messages: openAiMessages,
+      tools,
+      tool_choice: 'auto',
+      stream: false,
+    };
+    const normalizedEffort = normalizeReasoningEffort(provider, requestModel, reasoningEffort);
+    applyModelParameterOptions(body, parameterSettings, provider, requestModel, normalizedEffort);
+    applyOutputTokenLimit(body, provider, maxOutputTokens);
+    applyReasoningOptions(body, provider, modelId, normalizedEffort);
+
+    const response = await providerFetch(
+      `${baseUrl}/chat/completions`,
+      {
+        method: 'POST',
+        headers: authHeaders(provider),
+        body: JSON.stringify(body),
+        signal,
+      },
+      openAiProRequestTimeoutMs
+    );
+    const responseBody = await readLimitedResponseText(
+      response,
+      response.ok ? 2_000_000 : maxErrorResponseBytes,
+      '外部联网搜索对话'
+    );
+    if (!response.ok) {
+      throw new Error(`外部联网搜索对话失败：${response.status} ${compactResponseText(responseBody)}`);
+    }
+    let payload: any;
+    try {
+      payload = JSON.parse(responseBody);
+    } catch {
+      throw new Error('外部联网搜索对话返回了无效 JSON。');
+    }
+    lastPayload = payload;
+    aggregatedUsage = mergeTokenUsage(aggregatedUsage, readUsageFromChatCompletion(payload));
+
+    const choice = payload?.choices?.[0];
+    const message = choice?.message ?? {};
+    const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+    const content = readAssistantText(payload);
+    const reasoning = readReasoningText(payload);
+    if (content && content !== '模型返回了空内容。') {
+      finalContent = content;
+    }
+    if (reasoning) finalReasoning = reasoning;
+    // Keep thinking open if tools will follow; complete when this is the final answer.
+    noteThinking(reasoning ?? finalReasoning, toolCalls.length > 0);
+    if (!toolCalls.length) {
+      activityTimeline = completeOpenThinkingSteps(activityTimeline);
+      noteThinking(finalReasoning, false);
+      publish({ raw: payload });
+      break;
+    }
+    publish({ raw: payload });
+
+    openAiMessages.push({
+      role: 'assistant',
+      content: typeof message.content === 'string' ? message.content : content === '模型返回了空内容。' ? null : content,
+      tool_calls: toolCalls,
+      ...(message.reasoning_content ? { reasoning_content: message.reasoning_content } : {}),
+    });
+
+    // Thought finished for this round; tools begin next on the timeline.
+    activityTimeline = completeOpenThinkingSteps(activityTimeline);
+    publish();
+
+    for (let toolIndex = 0; toolIndex < toolCalls.length; toolIndex += 1) {
+      const call = toolCalls[toolIndex];
+      const id = typeof call?.id === 'string' && call.id.trim() ? call.id : `call_${round}_${toolIndex}`;
+      const name =
+        typeof call?.function?.name === 'string'
+          ? call.function.name
+          : typeof call?.name === 'string'
+            ? call.name
+            : '';
+      let args: Record<string, unknown> = {};
+      try {
+        const rawArgs = call?.function?.arguments ?? call?.arguments;
+        if (typeof rawArgs === 'string' && rawArgs.trim()) {
+          const parsed = JSON.parse(rawArgs) as unknown;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            args = parsed as Record<string, unknown>;
+          }
+        } else if (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) {
+          args = rawArgs as Record<string, unknown>;
+        }
+      } catch {
+        args = {};
+      }
+      const startedAt = Date.now();
+      const sequence = nextTimelineSequence(activityTimeline);
+      const title = toolActivityTitle(name || 'tool', args);
+      toolActivity = upsertToolActivity(toolActivity, {
+        id,
+        toolName: name || 'tool',
+        title,
+        arguments: args,
+        status: 'running',
+        summary: '正在调用工具…',
+        startedAt,
+        sequence,
+      });
+      activityTimeline = upsertTimelineStep(activityTimeline, {
+        id,
+        kind: 'tool',
+        sequence,
+        status: 'running',
+        toolName: name || 'tool',
+        title,
+        arguments: args,
+        summary: '正在调用工具…',
+        startedAt,
+      });
+      publish();
+
+      let toolContent: string;
+      let toolStatus: ToolActivityItem['status'] = 'completed';
+      let toolSummary = '';
+      if (name !== EXTERNAL_SEARCH_TOOL_NAME) {
+        toolContent = JSON.stringify({ error: `Unsupported tool: ${name || '(missing)'}` });
+        toolStatus = 'failed';
+        toolSummary = '不支持的工具';
+      } else {
+        try {
+          const query = parseSearchWebToolArguments(call?.function?.arguments ?? call?.arguments);
+          const result = await runExternalSearch({
+            query,
+            service,
+            maxResults: externalSearch.maxResults,
+            fetchImpl: searchFetch,
+            signal,
+          });
+          collectedSearches.push(result);
+          webSearchTriggered = true;
+          toolContent = formatExternalSearchToolResult(result);
+          toolSummary = `返回 ${result.items.length} 条结果`;
+          args = { query };
+        } catch (error) {
+          toolContent = JSON.stringify({
+            error: error instanceof Error ? error.message : String(error),
+          });
+          toolStatus = 'failed';
+          toolSummary = error instanceof Error ? error.message : '搜索失败';
+        }
+      }
+      const finishedAt = Date.now();
+      toolActivity = upsertToolActivity(toolActivity, {
+        id,
+        toolName: name || EXTERNAL_SEARCH_TOOL_NAME,
+        title: toolActivityTitle(name || EXTERNAL_SEARCH_TOOL_NAME, args),
+        arguments: args,
+        status: toolStatus,
+        summary: toolSummary,
+        content: toolContent,
+        startedAt,
+        finishedAt,
+        sequence,
+      });
+      activityTimeline = upsertTimelineStep(activityTimeline, {
+        id,
+        kind: 'tool',
+        sequence,
+        status: toolStatus,
+        toolName: name || EXTERNAL_SEARCH_TOOL_NAME,
+        title: toolActivityTitle(name || EXTERNAL_SEARCH_TOOL_NAME, args),
+        arguments: args,
+        summary: toolSummary,
+        content: toolContent,
+        startedAt,
+        finishedAt,
+      });
+      publish();
+      openAiMessages.push({
+        role: 'tool',
+        tool_call_id: id,
+        content: toolContent,
+      });
+    }
+
+    if (round === maxRounds - 1) {
+      // Force one last answer without tools when the budget is exhausted.
+      noteThinking(finalReasoning, true);
+      publish();
+      const finalBody: Record<string, unknown> = {
+        model: modelId,
+        messages: openAiMessages,
+        stream: false,
+      };
+      applyModelParameterOptions(
+        finalBody,
+        parameterSettings,
+        provider,
+        requestModel,
+        normalizeReasoningEffort(provider, requestModel, reasoningEffort)
+      );
+      applyOutputTokenLimit(finalBody, provider, maxOutputTokens);
+      applyReasoningOptions(
+        finalBody,
+        provider,
+        modelId,
+        normalizeReasoningEffort(provider, requestModel, reasoningEffort)
+      );
+      const finalResponse = await providerFetch(
+        `${baseUrl}/chat/completions`,
+        {
+          method: 'POST',
+          headers: authHeaders(provider),
+          body: JSON.stringify(finalBody),
+          signal,
+        },
+        openAiProRequestTimeoutMs
+      );
+      const finalResponseBody = await readLimitedResponseText(
+        finalResponse,
+        finalResponse.ok ? 2_000_000 : maxErrorResponseBytes,
+        '外部联网搜索收尾'
+      );
+      if (!finalResponse.ok) {
+        throw new Error(
+          `外部联网搜索收尾失败：${finalResponse.status} ${compactResponseText(finalResponseBody)}`
+        );
+      }
+      const finalPayload = JSON.parse(finalResponseBody);
+      lastPayload = finalPayload;
+      aggregatedUsage = mergeTokenUsage(aggregatedUsage, readUsageFromChatCompletion(finalPayload));
+      finalContent = readAssistantText(finalPayload);
+      finalReasoning = readReasoningText(finalPayload) ?? finalReasoning;
+      activityTimeline = completeOpenThinkingSteps(activityTimeline);
+      noteThinking(finalReasoning, false);
+      publish({ raw: finalPayload });
+      break;
+    }
+  }
+
+  activityTimeline = completeOpenThinkingSteps(activityTimeline);
+
+  return {
+    content: finalContent || '模型未返回文本内容。',
+    ...(finalReasoning ? { reasoningContent: finalReasoning } : {}),
+    ...(aggregatedUsage ? { usage: aggregatedUsage } : {}),
+    citations: citationsFromExternalSearchResults(collectedSearches),
+    webSearchTriggered,
+    ...(toolActivity.length ? { toolActivity } : {}),
+    ...(activityTimeline.length ? { activityTimeline } : {}),
+    raw: lastPayload,
+  };
+}
+
 export async function sendOpenAiCompatibleChat({
   provider,
   modelId,
@@ -1811,6 +2275,7 @@ export async function sendOpenAiCompatibleChat({
   maxOutputTokens,
   onStreamUpdate,
   webSearch,
+  externalSearch,
   mcp,
   signal,
 }: ChatCompletionArgs): Promise<ChatCompletionResult> {
@@ -1820,9 +2285,13 @@ export async function sendOpenAiCompatibleChat({
 
   const requestModel = model ?? createModelInfoFromId(provider, modelId, 'manual');
   const task = inferModelTask(requestModel);
+  const externalSearchActive = Boolean(externalSearch?.enabled);
 
-  if (webSearch?.enabled && task !== 'chat') {
+  if ((webSearch?.enabled || externalSearchActive) && task !== 'chat') {
     throw new Error('联网搜索只适用于聊天模型，已拒绝发起请求。');
+  }
+  if (webSearch?.enabled && externalSearchActive) {
+    throw new Error('服务商联网搜索与外部搜索不能同时启用。');
   }
 
   if (task === 'image-generation') {
@@ -1848,7 +2317,7 @@ export async function sendOpenAiCompatibleChat({
   assertChatAttachmentsSupported(chatAttachments, requestModel, provider);
 
   if (mcp) {
-    if (webSearch?.enabled) {
+    if (webSearch?.enabled || externalSearchActive) {
       throw new Error('MCP 与联网搜索不能在同一轮启用，已拒绝发起请求。');
     }
     if (!provider.apiKey?.trim()) {
@@ -1990,6 +2459,21 @@ export async function sendOpenAiCompatibleChat({
       webSearchTriggered: result.webSearchTriggered,
       raw: result,
     };
+  }
+
+  if (externalSearchActive && externalSearch) {
+    return sendExternalSearchToolChat({
+      provider,
+      modelId,
+      requestModel,
+      messages,
+      reasoningEffort,
+      parameterSettings,
+      maxOutputTokens,
+      externalSearch,
+      onStreamUpdate,
+      signal,
+    });
   }
 
   if (isOpenAiResponsesOnlyModel(provider, modelId)) {

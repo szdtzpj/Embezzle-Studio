@@ -245,6 +245,8 @@ export interface PromptTemplate {
 export interface WebCitation {
   url: string;
   title?: string;
+  /** Optional snippet / body text from search adapters. */
+  text?: string;
   startIndex?: number;
   endIndex?: number;
 }
@@ -252,6 +254,39 @@ export interface WebCitation {
 export interface WebSearchSettings {
   enabled: boolean;
   searchContextSize: 'low' | 'medium' | 'high';
+}
+
+/**
+ * User-supplied third-party web search, separate from provider-hosted Responses search.
+ * Free/local kinds (bing, duckduckgo) work without an API key; Firecrawl key is optional
+ * (cloud needs it; self-host may not).
+ */
+export type ExternalSearchProviderKind =
+  | 'tavily'
+  | 'brave'
+  | 'grok'
+  | 'bing'
+  | 'duckduckgo'
+  | 'firecrawl';
+
+export interface ExternalSearchService {
+  id: string;
+  kind: ExternalSearchProviderKind;
+  name: string;
+  /** Runtime-only; never persisted in plain workspace JSON. Optional for free/anonymous kinds. */
+  apiKey?: string;
+  /** Optional HTTPS override for the provider endpoint. */
+  endpoint?: string;
+  /** Grok/xAI model id when kind is grok. */
+  model?: string;
+}
+
+export interface ExternalSearchSettings {
+  enabled: boolean;
+  selectedServiceId?: string;
+  maxResults: number;
+  maxToolRounds: number;
+  services: ExternalSearchService[];
 }
 
 export interface VoiceSettings {
@@ -282,6 +317,39 @@ export interface McpActivitySummary {
   }>;
 }
 
+/** Modular timeline of model tool use (search / MCP / function calls). */
+export interface ToolActivityItem {
+  id: string;
+  toolName: string;
+  title?: string;
+  arguments?: Record<string, unknown>;
+  status: 'running' | 'completed' | 'failed';
+  summary?: string;
+  content?: string;
+  startedAt?: number;
+  finishedAt?: number;
+  /** Stable order in the activity timeline (lower first). */
+  sequence?: number;
+}
+
+/**
+ * Ordered chain-of-thought steps: thinking segments and tool calls interleaved
+ * by `sequence` so the UI can show "thought → tool → thought → answer".
+ */
+export interface ActivityTimelineStep {
+  id: string;
+  kind: 'thinking' | 'tool';
+  sequence: number;
+  status: 'running' | 'completed' | 'failed';
+  title?: string;
+  content?: string;
+  toolName?: string;
+  arguments?: Record<string, unknown>;
+  summary?: string;
+  startedAt?: number;
+  finishedAt?: number;
+}
+
 export interface ChatMessage {
   id: string;
   originMessageId?: string;
@@ -294,6 +362,8 @@ export interface ChatMessage {
   usage?: ChatTokenUsage;
   citations?: WebCitation[];
   webSearchTriggered?: boolean;
+  toolActivity?: ToolActivityItem[];
+  activityTimeline?: ActivityTimelineStep[];
   promptTemplateId?: string;
   projectInstructionId?: string;
   comparisonGroupId?: string;
@@ -363,6 +433,7 @@ export interface AppWorkspace {
   costGuard: CostGuardSettings;
   providerUsageEvents: ProviderUsageEvent[];
   webSearch: WebSearchSettings;
+  externalSearch: ExternalSearchSettings;
   voice: VoiceSettings;
 }
 
@@ -372,6 +443,8 @@ export interface ChatCompletionResult {
   usage?: ChatTokenUsage;
   citations?: WebCitation[];
   webSearchTriggered?: boolean;
+  toolActivity?: ToolActivityItem[];
+  activityTimeline?: ActivityTimelineStep[];
   attachments?: MediaAttachment[];
   generationTask?: GenerationTaskInfo;
   mcpActivity?: McpActivitySummary;
