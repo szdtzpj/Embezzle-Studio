@@ -148,10 +148,8 @@ export function createDefaultWorkspace(): AppWorkspace {
       searchContextSize: 'medium',
     },
     externalSearch: {
-      enabled: false,
-      maxResults: 5,
-      maxToolRounds: 3,
-      services: [],
+      ...defaultExternalSearchSettings,
+      services: defaultExternalSearchSettings.services.map((service) => ({ ...service })),
     },
     voice: {
       speechVoice: 'alloy',

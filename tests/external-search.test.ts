@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { ExternalSearchService } from '../src/domain/types';
 import {
+  DEFAULT_GROK_SEARCH_MODEL,
   citationsFromExternalSearchResults,
   cleanSearchAnswerForDisplay,
   extractLinksFromAnswerText,
@@ -57,7 +58,14 @@ describe('external search settings', () => {
   it('treats free anonymous providers as ready without API key', () => {
     expect(externalSearchProviderAllowsAnonymous('bing')).toBe(true);
     expect(externalSearchProviderAllowsAnonymous('duckduckgo')).toBe(true);
-    expect(externalSearchProviderAllowsAnonymous('firecrawl')).toBe(true);
+    expect(externalSearchProviderAllowsAnonymous('firecrawl')).toBe(false);
+    expect(
+      externalSearchProviderAllowsAnonymous('firecrawl', 'https://fc.example.com/v2/search')
+    ).toBe(true);
+    expect(externalSearchProviderRequiresApiKey('firecrawl')).toBe(true);
+    expect(
+      externalSearchProviderRequiresApiKey('firecrawl', 'https://fc.example.com/v2/search')
+    ).toBe(false);
     expect(externalSearchProviderRequiresApiKey('tavily')).toBe(true);
     expect(isExternalSearchServiceConfigured(service('bing', { apiKey: undefined }))).toBe(true);
     expect(isExternalSearchServiceConfigured(service('tavily', { apiKey: undefined }))).toBe(false);
@@ -68,6 +76,13 @@ describe('external search settings', () => {
     });
     expect(isExternalSearchReady(settings)).toBe(true);
     expect(resolveActiveExternalSearchService(settings)?.kind).toBe('bing');
+  });
+
+  it('restores safe disabled defaults when migrating a workspace without external search', () => {
+    const settings = normalizeExternalSearchSettings(undefined);
+    expect(settings.enabled).toBe(false);
+    expect(settings.selectedServiceId).toBe('ext-search-bing');
+    expect(settings.services.map((item) => item.kind)).toEqual(['bing', 'duckduckgo']);
   });
 
   it('strips api keys for persistence/backup', () => {
@@ -290,12 +305,13 @@ describe('provider adapters', () => {
 
     const result = await runExternalSearch({
       query: 'what is grok',
-      service: service('grok', { model: 'grok-4-1-fast-reasoning' }),
+      service: service('grok', { apiKey: 'test-key', model: undefined }),
       fetchImpl,
     });
 
     expect(calls[0]?.url).toBe('https://api.x.ai/v1/responses');
     const body = JSON.parse(String(calls[0]?.init?.body));
+    expect(body.model).toBe(DEFAULT_GROK_SEARCH_MODEL);
     expect(body.tools).toEqual([{ type: 'web_search' }, { type: 'x_search' }]);
     expect(result.answer).toContain('2026世界杯');
     expect(result.answer).not.toContain('[[1]]');
@@ -442,5 +458,35 @@ describe('provider adapters', () => {
         fetchImpl: async () => new Response('{}', { status: 200 }),
       })
     ).rejects.toThrow(/API Key/);
+
+    await expect(
+      runExternalSearch({
+        query: 'x',
+        service: service('firecrawl', { apiKey: undefined }),
+        fetchImpl: async () => new Response('{}', { status: 200 }),
+      })
+    ).rejects.toThrow(/API Key/);
+  });
+
+  it('rejects private custom endpoints and oversized search responses', async () => {
+    await expect(
+      runExternalSearch({
+        query: 'x',
+        service: service('tavily', { endpoint: 'https://10.0.0.1/search' }),
+        fetchImpl: async () => new Response('{}', { status: 200 }),
+      })
+    ).rejects.toThrow(/本机或私网/);
+
+    await expect(
+      runExternalSearch({
+        query: 'x',
+        service: service('tavily'),
+        fetchImpl: async () =>
+          new Response('{}', {
+            status: 200,
+            headers: { 'content-length': String(6 * 1024 * 1024) },
+          }),
+      })
+    ).rejects.toThrow(/响应过大/);
   });
 });

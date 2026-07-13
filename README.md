@@ -46,6 +46,8 @@
 - 对话协议：Chat Completions 默认流式输出；OpenAI Responses-only Pro 模型自动切换 `/responses` 非流式协议，并记录 Token 用量。
 - 多模型同问：可选择 2–4 个用户服务商模型并行回答；整组共用停止控制，单个失败不丢弃其它结果，后续对话只携带用户选中的一个候选。界面会在发送前明确本次将产生多少次独立服务商调用；目标尚未配置时会直接引导到对应设置，而不是只留下无法继续的提示。
 - 可信联网搜索：使用用户自己的 Key 调用 OpenAI、火山方舟或阿里百炼官方 Responses 搜索协议；只有响应包含搜索调用、有效引用或百炼搜索计数证据时才标记为已联网，并把 HTTPS 来源展示为可点击链接。
+- 外部 BYOK 搜索（1.7）：可配置 Tavily、Brave Search、xAI Grok Search、Firecrawl，或在 Android/本机调试路径使用无需 Key 的 Bing、DuckDuckGo。聊天模型只获得一个有界 `search_web` 工具，单轮最多 4 次工具调用、每次最多 10 条结果，查询和响应体均有限额；引用会绑定到经过 HTTPS 过滤的结果。Firecrawl 云端必须使用用户自己的 Key，无鉴权自建实例才可留空；xAI 默认模型按当前官方文档使用 `grok-4.5` 与 `web_search`/`x_search`。正式 Web 构建继续拒绝发送 API Key 或模型/搜索请求，本机 Web 只能通过显式受限调试代理访问。
+- Markdown 与活动时间线（1.7）：模型完成后的回答支持标题、列表、代码块、表格和显式链接，思考片段与搜索工具活动按真实顺序展示；流式期间仍使用轻量文本渲染。模型输出只能打开经过校验的 HTTPS 链接，Markdown 原始 HTML 与模糊自动 linkify 均关闭，完整工具参数不进入外部备份。
 - 思考设置：按精确模型系列保存思考强度，区分 `off`、`none`、`minimal`、`xhigh`、`max`，并分别映射 OpenAI、火山方舟和百炼协议。
 - 参数调整：按服务商和模型只显示已适配的温度、top_p、惩罚参数及其真实范围；思考模式或固定参数模型会明确提示或隐藏无效控件，关闭后交给服务商默认值处理。`1.6.0` 把参数正文改为受可用高度约束的独立滚动区，拖动可收起 Android 键盘，数值输入完成和关闭面板也会主动收键盘。
 - 多模态入口：按模型能力显示图片、视频和文件选择入口；图片可发送给视觉模型，百炼兼容模式支持有界的本地视频 `video_url` 输入，文件输入仅对显式具备 `file-input` 能力的 OpenAI 官方模型开放。另支持文本生图，以及带参考图片/视频的火山方舟视频任务提交和后续查询。
@@ -67,7 +69,9 @@
 
 ## 仍在完善
 
-当前稳定 Latest 已是 [`v1.6.0`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.6.0) / Android versionCode 12；它由 `szdtzpj` 发布，是 immutable、非 draft、非 prerelease，且包含精确 3 个由 `github-actions[bot]` 上传的正式资产。本机预发布候选仍只是历史验收证据，必须与 Actions 正式 APK 分开核对。
+当前稳定 Latest 仍是 [`v1.6.0`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.6.0) / Android versionCode 12；`1.7.0` / code 13 是正在验证的发布源，尚不能在正式工作流完成前冒充公开 APK。正式发布后将以 Actions 产物、immutable Release 与 Pages 下载闭环为准。
+
+`1.7.0` 的官方协议核对、安全修正、本机质量门和候选 APK 证据见 [`1.7.0` 发布源续作断点](./docs/CONTINUATION_CHECKPOINT_2026-07-13_V1.7.md)。
 
 Embezzle Studio 不购买、转售、补贴或代理模型、搜索、语音、媒体或 MCP 能力，也不运行生产 API、MCP 网关、审批服务器、汇率服务、云同步、遥测后端或任务 worker。所有服务商与工具调用及费用都由用户配置的账号承担；本地费用护栏不做汇率换算，且其估算/尝试账本不能替代服务商账单。
 
