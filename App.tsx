@@ -46,21 +46,19 @@ import type {
   ViewStyle,
 } from 'react-native';
 import Reanimated, {
-  cancelAnimation,
   Easing as ReanimatedEasing,
   Extrapolation,
   interpolate,
   runOnJS,
   useAnimatedStyle,
   useSharedValue,
-  withRepeat,
   withSpring,
   withTiming,
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AnimatePresence, MotiView } from 'moti';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { BookOpen, Brain, Check, ChevronDown, Columns3, Copy, Download, ExternalLink, FileText, Folder, GitBranch, Globe2, Image as ImageIcon, Lightbulb, Menu, MessageSquare, Mic, MoreHorizontal, PenSquare, Pencil, Pin, Play, Plus, RefreshCw, Search, Share2, Settings, ShieldCheck, SlidersHorizontal, Square, Trash2, Video, Volume2, Wrench, X } from 'lucide-react-native';
+import { BookOpen, Brain, Check, ChevronDown, Columns3, Copy, Download, FileText, Folder, GitBranch, Image as ImageIcon, Lightbulb, Menu, MessageSquare, Mic, MoreHorizontal, PenSquare, Pencil, Pin, Play, Plus, RefreshCw, Search, Share2, Settings, ShieldCheck, SlidersHorizontal, Square, Trash2, Video, Volume2, Wrench, X } from 'lucide-react-native';
 import { Bailian, ChatGLM, Claude, DeepSeek, Doubao, Gemini, Kimi, Minimax, NewAPI, OpenAI, Qwen, Volcengine, Zhipu } from '@lobehub/icons-rn';
 
 import { isArkStaticDoubaoModelId, isVolcengineArkProvider } from './src/data/arkModels';
@@ -73,6 +71,8 @@ import type {
   ChatTokenUsage,
   ChatConversation,
   ColorMode,
+  ExternalSearchProviderKind,
+  ExternalSearchService,
   GenerationTaskInfo,
   ChatMessage,
   MessageRole,
@@ -144,6 +144,16 @@ import {
   assertProviderWebSearchMessagesSupported,
   resolveProviderWebSearchProtocol,
 } from './src/services/providerWebSearch';
+import {
+  externalSearchProviderLabels,
+  externalSearchProviderRequiresApiKey,
+  isExternalSearchReady,
+  isExternalSearchServiceConfigured,
+} from './src/services/externalSearch';
+import {
+  finalizeActivityTimelineForTerminalMessage,
+  finalizeToolActivityForTerminalMessage,
+} from './src/services/messageActivity';
 import {
   createPromptTemplate,
   deletePromptTemplate,
@@ -258,6 +268,15 @@ import { AppDialogHost } from './src/ui/components/AppDialogHost';
 import { ConfirmDialog } from './src/ui/components/ConfirmDialog';
 import { PromptDialog } from './src/ui/components/PromptDialog';
 import { ActionSheetDialog } from './src/ui/components/ActionSheetDialog';
+import { MessageActivityModules } from './src/ui/components/MessageActivityModules';
+import { MessageMarkdown } from './src/ui/components/MessageMarkdown';
+import {
+  ComposerSearchSheet,
+  resolveActiveSearchIconKind,
+  SearchServiceIcon,
+  SearchServicesPanel,
+  type SearchServicesPanelHandle,
+} from './src/ui/components/SearchServicesPanel';
 import { requestConfirm, requestNotice } from './src/ui/components/dialogService';
 
 /**
@@ -749,59 +768,6 @@ function Toast({ message }: { message: string | null }) {
           </MotiView>
         ) : null}
       </AnimatePresence>
-    </View>
-  );
-}
-
-/**
- * 单一折叠标记：两条圆角带在旋转中交换主次轴，首尾形态一致，
- * 因此循环不会出现三个圆点那种跳动或复位感。
- */
-function ThinkingGlyph() {
-  const { styles } = useAppTheme();
-  const progress = useSharedValue(0);
-
-  useEffect(() => {
-    progress.value = withRepeat(
-      withTiming(1, {
-        duration: 1450,
-        easing: ReanimatedEasing.inOut(ReanimatedEasing.cubic),
-      }),
-      -1,
-      false
-    );
-
-    return () => cancelAnimation(progress);
-  }, [progress]);
-
-  const glyphAnimatedStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(progress.value, [0, 0.5, 1], [0.72, 1, 0.72], Extrapolation.CLAMP),
-    transform: [
-      { rotateZ: `${interpolate(progress.value, [0, 1], [0, 90], Extrapolation.CLAMP)}deg` },
-      { scale: interpolate(progress.value, [0, 0.5, 1], [0.94, 1, 0.94], Extrapolation.CLAMP) },
-    ],
-  }));
-
-  const horizontalBandAnimatedStyle = useAnimatedStyle(() => ({
-    transform: [
-      { scaleX: interpolate(progress.value, [0, 0.5, 1], [1, 0.82, 0.64], Extrapolation.CLAMP) },
-    ],
-  }));
-
-  const verticalBandAnimatedStyle = useAnimatedStyle(() => ({
-    transform: [
-      { rotateZ: '90deg' },
-      { scaleX: interpolate(progress.value, [0, 0.5, 1], [0.64, 0.82, 1], Extrapolation.CLAMP) },
-    ],
-  }));
-
-  return (
-    <View style={styles.thinkingGlyphRow} accessibilityRole="text" accessibilityLabel="正在思考">
-      <Reanimated.View style={[styles.thinkingGlyph, glyphAnimatedStyle]}>
-        <Reanimated.View style={[styles.thinkingGlyphBand, horizontalBandAnimatedStyle]} />
-        <Reanimated.View style={[styles.thinkingGlyphBand, verticalBandAnimatedStyle]} />
-        <View style={styles.thinkingGlyphCenter} />
-      </Reanimated.View>
     </View>
   );
 }
@@ -1346,6 +1312,7 @@ function AppContent({
     useState<SettingsDestination | null>(null);
   const [comparisonConfigProviderId, setComparisonConfigProviderId] = useState<string | null>(null);
   const settingsScreenRef = useRef<SettingsScreenHandle>(null);
+  const searchServicesPanelRef = useRef<SearchServicesPanelHandle>(null);
   const workspaceReadOnly = isWorkspaceReadOnly(booting, persistenceReady);
   const closeSettings = useCallback(() => {
     settingsScreenRef.current?.resetNavigation();
@@ -1378,6 +1345,7 @@ function AppContent({
   const parameterMenuMaxHeight = composerLayoutY > 0
     ? Math.min(520, Math.max(0, Math.floor(composerLayoutY - 12)))
     : 420;
+  const [searchMenuOpen, setSearchMenuOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [input, setInput] = useState('');
   const [manualModelId, setManualModelId] = useState('');
@@ -1443,7 +1411,7 @@ function AppContent({
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingMessageDraft, setEditingMessageDraft] = useState('');
   const [messageActionMenuId, setMessageActionMenuId] = useState<string | null>(null);
-  const [expandedReasoningByMessageId, setExpandedReasoningByMessageId] = useState<Record<string, boolean>>({});
+
   const [queryingTaskByMessageId, setQueryingTaskByMessageId] = useState<Record<string, boolean>>({});
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
@@ -1946,10 +1914,11 @@ function AppContent({
         closeSettings();
         return true;
       }
-      if (attachMenuOpen || reasoningMenuOpen || parameterMenuOpen || messageActionMenuId) {
+      if (attachMenuOpen || reasoningMenuOpen || parameterMenuOpen || searchMenuOpen || messageActionMenuId) {
         setAttachMenuOpen(false);
         setReasoningMenuOpen(false);
         setParameterMenuOpen(false);
+        setSearchMenuOpen(false);
         setMessageActionMenuId(null);
         return true;
       }
@@ -1970,6 +1939,7 @@ function AppContent({
     parameterMenuOpen,
     reasoningMenuOpen,
     renamingConversationId,
+    searchMenuOpen,
     settingsOpen,
     sidebarOpen,
     workbenchOpen,
@@ -2304,6 +2274,31 @@ function AppContent({
       }
     });
   }, [activeModel, activeModelTask, activeProvider, comparisonActive, comparisonRuntimes]);
+  const externalSearchReady = useMemo(() => {
+    if (!isExternalSearchReady(workspace.externalSearch)) {
+      return false;
+    }
+    const runtimes = comparisonActive
+      ? comparisonRuntimes
+      : activeProvider && activeModel && activeModelTask === 'chat'
+        ? [{ provider: activeProvider, model: activeModel }]
+        : [];
+    if (!runtimes.length) {
+      return false;
+    }
+    return runtimes.every(
+      (runtime) =>
+        Boolean(runtime.provider.apiKey?.trim()) &&
+        runtime.model.capabilities.includes('tool-calling')
+    );
+  }, [
+    activeModel,
+    activeModelTask,
+    activeProvider,
+    comparisonActive,
+    comparisonRuntimes,
+    workspace.externalSearch,
+  ]);
   const webSearchContextSizeApplies = useMemo(() => {
     const runtimes = comparisonActive
       ? comparisonRuntimes
@@ -3143,37 +3138,188 @@ function AppContent({
     openSettingsDestination({ key: 'tools', section: 'comparison' });
   }
 
-  function setWebSearchEnabled(enabled: boolean) {
+  function hasBlockingMcpForSearch(): boolean {
+    return workspace.plugins.some(
+      (plugin) =>
+        plugin.type === 'remote-mcp' &&
+        plugin.enabled === true &&
+        plugin.providerId === workspace.activeProviderId
+    );
+  }
+
+  /** Composer globe menu: pick off / provider-hosted / external service path. */
+  function applyComposerSearchMode(
+    mode: 'off' | 'provider' | 'external',
+    serviceId?: string
+  ) {
     if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
       return;
     }
-    if (enabled && !webSearchReady) {
-      setNotice(
-        '联网搜索未启用：当前每个目标都必须使用已适配的官方服务商地址、用户自己的 API Key，并明确标记 Web Search 能力。'
-      );
+    if (mode === 'off') {
+      setWorkspace((current) => ({
+        ...current,
+        webSearch: { ...current.webSearch, enabled: false },
+        externalSearch: { ...current.externalSearch, enabled: false },
+      }));
+      setNotice('');
       return;
     }
-    if (
-      enabled &&
-      workspace.plugins.some(
-        (plugin) =>
-          plugin.type === 'remote-mcp' &&
-          plugin.enabled === true &&
-          plugin.providerId === workspace.activeProviderId
-      )
-    ) {
-      setNotice('请先关闭当前服务商的 MCP；v1.4 不在同一轮混用联网搜索与 MCP。');
+    if (hasBlockingMcpForSearch()) {
+      setNotice('请先关闭当前服务商的 MCP；不在同一轮混用联网搜索与 MCP。');
+      return;
+    }
+    if (mode === 'provider') {
+      if (!webSearchReady) {
+        setNotice(
+          '服务商联网搜索不可用：需要官方适配端点、API Key，且模型标记 Web Search 能力。'
+        );
+        return;
+      }
+      setWorkspace((current) => ({
+        ...current,
+        webSearch: { ...current.webSearch, enabled: true },
+        externalSearch: { ...current.externalSearch, enabled: false },
+      }));
+      setNotice('已开启服务商联网搜索；费用由对应服务商账户结算。');
+      return;
+    }
+
+    const modelSupportsTools = Boolean(activeModel?.capabilities.includes('tool-calling'));
+    if (!modelSupportsTools) {
+      setNotice('外部搜索需要当前聊天模型具备 tool-calling 能力。');
+      return;
+    }
+    const targetId =
+      serviceId ??
+      workspace.externalSearch.selectedServiceId ??
+      workspace.externalSearch.services.find((service) =>
+        isExternalSearchServiceConfigured(service)
+      )?.id;
+    const service = workspace.externalSearch.services.find((item) => item.id === targetId);
+    if (!service || !isExternalSearchServiceConfigured(service)) {
+      setNotice(
+        '请先添加搜索服务：Bing / DuckDuckGo 免费可用；Tavily / Brave / Grok 需 API Key。'
+      );
       return;
     }
     setWorkspace((current) => ({
       ...current,
-      webSearch: { ...current.webSearch, enabled },
+      webSearch: { ...current.webSearch, enabled: false },
+      externalSearch: {
+        ...current.externalSearch,
+        enabled: true,
+        selectedServiceId: service.id,
+      },
     }));
     setNotice(
-      enabled
-        ? '已开启服务商联网搜索；搜索工具调用和模型用量均由你的服务商账户结算。'
-        : ''
+      `已开启外部搜索（${service.name}）：主模型将按需调用 search_web；费用由你的账号结算。`
     );
+  }
+
+  const composerSearchSummary = useMemo(() => {
+    if (workspace.externalSearch.enabled) {
+      const service =
+        workspace.externalSearch.services.find(
+          (item) => item.id === workspace.externalSearch.selectedServiceId
+        ) ?? workspace.externalSearch.services[0];
+      return service ? `联网 · ${service.name}` : '联网 · 外部搜索';
+    }
+    if (workspace.webSearch.enabled) {
+      return '联网 · 服务商';
+    }
+    return null;
+  }, [workspace.externalSearch, workspace.webSearch.enabled]);
+
+  const composerSearchIconKind = useMemo(
+    () =>
+      resolveActiveSearchIconKind({
+        webSearchEnabled: workspace.webSearch.enabled,
+        externalSearch: workspace.externalSearch,
+      }),
+    [workspace.externalSearch, workspace.webSearch.enabled]
+  );
+
+  const openSearchServicesManage = useCallback(() => {
+    setSearchMenuOpen(false);
+    setSettingsMounted(true);
+    setSettingsOpen(true);
+    // First open may mount SettingsScreen this frame; wait for ref.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        settingsScreenRef.current?.openToolsSection('webSearch');
+      });
+    });
+  }, []);
+
+  function upsertExternalSearchService(input: {
+    kind: ExternalSearchProviderKind;
+    name?: string;
+    apiKey?: string;
+    endpoint?: string;
+    model?: string;
+    serviceId?: string;
+  }) {
+    if (!ensureWorkspaceWritable()) return;
+    const apiKey = input.apiKey?.trim() || undefined;
+    if (externalSearchProviderRequiresApiKey(input.kind) && !apiKey) {
+      setNotice(`请填写 ${externalSearchProviderLabels[input.kind]} 的 API Key。`);
+      return;
+    }
+    setWorkspace((current) => {
+      const existing = input.serviceId
+        ? current.externalSearch.services.find((service) => service.id === input.serviceId)
+        : undefined;
+      // Prefer updating an existing service of the same kind when adding without id.
+      const sameKind =
+        existing ??
+        (!input.serviceId
+          ? current.externalSearch.services.find((service) => service.kind === input.kind)
+          : undefined);
+      const service: ExternalSearchService = {
+        id: sameKind?.id ?? createId('ext-search'),
+        kind: input.kind,
+        name: (input.name?.trim() || externalSearchProviderLabels[input.kind]).slice(0, 80),
+        ...(apiKey ? { apiKey } : {}),
+        ...(input.endpoint?.trim() ? { endpoint: input.endpoint.trim() } : {}),
+        ...(input.kind === 'grok' && input.model?.trim()
+          ? { model: input.model.trim() }
+          : input.kind === 'grok'
+            ? { model: 'grok-4-1-fast-reasoning' }
+            : {}),
+      };
+      const services = sameKind
+        ? current.externalSearch.services.map((item) => (item.id === sameKind.id ? service : item))
+        : [...current.externalSearch.services, service].slice(0, 16);
+      return {
+        ...current,
+        externalSearch: {
+          ...current.externalSearch,
+          services,
+          selectedServiceId: service.id,
+        },
+      };
+    });
+    setNotice(`已保存 ${externalSearchProviderLabels[input.kind]} 搜索服务。`);
+  }
+
+  function removeExternalSearchService(serviceId: string) {
+    if (!ensureWorkspaceWritable()) return;
+    setWorkspace((current) => {
+      const services = current.externalSearch.services.filter((service) => service.id !== serviceId);
+      const selectedServiceId =
+        current.externalSearch.selectedServiceId === serviceId
+          ? services[0]?.id
+          : current.externalSearch.selectedServiceId;
+      return {
+        ...current,
+        externalSearch: {
+          ...current.externalSearch,
+          services,
+          selectedServiceId,
+          enabled: services.length ? current.externalSearch.enabled : false,
+        },
+      };
+    });
   }
 
   function savePromptTemplate() {
@@ -3509,6 +3655,12 @@ function AppContent({
     }
   }
 
+  function anySearchEnabled(
+    source: Pick<AppWorkspace, 'webSearch' | 'externalSearch'> = workspaceRef.current
+  ): boolean {
+    return source.webSearch.enabled || source.externalSearch.enabled;
+  }
+
   function requestUsageKind(model: ModelInfo, searchEnabled: boolean): ProviderUsageKind {
     if (searchEnabled) return 'web-search';
     const task = inferModelTask(model);
@@ -3545,7 +3697,7 @@ function AppContent({
   ): ProviderUsageEvent {
     return createStartedProviderUsageEvent({
       id: createId('usage'),
-      kind: requestUsageKind(runtime.model, workspaceRef.current.webSearch.enabled),
+      kind: requestUsageKind(runtime.model, anySearchEnabled(workspaceRef.current)),
       providerId: runtime.provider.id,
       modelId: runtime.modelId,
       createdAt: Date.now(),
@@ -4129,7 +4281,6 @@ function AppContent({
           : {}),
       }));
       resetComposerForConversationChange();
-      setExpandedReasoningByMessageId({});
       setQueryingTaskByMessageId({});
       setSidebarOpen(false);
       setNotice(noticeText);
@@ -4169,7 +4320,6 @@ function AppContent({
         : {}),
     }));
     resetComposerForConversationChange();
-    setExpandedReasoningByMessageId({});
     setQueryingTaskByMessageId({});
     setSidebarOpen(false);
     setNotice(noticeText);
@@ -4242,7 +4392,6 @@ function AppContent({
       };
     });
     resetComposerForConversationChange();
-    setExpandedReasoningByMessageId({});
     setQueryingTaskByMessageId({});
     setSidebarOpen(false);
     setNotice('');
@@ -4367,7 +4516,6 @@ function AppContent({
     if (deletingActiveConversation) {
       resetComposerForConversationChange();
     }
-    setExpandedReasoningByMessageId({});
     setQueryingTaskByMessageId({});
     setConversationActionId(null);
     setDeleteConfirmConversationId(null);
@@ -4663,6 +4811,8 @@ function AppContent({
       usage: result.usage,
       citations: result.citations,
       webSearchTriggered: result.webSearchTriggered,
+      ...(result.toolActivity ? { toolActivity: result.toolActivity } : {}),
+      ...(result.activityTimeline ? { activityTimeline: result.activityTimeline } : {}),
       attachments: result.attachments,
       generationTask: result.generationTask,
       mcpActivity: result.mcpActivity,
@@ -4696,7 +4846,10 @@ function AppContent({
     let mcpProviderSendStarted = false;
     let firstTokenAt: number | undefined;
     let latestUpdate:
-      | Pick<ChatCompletionResult, 'content' | 'reasoningContent' | 'usage'>
+      | Pick<
+          ChatCompletionResult,
+          'content' | 'reasoningContent' | 'usage' | 'toolActivity' | 'activityTimeline'
+        >
       | undefined;
     let streamTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -4708,6 +4861,10 @@ function AppContent({
         content: latestUpdate.content,
         reasoningContent: latestUpdate.reasoningContent,
         usage: latestUpdate.usage,
+        ...(latestUpdate.toolActivity ? { toolActivity: latestUpdate.toolActivity } : {}),
+        ...(latestUpdate.activityTimeline
+          ? { activityTimeline: latestUpdate.activityTimeline }
+          : {}),
         status: 'pending',
       }, conversationId);
     };
@@ -4740,6 +4897,7 @@ function AppContent({
           ? workspaceRef.current.costGuard.maxOutputTokens
           : undefined,
         webSearch: workspaceRef.current.webSearch,
+        externalSearch: workspaceRef.current.externalSearch,
         ...(mcpPlugin
           ? {
               mcp: {
@@ -4809,7 +4967,12 @@ function AppContent({
             }
           : {}),
         onStreamUpdate: (update) => {
-          if (update.content || update.reasoningContent) {
+          if (
+            update.content ||
+            update.reasoningContent ||
+            update.toolActivity?.length ||
+            update.activityTimeline?.length
+          ) {
             firstTokenAt ??= Date.now();
           }
           latestUpdate = update;
@@ -4843,6 +5006,8 @@ function AppContent({
         content: result.content,
         reasoningContent: result.reasoningContent,
         usage: result.usage,
+        ...(result.toolActivity ? { toolActivity: result.toolActivity } : {}),
+        ...(result.activityTimeline ? { activityTimeline: result.activityTimeline } : {}),
         status: 'ready',
         requestMetrics,
       };
@@ -4883,6 +5048,17 @@ function AppContent({
               providerSendStarted: mcpProviderSendStarted,
             }
           : undefined;
+        const endedAt = Date.now();
+        // Freeze in-flight thinking/tool rows so timers stop after cancel.
+        const activityTimeline = finalizeActivityTimelineForTerminalMessage(
+          latestUpdate?.activityTimeline,
+          { messageStatus: 'cancelled', finishedAt: endedAt }
+        );
+        const toolActivity = finalizeToolActivityForTerminalMessage(
+          latestUpdate?.toolActivity,
+          'cancelled',
+          endedAt
+        );
         updateAssistantMessage(assistantMessage.id, {
           content: latestUpdate?.content || '生成已停止。',
           reasoningContent: latestUpdate?.reasoningContent,
@@ -4890,9 +5066,11 @@ function AppContent({
           status: 'cancelled',
           error: undefined,
           requestMetrics: {
-            durationMs: Date.now() - startedAt,
+            durationMs: endedAt - startedAt,
             ...(firstTokenAt !== undefined ? { timeToFirstTokenMs: firstTokenAt - startedAt } : {}),
           },
+          ...(activityTimeline ? { activityTimeline } : {}),
+          ...(toolActivity ? { toolActivity } : {}),
           ...(mcpAudit
             ? { mcpActivity: pendingMcpActivity }
             : {}),
@@ -4917,6 +5095,17 @@ function AppContent({
             error: message,
           }
         : undefined;
+      const endedAt = Date.now();
+      // Stream updates leave thinking steps as "running"; freeze them on hard failure.
+      const activityTimeline = finalizeActivityTimelineForTerminalMessage(
+        latestUpdate?.activityTimeline,
+        { messageStatus: 'error', finishedAt: endedAt }
+      );
+      const toolActivity = finalizeToolActivityForTerminalMessage(
+        latestUpdate?.toolActivity,
+        'error',
+        endedAt
+      );
       updateAssistantMessage(assistantMessage.id, {
         content: latestUpdate?.content || message,
         reasoningContent: latestUpdate?.reasoningContent,
@@ -4924,9 +5113,11 @@ function AppContent({
         status: 'error',
         error: message,
         requestMetrics: {
-          durationMs: Date.now() - startedAt,
+          durationMs: endedAt - startedAt,
           ...(firstTokenAt !== undefined ? { timeToFirstTokenMs: firstTokenAt - startedAt } : {}),
         },
+        ...(activityTimeline ? { activityTimeline } : {}),
+        ...(toolActivity ? { toolActivity } : {}),
         ...(mcpAudit
           ? { mcpActivity: pendingMcpActivity }
           : {}),
@@ -4940,12 +5131,6 @@ function AppContent({
     }
   }
 
-  function toggleReasoning(messageId: string) {
-    setExpandedReasoningByMessageId((current) => ({
-      ...current,
-      [messageId]: !current[messageId],
-    }));
-  }
 
   async function copyMessage(message: ChatMessage) {
     const text = message.content.trim();
@@ -5572,12 +5757,12 @@ function AppContent({
     const mcpActive = runtimeHasEnabledMcp(runtime.provider.id, runtime.model);
     if (!(await authorizeProviderRequestPlan({
       potentialMultipleCharges:
-        workspace.webSearch.enabled || mcpActive,
+        anySearchEnabled(workspace) || mcpActive,
       operations: [providerRequestOperation(
         runtime.provider.id,
         runtime.modelId,
         runtime.model,
-        workspace.webSearch.enabled
+        anySearchEnabled(workspace)
       )],
     }))) return;
     const controller = beginActiveRequest('回答生成', { mcpActive });
@@ -5738,12 +5923,12 @@ function AppContent({
     const mcpActive = runtimeHasEnabledMcp(runtime.provider.id, runtime.model);
     if (!(await authorizeProviderRequestPlan({
       potentialMultipleCharges:
-        workspace.webSearch.enabled || mcpActive,
+        anySearchEnabled(workspace) || mcpActive,
       operations: [providerRequestOperation(
         runtime.provider.id,
         runtime.modelId,
         runtime.model,
-        workspace.webSearch.enabled
+        anySearchEnabled(workspace)
       )],
     }))) return;
     const controller = beginActiveRequest('回答生成', { mcpActive });
@@ -6297,10 +6482,10 @@ function AppContent({
         return;
       }
       if (
-        workspace.webSearch.enabled &&
+        anySearchEnabled(workspace) &&
         workspace.activeProviderId === plugin.providerId
       ) {
-        setNotice('请先关闭联网搜索；v1.4 不在同一轮混用联网搜索与 MCP。');
+        setNotice('请先关闭联网搜索（服务商或外部）；不在同一轮混用联网搜索与 MCP。');
         return;
       }
       if (
@@ -6707,6 +6892,10 @@ function AppContent({
       setNotice('对比请求未发出：至少一个目标尚未满足可信联网搜索条件。');
       return;
     }
+    if (workspace.externalSearch.enabled && !externalSearchReady) {
+      setNotice('对比请求未发出：外部搜索未就绪（需配置 Key 且目标模型支持 tool-calling）。');
+      return;
+    }
     if (
       workspace.plugins.some(
         (plugin) =>
@@ -6758,7 +6947,7 @@ function AppContent({
       comparison: true,
       potentialMultipleCharges: true,
       operations: comparisonRuntimes.map((runtime) => ({
-        kind: requestUsageKind(runtime.model, workspace.webSearch.enabled),
+        kind: requestUsageKind(runtime.model, anySearchEnabled(workspace)),
         providerId: runtime.provider.id,
         modelId: runtime.modelId,
       })),
@@ -6928,8 +7117,12 @@ function AppContent({
       setNotice('请求未发出：当前模型尚未满足可信联网搜索条件。');
       return;
     }
+    if (workspace.externalSearch.enabled && !externalSearchReady) {
+      setNotice('请求未发出：外部搜索未就绪（需配置 Key 且当前模型支持 tool-calling）。');
+      return;
+    }
     if (
-      workspace.webSearch.enabled &&
+      anySearchEnabled(workspace) &&
       workspace.plugins.some(
         (plugin) =>
           plugin.type === 'remote-mcp' &&
@@ -6937,7 +7130,7 @@ function AppContent({
           plugin.providerId === activeProvider.id
       )
     ) {
-      setNotice('请求未发出：v1.4 的 MCP 与联网搜索互斥，请关闭其中一项。');
+      setNotice('请求未发出：MCP 与联网搜索互斥，请关闭其中一项。');
       return;
     }
     if (activeModelTask === 'image-generation' && attachments.length) {
@@ -7005,12 +7198,12 @@ function AppContent({
     const mcpActive = runtimeHasEnabledMcp(activeProvider.id, activeModel);
     if (!(await authorizeProviderRequestPlan({
       potentialMultipleCharges:
-        workspace.webSearch.enabled || mcpActive,
+        anySearchEnabled(workspace) || mcpActive,
       operations: [providerRequestOperation(
         activeProvider.id,
         activeModelId,
         activeModel,
-        workspace.webSearch.enabled
+        anySearchEnabled(workspace)
       )],
     }))) {
       return;
@@ -7283,60 +7476,39 @@ function AppContent({
       case 'webSearch':
         return (
           <>
-<View style={styles.settingsCard} testID="web-search-settings-card">
-                <View style={styles.settingsCardHeader}>
-                  <Text style={styles.settingsCardTitle}>服务商联网搜索</Text>
-                  <Text style={styles.modelOverrideHint}>{webSearchReady ? '当前可用' : '条件未满足'}</Text>
-                </View>
-                <Text style={styles.modelOverrideHint}>
-                  仅调用 OpenAI、火山方舟或阿里百炼的官方 Responses 搜索协议；必须使用你自己的 Key，可能产生的搜索费用由对应服务商从你的账户结算。只有响应提供搜索调用或引用证据时才会标记为已联网。
-                </Text>
-                {webSearchContextSizeApplies ? (
-                  <View style={styles.toolSegmentRow}>
-                    {(['low', 'medium', 'high'] as const).map((size) => {
-                      const selected = workspace.webSearch.searchContextSize === size;
-                      return (
-                        <AnimatedPressable
-                          key={size}
-                          accessibilityRole="button"
-                          disabled={workspaceReadOnly}
-                          onPress={() => {
-                            if (!ensureWorkspaceWritable()) return;
-                            setWorkspace((current) => ({
-                              ...current,
-                              webSearch: { ...current.webSearch, searchContextSize: size },
-                            }));
-                          }}
-                          style={[styles.toolSegment, selected && styles.toolSegmentActive]}
-                        >
-                          <Text style={[styles.toolSegmentText, selected && styles.toolSegmentTextActive]}>
-                            {size === 'low' ? '精简' : size === 'medium' ? '均衡' : '深入'}
-                          </Text>
-                        </AnimatedPressable>
-                      );
-                    })}
-                  </View>
-                ) : (
-                  <Text style={styles.modelOverrideHint}>
-                    搜索范围档位仅适用于全部目标都是 OpenAI 官方协议时；火山方舟使用安全固定上限，百炼使用服务商协议默认值。
-                  </Text>
-                )}
-                <AnimatedPressable
-                  accessibilityRole="switch"
-                  accessibilityState={{ checked: workspace.webSearch.enabled, disabled: !webSearchReady }}
-                  disabled={!webSearchReady && !workspace.webSearch.enabled}
-                  onPress={() => setWebSearchEnabled(!workspace.webSearch.enabled)}
-                  style={[
-                    styles.primaryButton,
-                    (!webSearchReady && !workspace.webSearch.enabled) && styles.buttonDisabled,
-                  ]}
-                >
-                  <Text style={styles.primaryButtonText}>
-                    {workspace.webSearch.enabled ? '关闭联网搜索' : '开启联网搜索'}
-                  </Text>
-                </AnimatedPressable>
-              </View>
-
+            <SearchServicesPanel
+              ref={searchServicesPanelRef}
+              readOnly={workspaceReadOnly}
+              webSearch={workspace.webSearch}
+              externalSearch={workspace.externalSearch}
+              webSearchReady={webSearchReady}
+              webSearchContextSizeApplies={webSearchContextSizeApplies}
+              onSetSearchContextSize={(size) => {
+                if (!ensureWorkspaceWritable()) return;
+                setWorkspace((current) => ({
+                  ...current,
+                  webSearch: { ...current.webSearch, searchContextSize: size },
+                }));
+              }}
+              onRemoveExternalService={removeExternalSearchService}
+              onAddExternalService={(input) => {
+                upsertExternalSearchService(input);
+              }}
+              onSetMaxResults={(count) => {
+                if (!ensureWorkspaceWritable()) return;
+                setWorkspace((current) => ({
+                  ...current,
+                  externalSearch: { ...current.externalSearch, maxResults: count },
+                }));
+              }}
+              onSetMaxToolRounds={(count) => {
+                if (!ensureWorkspaceWritable()) return;
+                setWorkspace((current) => ({
+                  ...current,
+                  externalSearch: { ...current.externalSearch, maxToolRounds: count },
+                }));
+              }}
+            />
           </>
         );
       case 'prompts':
@@ -8295,6 +8467,27 @@ function AppContent({
                   onCheckUpdates={checkUpdates}
                   onOpenUpdateTarget={openUpdateTarget}
                   renderToolsSection={(section) => renderSettingsToolsSection(section)}
+                  renderToolsHeaderRight={(section) =>
+                    section === 'webSearch' ? (
+                      <AnimatedPressable
+                        accessibilityRole="button"
+                        accessibilityLabel="添加搜索服务"
+                        testID="search-service-add"
+                        disabled={workspaceReadOnly}
+                        onPress={() => searchServicesPanelRef.current?.openAdd()}
+                        haptic="light"
+                        style={{
+                          width: 38,
+                          height: 38,
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          opacity: workspaceReadOnly ? 0.4 : 1,
+                        }}
+                      >
+                        <Plus size={22} color={palette.text} strokeWidth={2.2} />
+                      </AnimatedPressable>
+                    ) : null
+                  }
                 />
               </ScreenFade>
             </View>
@@ -8337,12 +8530,6 @@ function AppContent({
                       : undefined;
                   const messageModelId = message.modelId ?? '模型未记录';
                   const messageProviderName = message.providerName ?? '未知服务商';
-                  const showThinking =
-                    message.role === 'assistant' &&
-                    message.status === 'pending' &&
-                    !message.content &&
-                    !message.reasoningContent;
-
                   return (
                   <AnimatedMessage
                     key={message.id}
@@ -8473,26 +8660,8 @@ function AppContent({
                             </Text>
                           </AnimatedPressable>
                         ) : null}
-                        {message.reasoningContent ? (
-                          <View style={styles.reasoningPanel}>
-                            <AnimatedPressable
-                              accessibilityRole="button"
-                              onPress={() => toggleReasoning(message.id)}
-                              style={styles.reasoningPanelHeader}
-                            >
-                              <Text style={styles.reasoningPanelTitle}>思考过程</Text>
-                              <Text style={styles.reasoningPanelAction}>
-                                {expandedReasoningByMessageId[message.id] ? '收起' : '展开'}
-                              </Text>
-                            </AnimatedPressable>
-                            {expandedReasoningByMessageId[message.id] ? (
-                              <Text style={styles.reasoningPanelText}>{message.reasoningContent}</Text>
-                            ) : null}
-                          </View>
-                        ) : null}
-                        {showThinking ? (
-                          <ThinkingGlyph />
-                        ) : editingMessageId === message.id ? (
+                        <MessageActivityModules message={message} />
+                        {editingMessageId === message.id ? (
                           <MessageInlineEditor
                             role="assistant"
                             value={editingMessageDraft}
@@ -8503,15 +8672,18 @@ function AppContent({
                             onCancel={cancelEditUserMessage}
                             onSave={() => { void saveEditedUserMessage(); }}
                           />
-                        ) : (
-                          <Text accessibilityLiveRegion="polite" style={styles.messageText}>{message.content}</Text>
-                        )}
+                        ) : message.content ? (
+                          <View accessibilityLiveRegion="polite">
+                            <MessageMarkdown content={message.content} />
+                          </View>
+                        ) : null}
                         {message.citations?.length ? (
                           <WebCitationList citations={message.citations} />
-                        ) : message.webSearchTriggered === false ? (
-                          <Text style={styles.messageStatusText}>本次响应未提供已触发联网搜索的证据。</Text>
                         ) : null}
-                        {message.mcpActivity ? (
+                        {message.mcpActivity &&
+                        !message.toolActivity?.length &&
+                        !message.mcpActivity.approvals.length &&
+                        !message.mcpActivity.calls.length ? (
                           <McpActivityPanel activity={message.mcpActivity} />
                         ) : null}
                         {message.status === 'cancelled' ? (
@@ -8632,9 +8804,26 @@ function AppContent({
                     setAttachMenuOpen(false);
                     setReasoningMenuOpen(false);
                     setParameterMenuOpen(false);
+                    setSearchMenuOpen(false);
                   }}
                 />
               ) : null}
+              <ComposerSearchSheet
+                visible={searchMenuOpen}
+                webSearchEnabled={workspace.webSearch.enabled}
+                webSearchReady={webSearchReady}
+                externalSearch={workspace.externalSearch}
+                modelSupportsTools={Boolean(
+                  activeModel?.capabilities.includes('tool-calling')
+                )}
+                onClose={() => setSearchMenuOpen(false)}
+                onSelectOff={() => applyComposerSearchMode('off')}
+                onSelectProvider={() => applyComposerSearchMode('provider')}
+                onSelectExternal={(serviceId) =>
+                  applyComposerSearchMode('external', serviceId)
+                }
+                onManage={openSearchServicesManage}
+              />
               <View
                 style={styles.composerWrapper}
                 onLayout={(event) => setComposerLayoutY(event.nativeEvent.layout.y)}
@@ -8875,28 +9064,42 @@ function AppContent({
                           strokeWidth={2.2}
                         />
                       </AnimatedPressable>
-                      {(webSearchReady || workspace.webSearch.enabled) ? (
-                        <AnimatedPressable
-                          accessibilityRole="switch"
-                          accessibilityLabel={workspace.webSearch.enabled ? '关闭联网搜索' : '开启联网搜索'}
-                          accessibilityState={{
-                            checked: workspace.webSearch.enabled,
-                            disabled: !webSearchReady && !workspace.webSearch.enabled,
-                          }}
-                          disabled={!webSearchReady && !workspace.webSearch.enabled}
-                          onPress={() => setWebSearchEnabled(!workspace.webSearch.enabled)}
-                          style={[
-                            styles.composerToolButton,
-                            workspace.webSearch.enabled && styles.composerToolButtonActive,
-                          ]}
-                        >
-                          <Globe2
-                            size={15}
-                            color={workspace.webSearch.enabled ? palette.accentText : palette.textSecondary}
-                            strokeWidth={2.2}
-                          />
-                        </AnimatedPressable>
-                      ) : null}
+                      <AnimatedPressable
+                        accessibilityRole="button"
+                        accessibilityLabel={
+                          composerSearchSummary
+                            ? `联网搜索：${composerSearchSummary}。点按选择途径`
+                            : '联网搜索。点按选择是否开启及搜索途径'
+                        }
+                        accessibilityState={{
+                          expanded: searchMenuOpen,
+                          selected: anySearchEnabled(workspace),
+                        }}
+                        testID="composer-search-globe"
+                        onPress={() => {
+                          setAttachMenuOpen(false);
+                          setReasoningMenuOpen(false);
+                          setParameterMenuOpen(false);
+                          setSearchMenuOpen((open) => !open);
+                        }}
+                        style={[
+                          styles.composerToolButton,
+                          (anySearchEnabled(workspace) || searchMenuOpen) &&
+                            styles.composerToolButtonActive,
+                        ]}
+                      >
+                        <SearchServiceIcon
+                          kind={composerSearchIconKind === 'off' ? 'builtin' : composerSearchIconKind}
+                          size={15}
+                          color={
+                            anySearchEnabled(workspace) || searchMenuOpen
+                              ? palette.accentText
+                              : palette.textSecondary
+                          }
+                          active={anySearchEnabled(workspace)}
+                          variant="toolbar"
+                        />
+                      </AnimatedPressable>
                       {configuredTranscriptionTarget && composerSupportsMessages ? (
                         <AnimatedPressable
                           accessibilityRole="button"
@@ -8937,6 +9140,7 @@ function AppContent({
                           onPress={() => {
                             setAttachMenuOpen(false);
                             setParameterMenuOpen(false);
+                            setSearchMenuOpen(false);
                             setReasoningMenuOpen((current) => !current);
                           }}
                           style={[
@@ -8959,6 +9163,7 @@ function AppContent({
                           onPress={() => {
                             setReasoningMenuOpen(false);
                             setParameterMenuOpen(false);
+                            setSearchMenuOpen(false);
                             setAttachMenuOpen((v) => !v);
                           }}
                           style={styles.composerToolButton}
@@ -8975,6 +9180,7 @@ function AppContent({
                             Keyboard.dismiss();
                             setReasoningMenuOpen(false);
                             setAttachMenuOpen(false);
+                            setSearchMenuOpen(false);
                             setParameterMenuOpen((current) => !current);
                           }}
                           style={[
@@ -9787,29 +9993,174 @@ function MessageActionMenu({
   );
 }
 
+function hostnameFromUrl(raw: string): string {
+  try {
+    return new URL(raw).hostname.replace(/^www\./i, '');
+  } catch {
+    return raw;
+  }
+}
+
+function faviconUriForUrl(raw: string): string | null {
+  try {
+    const host = new URL(raw).hostname;
+    if (!host) return null;
+    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Collapsed citation chip (e.g. "47个引用"); tap opens a bottom sheet of sources.
+ * Matches kelivo-style search result UX from the product reference.
+ */
 function WebCitationList({ citations }: { citations: WebCitation[] }) {
   const { palette, styles } = useAppTheme();
+  const insets = useSafeAreaInsets();
+  const { height: windowHeight } = useWindowDimensions();
+  const [open, setOpen] = useState(false);
+  const count = citations.length;
+  const preview = citations.slice(0, 3);
+  const sheetMaxH = Math.round(windowHeight * 0.78);
+
+  if (!count) return null;
+
   return (
-    <View style={styles.webCitationPanel}>
-      <Text style={styles.webCitationTitle}>联网来源</Text>
-      {citations.map((citation, index) => (
-        <AnimatedPressable
-          key={`${citation.url}:${index}`}
-          accessibilityRole="link"
-          accessibilityLabel={`打开来源 ${citation.title ?? citation.url}`}
-          onPress={() => {
-            void Linking.openURL(citation.url);
-          }}
-          style={styles.webCitationRow}
-        >
-          <Text style={styles.webCitationIndex}>{index + 1}</Text>
-          <Text numberOfLines={2} style={styles.webCitationText}>
-            {citation.title ?? citation.url}
-          </Text>
-          <ExternalLink size={13} color={palette.textSecondary} strokeWidth={2} />
-        </AnimatedPressable>
-      ))}
-    </View>
+    <>
+      <AnimatedPressable
+        accessibilityRole="button"
+        accessibilityLabel={`${count}个引用，点按查看搜索结果`}
+        testID="web-citation-chip"
+        onPress={() => setOpen(true)}
+        haptic="selection"
+        style={styles.webCitationChip}
+      >
+        <View style={styles.webCitationFaviconStack}>
+          {preview.map((citation, index) => {
+            const favicon = faviconUriForUrl(citation.url);
+            return (
+              <View
+                key={`${citation.url}:chip:${index}`}
+                style={[
+                  styles.webCitationFaviconWrap,
+                  {
+                    marginLeft: index === 0 ? 0 : -7,
+                    zIndex: preview.length - index,
+                  },
+                ]}
+              >
+                {favicon ? (
+                  <Image source={{ uri: favicon }} style={styles.webCitationFavicon} />
+                ) : (
+                  <View style={[styles.webCitationFavicon, styles.webCitationFaviconFallback]}>
+                    <Text style={styles.webCitationFaviconLetter}>
+                      {(hostnameFromUrl(citation.url)[0] ?? '?').toUpperCase()}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            );
+          })}
+        </View>
+        <Text style={styles.webCitationChipText}>{count}个引用</Text>
+      </AnimatedPressable>
+
+      <Modal
+        visible={open}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => setOpen(false)}
+      >
+        <View style={styles.webCitationSheetScrim} testID="web-citation-sheet">
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            accessibilityRole="button"
+            accessibilityLabel="关闭搜索结果"
+            onPress={() => setOpen(false)}
+          />
+          <View
+            style={[
+              styles.webCitationSheet,
+              {
+                maxHeight: sheetMaxH,
+                paddingBottom: Math.max(insets.bottom, 16) + 8,
+              },
+            ]}
+          >
+            <View style={styles.webCitationSheetHandle} />
+            <View style={styles.webCitationSheetHeader}>
+              <Text style={styles.webCitationSheetTitle}>搜索结果 {count}</Text>
+              <AnimatedPressable
+                accessibilityRole="button"
+                accessibilityLabel="关闭"
+                onPress={() => setOpen(false)}
+                style={styles.webCitationSheetClose}
+                hitSlop={8}
+              >
+                <X size={18} color={palette.textSecondary} strokeWidth={2.2} />
+              </AnimatedPressable>
+            </View>
+            <ScrollView
+              bounces
+              showsVerticalScrollIndicator
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={styles.webCitationSheetList}
+            >
+              {citations.map((citation, index) => {
+                const host = hostnameFromUrl(citation.url);
+                const favicon = faviconUriForUrl(citation.url);
+                return (
+                  <AnimatedPressable
+                    key={`${citation.url}:sheet:${index}`}
+                    accessibilityRole="link"
+                    accessibilityLabel={`打开来源 ${citation.title ?? host}`}
+                    onPress={() => {
+                      void Linking.openURL(citation.url);
+                    }}
+                    style={styles.webCitationSheetRow}
+                  >
+                    <View style={styles.webCitationSheetRowTop}>
+                      <View style={styles.webCitationSheetHostGroup}>
+                        {favicon ? (
+                          <Image source={{ uri: favicon }} style={styles.webCitationSheetFavicon} />
+                        ) : (
+                          <View
+                            style={[
+                              styles.webCitationSheetFavicon,
+                              styles.webCitationFaviconFallback,
+                            ]}
+                          >
+                            <Text style={styles.webCitationFaviconLetter}>
+                              {(host[0] ?? '?').toUpperCase()}
+                            </Text>
+                          </View>
+                        )}
+                        <Text style={styles.webCitationSheetHost} numberOfLines={1}>
+                          {host}
+                        </Text>
+                      </View>
+                      <View style={styles.webCitationSheetIndex}>
+                        <Text style={styles.webCitationSheetIndexText}>{index + 1}</Text>
+                      </View>
+                    </View>
+                    <Text style={styles.webCitationSheetItemTitle} numberOfLines={2}>
+                      {citation.title?.trim() || host}
+                    </Text>
+                    {citation.text?.trim() ? (
+                      <Text style={styles.webCitationSheetSnippet} numberOfLines={3}>
+                        {citation.text.trim()}
+                      </Text>
+                    ) : null}
+                  </AnimatedPressable>
+                );
+              })}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+    </>
   );
 }
 
@@ -11925,42 +12276,146 @@ function createAppStyles(palette: AppPalette) {
     fontSize: 13,
     lineHeight: 20,
   },
-  webCitationPanel: {
-    borderWidth: 1,
-    borderColor: palette.border,
-    borderRadius: radii.md,
-    backgroundColor: palette.surface,
-    padding: 10,
-    gap: 7,
-  },
-  webCitationTitle: {
-    color: palette.textSecondary,
-    fontSize: 11,
-    lineHeight: 16,
-    fontWeight: '800',
-  },
-  webCitationRow: {
+  webCitationChip: {
+    alignSelf: 'flex-start',
     minHeight: 30,
+    borderRadius: radii.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
   },
-  webCitationIndex: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: palette.surfaceAlt,
-    color: palette.text,
-    fontSize: 10,
-    lineHeight: 20,
-    textAlign: 'center',
-    fontWeight: '800',
+  webCitationFaviconStack: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
-  webCitationText: {
-    flex: 1,
+  webCitationFaviconWrap: {
+    borderRadius: 9,
+    borderWidth: 1.5,
+    borderColor: palette.surface,
+    overflow: 'hidden',
+  },
+  webCitationFavicon: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: palette.surfaceAlt,
+  },
+  webCitationFaviconFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  webCitationFaviconLetter: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: palette.textSecondary,
+  },
+  webCitationChipText: {
     color: palette.text,
     fontSize: 12,
-    lineHeight: 17,
+    fontWeight: '600',
+  },
+  webCitationSheetScrim: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: palette.scrim,
+  },
+  webCitationSheet: {
+    backgroundColor: palette.bg,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    width: '100%',
+  },
+  webCitationSheetHandle: {
+    alignSelf: 'center',
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: palette.border,
+    marginBottom: 12,
+  },
+  webCitationSheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+    minHeight: 36,
+  },
+  webCitationSheetTitle: {
+    color: palette.text,
+    fontSize: 17,
+    fontWeight: '700',
+  },
+  webCitationSheetClose: {
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  webCitationSheetList: {
+    paddingBottom: 8,
+    gap: 4,
+  },
+  webCitationSheetRow: {
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.border,
+    gap: 6,
+  },
+  webCitationSheetRowTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  webCitationSheetHostGroup: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  webCitationSheetFavicon: {
+    width: 16,
+    height: 16,
+    borderRadius: 4,
+    backgroundColor: palette.surfaceAlt,
+  },
+  webCitationSheetHost: {
+    flex: 1,
+    color: palette.textSecondary,
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  webCitationSheetIndex: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: palette.surfaceAlt,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  webCitationSheetIndexText: {
+    color: palette.textSecondary,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  webCitationSheetItemTitle: {
+    color: palette.text,
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 21,
+  },
+  webCitationSheetSnippet: {
+    color: palette.textSecondary,
+    fontSize: 13,
+    lineHeight: 18,
   },
   mcpActivityPanel: {
     borderWidth: 1,
@@ -12483,6 +12938,78 @@ function createAppStyles(palette: AppPalette) {
     shadowRadius: 16,
     elevation: 8,
     minWidth: 180,
+  },
+  searchMenu: {
+    position: 'absolute',
+    bottom: '100%',
+    left: 0,
+    right: 0,
+    marginBottom: 8,
+    backgroundColor: palette.bg,
+    borderRadius: radii.md,
+    padding: 12,
+    gap: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 16,
+    elevation: 8,
+    maxHeight: 360,
+  },
+  searchMenuItem: {
+    minHeight: 48,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  searchMenuItemActive: {
+    borderColor: palette.accent,
+    backgroundColor: palette.accent,
+  },
+  searchMenuItemTextBlock: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  searchMenuItemTitle: {
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  searchMenuItemTitleActive: {
+    color: palette.textOnAccent,
+  },
+  searchMenuItemHint: {
+    color: palette.textSecondary,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  searchMenuItemHintActive: {
+    color: palette.textOnAccent,
+    opacity: 0.88,
+  },
+  searchMenuEmpty: {
+    color: palette.textSecondary,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  searchMenuLink: {
+    minHeight: 36,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 4,
+  },
+  searchMenuLinkText: {
+    color: palette.accentText,
+    fontSize: 13,
+    fontWeight: '700',
   },
   reasoningMenu: {
     position: 'absolute',
