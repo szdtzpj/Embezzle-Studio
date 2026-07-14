@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { Platform, ScrollView, Text, TextInput, View } from 'react-native';
 import {
   BookOpen,
@@ -105,6 +105,7 @@ function formatCompactModelName(modelId?: string, _providerName?: string, maxLen
 
 export function SettingsToolsSectionView(props: {
   section: SettingsToolsSection;
+  searchServicesPanelRef: RefObject<SearchServicesPanelHandle | null>;
 }): React.ReactElement | null {
   const { section } = props;
   const theme = useKelivoTheme();
@@ -139,7 +140,6 @@ export function SettingsToolsSectionView(props: {
   const [projectNameDraft, setProjectNameDraft] = useState('');
   const [projectSystemPromptDraft, setProjectSystemPromptDraft] = useState('');
   const queryingTaskByMessageId = chatTasks.queryingByMessageId;
-  const searchServicesPanelRef = useRef<SearchServicesPanelHandle>(null);
   const drafts = useSettingsToolsDrafts(workspace);
   const {
     promptTemplateName, setPromptTemplateName,
@@ -1035,20 +1035,8 @@ export function SettingsToolsSectionView(props: {
         case 'webSearch':
           return (
             <>
-              <View style={styles.settingsCard}>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  accessibilityLabel="添加搜索服务"
-                  testID="search-service-add"
-                  disabled={workspaceReadOnly}
-                  onPress={() => searchServicesPanelRef.current?.openAdd()}
-                  style={[styles.primaryButton, workspaceReadOnly && styles.buttonDisabled]}
-                >
-                  <Text style={styles.primaryButtonText}>添加搜索服务</Text>
-                </AnimatedPressable>
-              </View>
               <SearchServicesPanel
-                ref={searchServicesPanelRef}
+                ref={props.searchServicesPanelRef}
                 readOnly={workspaceReadOnly}
                 webSearch={workspace.webSearch}
                 externalSearch={workspace.externalSearch}

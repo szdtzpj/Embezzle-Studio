@@ -41,35 +41,24 @@ export const externalSearchProviderHints: Record<ExternalSearchProviderKind, str
   duckduckgo: '本地匿名搜索，无需 API Key',
   tavily: '需 API Key · 面向 AI 的搜索 API',
   brave: '需 API Key · Brave Search API',
-  firecrawl: '云端需 API Key · 无鉴权自建实例可留空',
+  firecrawl: '可选 API Key',
   grok: '需 API Key · xAI web_search / x_search',
 };
 
-/** Kinds/endpoints that can run without a user API key (HTML scrape or open self-host). */
+/** Kinds that can run without a user API key (anonymous scrape or provider quota). */
 export function externalSearchProviderAllowsAnonymous(
   kind: ExternalSearchProviderKind,
-  endpoint?: string
+  _endpoint?: string
 ): boolean {
-  if (kind === 'bing' || kind === 'duckduckgo') return true;
-  if (kind !== 'firecrawl' || !endpoint?.trim()) return false;
-  try {
-    return new URL(endpoint.trim()).hostname.toLowerCase() !== 'api.firecrawl.dev';
-  } catch {
-    return false;
-  }
+  return kind === 'bing' || kind === 'duckduckgo' || kind === 'firecrawl';
 }
 
-/** Kinds/endpoints that refuse to start without an API key. */
+/** Kinds that refuse to start without an API key. */
 export function externalSearchProviderRequiresApiKey(
   kind: ExternalSearchProviderKind,
-  endpoint?: string
+  _endpoint?: string
 ): boolean {
-  return (
-    kind === 'tavily' ||
-    kind === 'brave' ||
-    kind === 'grok' ||
-    (kind === 'firecrawl' && !externalSearchProviderAllowsAnonymous(kind, endpoint))
-  );
+  return kind === 'tavily' || kind === 'brave' || kind === 'grok';
 }
 
 export function isExternalSearchServiceConfigured(service: ExternalSearchService): boolean {
@@ -898,9 +887,6 @@ async function searchFirecrawl(
       return { title, url, text };
     });
     const items = withItemIds(mapped);
-    if (!items.length && !key && endpoint.includes('api.firecrawl.dev')) {
-      return searchError('Firecrawl 云端需要 API Key；自建实例可填自定义 URL 并留空 Key。');
-    }
     return { items };
   } finally {
     clearTimeout(timeout);

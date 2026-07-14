@@ -648,7 +648,7 @@ export const SearchServicesPanel = forwardRef<
                     formRequiresKey
                       ? '粘贴你的 API Key'
                       : formKind === 'firecrawl'
-                        ? '云端需 API Key；无鉴权自建实例填写 URL 后可留空'
+                        ? '可留空使用匿名额度；填写可提升额度'
                         : '可留空'
                   }
                   placeholderTextColor={colors.placeholder}
