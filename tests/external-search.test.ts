@@ -58,16 +58,17 @@ describe('external search settings', () => {
   it('treats free anonymous providers as ready without API key', () => {
     expect(externalSearchProviderAllowsAnonymous('bing')).toBe(true);
     expect(externalSearchProviderAllowsAnonymous('duckduckgo')).toBe(true);
-    expect(externalSearchProviderAllowsAnonymous('firecrawl')).toBe(false);
+    expect(externalSearchProviderAllowsAnonymous('firecrawl')).toBe(true);
     expect(
       externalSearchProviderAllowsAnonymous('firecrawl', 'https://fc.example.com/v2/search')
     ).toBe(true);
-    expect(externalSearchProviderRequiresApiKey('firecrawl')).toBe(true);
+    expect(externalSearchProviderRequiresApiKey('firecrawl')).toBe(false);
     expect(
       externalSearchProviderRequiresApiKey('firecrawl', 'https://fc.example.com/v2/search')
     ).toBe(false);
     expect(externalSearchProviderRequiresApiKey('tavily')).toBe(true);
     expect(isExternalSearchServiceConfigured(service('bing', { apiKey: undefined }))).toBe(true);
+    expect(isExternalSearchServiceConfigured(service('firecrawl', { apiKey: undefined }))).toBe(true);
     expect(isExternalSearchServiceConfigured(service('tavily', { apiKey: undefined }))).toBe(false);
 
     const settings = normalizeExternalSearchSettings({
@@ -436,14 +437,11 @@ describe('provider adapters', () => {
     expect(withKey.items[0]?.title).toBe('FC');
 
     const withoutKey = await runExternalSearch({
-      query: 'self host',
-      service: service('firecrawl', {
-        apiKey: undefined,
-        endpoint: 'https://fc.example.com/v2/search',
-      }),
+      query: 'anonymous quota',
+      service: service('firecrawl', { apiKey: undefined }),
       fetchImpl,
     });
-    expect(calls[1]?.url).toBe('https://fc.example.com/v2/search');
+    expect(calls[1]?.url).toBe('https://api.firecrawl.dev/v2/search');
     expect(
       (calls[1]?.init?.headers as Record<string, string>).Authorization
     ).toBeUndefined();
@@ -455,14 +453,6 @@ describe('provider adapters', () => {
       runExternalSearch({
         query: 'x',
         service: service('tavily', { apiKey: undefined }),
-        fetchImpl: async () => new Response('{}', { status: 200 }),
-      })
-    ).rejects.toThrow(/API Key/);
-
-    await expect(
-      runExternalSearch({
-        query: 'x',
-        service: service('firecrawl', { apiKey: undefined }),
         fetchImpl: async () => new Response('{}', { status: 200 }),
       })
     ).rejects.toThrow(/API Key/);

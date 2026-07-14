@@ -292,6 +292,25 @@ describe('workspace save commit-stage signaling', () => {
 });
 
 describe('workspace storage migrations and recovery', () => {
+  it('adds newly shipped built-in providers to an existing workspace', async () => {
+    const legacyWorkspace = createDefaultWorkspace();
+    legacyWorkspace.providers = legacyWorkspace.providers.filter((provider) => provider.id !== 'deepseek');
+    delete legacyWorkspace.activeModelIdByProvider.deepseek;
+    const persisted = v5Envelope(legacyWorkspace, 31);
+    persisted.schemaVersion = 6;
+    mocks.values.set(WORKSPACE_KEY, JSON.stringify(persisted));
+    const { loadWorkspace } = await subject();
+
+    const loaded = await loadWorkspace();
+
+    expect(loaded?.providers.map((provider) => provider.id)).toContain('deepseek');
+    expect(loaded?.providers.filter((provider) => provider.id === 'deepseek')).toHaveLength(1);
+    expect(loaded?.providers.find((provider) => provider.id === 'deepseek')).toMatchObject({
+      baseUrl: 'https://api.deepseek.com/v1',
+      kind: 'custom',
+    });
+  });
+
   it('loads a v2 envelope from the previous key and writes the next save as v6', async () => {
     const workspace = workspaceWithTitle('v2 migration');
     mocks.values.set(V2_WORKSPACE_KEY, JSON.stringify(v2Envelope(workspace, 4)));
