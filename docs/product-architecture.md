@@ -74,6 +74,49 @@ flowchart TD
     ProviderAdapter --> MCP["Safe OpenAI Responses MCP Runtime"]
 ```
 
+### App composition and Chat deepening status (2026-07-14)
+
+The root `App.tsx` is now an explicit 25-line composition root:
+
+```text
+AppearanceProvider
+  WorkspaceSessionProvider
+    ProjectsConversationsProvider
+      ChatProvider
+        SettingsProductivityProvider
+          MobileApplication
+```
+
+Implemented ownership seams:
+
+- `WorkspaceSession` is the only writable Workspace State owner and controls boot, read-only, deferred/required durability, background/unmount flush, and replacement transactions.
+- Projects/conversation/artifact/knowledge mutations have a closed command runtime and provider. Projects also owns the drawer, bounded search snapshot, conversation menus/dialogs, share behavior, and attachment cleanup.
+- Settings owns its public launcher/pane lifecycle, closed workspace command runtime, private drafts, provider/model behavior, tools, backup/MCP policy, and internal screens. It consumes only narrow public Chat capabilities and imports no Chat implementation file.
+- Chat owns its closed workspace command runtime, single activity lease, request-start ordering, Provider Adapter Registry, audio adapter, and deterministic test adapters. Activity changes are published synchronously to the explicit Projects history-lock port.
+- Chat's internal implementation is split by invariant-bearing change axis rather than by arbitrary line targets:
+  - `ChatRequestExecution` owns provider execution after the durable request-start seam, including stream throttling, External Search/MCP continuation authorization, MCP audit retention, terminal activity freezing, cost projection, usage completion, cancellation cleanup, and lease release.
+  - `ChatUsageLedger` owns cost-plan authorization, post-confirmation replacement revalidation, attempt insertion/pruning, required durability, rollback after failed insertion, and unknown-cost completion semantics.
+  - `ChatRequestDecisionQueue` owns the single pending cost decision and nonce-bound MCP decision, including abort, disposal, and React Strict Mode reactivation behavior.
+  - `useChatVoice` owns recording, transcription, synthesis, player/recorder cleanup, temporary files, background cancellation, and audio usage events through the existing audio adapter seam.
+  - Chat-private presentation modules own message/citation/task presentation, model-picker/parameter controls, attachment preview/export, and message-specific motion. Press/haptic behavior reuses the shared reduced-motion-aware `AnimatedPressable`; only genuinely shared page styles remain in `chatPaneStyles.ts`. Presentation modules do not import workspace commit runtimes.
+  - `useChatTaskRuntime` is the single media-task query implementation used by Chat. Its `ChatTaskLeaseCoordinator` hides keyed replacement, concurrent-query, global-stop, and disposal ordering behind a directly tested interface; cancellation remains internal and the public Settings-facing task interface stays narrow.
+- Application lifecycle is a shared adapter passed directly to Workspace Session and Chat rather than a React context. Appearance owns color-mode persistence outside Workspace State; Mobile owns the explicit Android back coordinator and native gesture/safe-area root.
+- `MobileApplication` composes `ChatPane`, `SettingsPane`, `ProjectDrawer`, and `AppDialogHost`; `App.tsx` contains only the provider graph.
+
+The development refactor is complete at the five public module interfaces and at the new Chat internal seams. No public generic workspace mutation or application command bus remains, and no feature imports another feature's internal implementation. `ChatPane.tsx` fell from 6,435 to 3,791 physical lines as a consequence of moving independent lifecycle and presentation ownership. The shared Chat style implementation fell from 3,053 to 2,086 lines after exclusive message/model-picker/attachment/motion styles moved to their owners. The remaining page file contains page-level navigation/composer coordination, conversation intent preparation, Workbench entry, and the high-level React tree. These line counts are evidence, not pass/fail definitions of depth. The follow-up deliberately rejected a catch-all `useChatPaneModel`, a broad internal context, a mirrored mega-props view, and mechanical one-file-per-style-category splitting.
+
+Post-review automated evidence on 2026-07-14: `npm run check` passed with 64 test files / 904 tests, Web export passed at 3,359 modules / 7.7 MB, Expo Doctor passed 20/20, and `git diff --check` passed. The repair pass now:
+
+- derives Projects Chat cleanup from committed active-context changes instead of leaking drawer/dialog flags through the result interface;
+- invalidates pending attachments only after accepted provider/model/comparison changes, including endpoint/key rebinding and `file-input` removal, while same-target selection preserves the draft;
+- awaits provider selection before navigating and reads live Workspace phase/snapshots at external-effect seams;
+- resets the full composer after backup replacement and transactionally reclaims old app-owned media against the imported snapshot;
+- shares one voice-target resolver between Settings and Chat;
+- uses one production-compatible scripted provider seam, one application-level Settings destination contract, one shared press/haptic primitive, and no single-consumer Composer context;
+- lazy-mounts the Settings model and separates screen drafts from tool drafts.
+
+The earlier core browser smoke covered Chat boot, Settings open/back, Projects drawer, bounded local search, and drawer close with zero console errors; no additional post-repair browser or Android manual acceptance is claimed.
+
 ## Provider Adapter Boundaries
 
 The initial adapter supports common OpenAI-compatible APIs:

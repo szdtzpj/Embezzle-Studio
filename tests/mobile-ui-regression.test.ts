@@ -19,7 +19,7 @@ describe('Android mobile UI regressions', () => {
   it('keeps the Android keyboard in resize mode and actively avoids the IME', async () => {
     const [appConfigSource, appSource] = await Promise.all([
       source('app.json'),
-      source('App.tsx'),
+      source('src/features/chat/ChatPane.tsx'),
     ]);
     const appConfig = JSON.parse(appConfigSource);
 
@@ -32,16 +32,30 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('keeps chat mounted across settings navigation and bounds remote model rendering', async () => {
-    const appSource = await source('App.tsx');
+    const [appSource, motionSource, settingsModelSource, mobileSource, settingsPaneSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
+      source('src/features/chat/internal/presentation/ChatMotion.tsx'),
+      source('src/features/settings/internal/useSettingsScreenModel.ts'),
+      source('src/ui/mobile/MobileApplication.tsx'),
+      source('src/features/settings/SettingsPane.tsx'),
+    ]);
 
-    expect(appSource).toContain('const candidateModelPageSize = 60;');
-    expect(appSource).toContain('filteredModelCandidates.slice(0, candidateModelRenderLimit)');
-    expect(appSource).toContain('{settingsMounted && activeProvider ? (');
-    expect(appSource).toContain('<SettingsScreen');
-    expect(appSource).toContain('style={[styles.screenPane, settingsOpen && styles.screenPaneHidden]}');
+    expect(settingsModelSource).toContain('const candidateModelPageSize = 60;');
+    expect(settingsModelSource).toContain('filteredModelCandidates.slice(0, candidateModelRenderLimit)');
+    expect(mobileSource).toContain('<ChatPane settings={settings} />');
+    expect(mobileSource).toContain('<SettingsPane />');
+    expect(settingsPaneSource).toContain('if (!hasMounted)');
+    expect(settingsPaneSource).toContain("pointerEvents={props.isOpen ? 'auto' : 'none'}");
+    expect(settingsPaneSource.indexOf('if (!hasMounted)')).toBeLessThan(
+      settingsPaneSource.indexOf('useSettingsScreenModel(props.close)')
+    );
+    expect(appSource).toContain('const settingsOpen = settings.isOpen;');
+    expect(await source('src/features/settings/SettingsProductivityProvider.tsx')).toContain(
+      'hasMounted'
+    );
     expect(appSource).toContain('Keyboard.dismiss();');
-    expect(appSource).toMatch(
-      /if \(Platform\.OS === 'android'\) \{\s*return <AndroidPressable \{\.\.\.props\} \/>;/
+    expect(motionSource).toContain(
+      "export { AnimatedPressable, triggerHaptic } from '../../../../ui/components/AnimatedPressable';"
     );
   });
 
@@ -77,10 +91,11 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('routes Android back through the settings stack and resets hidden sensitive state on close', async () => {
-    const [appSource, settingsSource, providerDetailSource] = await Promise.all([
-      source('App.tsx'),
-      source('src/ui/screens/SettingsScreen.tsx'),
+    const [appSource, settingsSource, providerDetailSource, mobileSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
+      source('src/features/settings/internal/SettingsScreen.tsx'),
       source('src/ui/screens/settings/ProviderDetailScreen.tsx'),
+      source('src/ui/mobile/MobileApplication.tsx'),
     ]);
 
     expect(settingsSource).toContain('export interface SettingsScreenHandle');
@@ -90,15 +105,13 @@ describe('Android mobile UI regressions', () => {
     expect(settingsSource).toContain('useImperativeHandle(ref');
     expect(settingsSource).toContain("setStack([{ key: 'main' }]);");
     expect(settingsSource).toContain("openToolsSection: (section: SettingsToolsSection) => {");
+    expect(settingsSource).not.toMatch(/export interface SettingsScreenProps/);
 
-    expect(appSource).toContain('useRef<SettingsScreenHandle>(null)');
-    expect(appSource).toContain('ref={settingsScreenRef}');
-    expect(appSource).toContain('settingsScreenRef.current?.handleBack()');
-    expect(appSource).toContain('settingsScreenRef.current?.resetNavigation()');
-    expect(appSource).toContain("settingsScreenRef.current?.openToolsSection('webSearch')");
-    expect(appSource).toMatch(
-      /if \(settingsOpen\) \{[\s\S]*?settingsScreenRef\.current\?\.handleBack\(\)[\s\S]*?closeSettings\(\);[\s\S]*?return true;/
-    );
+    expect(mobileSource).toContain('useSettingsLauncher');
+    expect(appSource).toContain('settingsBack: settings.back');
+    expect(appSource).toContain('settings.open');
+    expect(mobileSource).toContain('<SettingsPane');
+    expect(appSource).toContain('coordinateMobileBack(');
     expect(providerDetailSource).toMatch(
       /useEffect\(\(\) => \{[\s\S]*?setShowKey\(false\);[\s\S]*?\}, \[provider\.id\]\);/
     );
@@ -106,28 +119,35 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('keeps the model picker above Android system navigation controls', async () => {
-    const appSource = await source('App.tsx');
+    const [appSource, styleSource] = await Promise.all([
+      source('src/features/chat/internal/presentation/ChatModelPicker.tsx'),
+      source('src/features/chat/internal/presentation/ChatModelPickerStyles.ts'),
+    ]);
 
-    expect(appSource).toContain('SafeAreaView, useSafeAreaInsets');
+    expect(appSource).toContain("import { useSafeAreaInsets } from 'react-native-safe-area-context';");
     expect(appSource).toContain('const insets = useSafeAreaInsets();');
     expect(appSource).toContain('style={[styles.modelPickerSheet, { paddingBottom: insets.bottom }]}');
     expect(appSource).toContain('style={styles.modelPickerScroll}');
-    expect(appSource).toMatch(/modelPickerScroll:\s*\{[\s\S]*?flexShrink:\s*1,[\s\S]*?minHeight:\s*0,/);
+    expect(styleSource).toMatch(/modelPickerScroll:\s*\{[\s\S]*?flexShrink:\s*1,[\s\S]*?minHeight:\s*0,/);
   });
 
   it('turns empty model selection and provider discovery into navigable settings flows', async () => {
-    const [appSource, settingsSource, providerDetailSource] = await Promise.all([
-      source('App.tsx'),
-      source('src/ui/screens/SettingsScreen.tsx'),
+    const [appSource, modelPickerSource, settingsSource, providerDetailSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
+      source('src/features/chat/internal/presentation/ChatModelPicker.tsx'),
+      source('src/features/settings/internal/SettingsScreen.tsx'),
       source('src/ui/screens/settings/ProviderDetailScreen.tsx'),
     ]);
 
-    expect(appSource).toContain('testID="model-picker-open-providers"');
-    expect(appSource).toContain('testID="model-picker-open-models"');
-    expect(appSource).toContain("onOpenProviders={() => openSettingsDestination({ key: 'providers' })}");
-    expect(appSource).toContain("onOpenModels={() => openSettingsDestination({ key: 'providerModels' })}");
-    expect(appSource).toContain('pendingSettingsDestination');
-    expect(appSource).toContain('settings.openActiveProviderModels()');
+    expect(modelPickerSource).toContain('testID="model-picker-open-providers"');
+    expect(modelPickerSource).toContain('testID="model-picker-open-models"');
+    expect(appSource).toContain("onOpenProviders={() => openSettingsDestination({ kind: 'providers' })}");
+    expect(appSource).toContain("onOpenModels={() => openSettingsDestination({ kind: 'provider-models' })}");
+    expect(appSource).toContain('settings.open(destination);');
+    expect(appSource).not.toContain('destination.key ===');
+    expect(await source('src/features/settings/SettingsProductivityProvider.tsx')).toContain(
+      'openActiveProviderModels()'
+    );
 
     expect(settingsSource).toContain("| { key: 'providerModels' }");
     expect(settingsSource).toContain('openProviders: () => void;');
@@ -145,20 +165,24 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('keeps model discovery success transient while preserving Ark risk warnings', async () => {
-    const appSource = await source('App.tsx');
-    const refreshSource = appSource.slice(
-      appSource.indexOf('async function refreshModels()'),
-      appSource.indexOf('function resetComposerForConversationChange()')
+    const settingsModelSource = await source(
+      'src/features/settings/internal/useSettingsScreenModel.ts'
+    );
+    const refreshSource = settingsModelSource.slice(
+      settingsModelSource.indexOf('async function refreshModels()'),
+      settingsModelSource.indexOf('async function checkUpdates()')
     );
 
-    expect(refreshSource).toContain("if (result.tone === 'success')");
-    expect(refreshSource).toContain("setNotice('');");
-    expect(refreshSource).toContain('showToast(result.notice);');
-    expect(refreshSource).toMatch(/else \{\s*setNotice\(result\.notice\);\s*\}/);
+    expect(refreshSource).toContain('refreshProviderModels(configuredProvider');
+    expect(refreshSource).toContain('models: result.models');
+    expect(refreshSource).toContain('setNotice(result.notice);');
   });
 
   it('keeps the parameter panel reachable and dismisses the keyboard by dragging', async () => {
-    const appSource = await source('App.tsx');
+    const [appSource, modelPickerSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
+      source('src/features/chat/internal/presentation/ChatModelPicker.tsx'),
+    ]);
     const menuSource = appSource.slice(
       appSource.indexOf('{parameterMenuOpen && canConfigureParameters ? ('),
       appSource.indexOf('<View style={styles.composer}>')
@@ -177,19 +201,20 @@ describe('Android mobile UI regressions', () => {
     // clips content without enabling scroll on native.
     expect(menuSource).toContain('style={[styles.parameterMenuScroll, { maxHeight: parameterMenuMaxHeight }]}');
     expect(menuSource).toContain('showsVerticalScrollIndicator');
-    expect(appSource).toContain('onSubmitEditing={Keyboard.dismiss}');
+    expect(modelPickerSource).toContain('onSubmitEditing={Keyboard.dismiss}');
     expect(appSource).toMatch(/accessibilityLabel="调整生成参数"[\s\S]*?Keyboard\.dismiss\(\);/);
     // Slider pans must not steal vertical scrolls inside the parameter menu.
-    expect(appSource).toContain('onStartShouldSetPanResponder: () => false');
-    expect(appSource).toContain(
+    expect(modelPickerSource).toContain('onStartShouldSetPanResponder: () => false');
+    expect(modelPickerSource).toContain(
       'Math.abs(gestureState.dx) > 4 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy)'
     );
   });
 
   it('exposes a composer search sheet with service rows and dynamic globe icon', async () => {
-    const [appSource, panelSource] = await Promise.all([
-      source('App.tsx'),
+    const [appSource, panelSource, settingsToolsSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
       source('src/ui/components/SearchServicesPanel.tsx'),
+      source('src/features/settings/internal/SettingsToolsSectionView.tsx'),
     ]);
     expect(appSource).toContain('testID="composer-search-globe"');
     expect(appSource).toContain('ComposerSearchSheet');
@@ -231,16 +256,19 @@ describe('Android mobile UI regressions', () => {
     expect(panelSource).toContain('externalSearchProviderAllowsAnonymous');
     expect(panelSource).not.toContain('免费 · 点按选用');
     expect(appSource).not.toContain('testID="composer-search-chip"');
-    expect(appSource).toContain('testID="search-service-add"');
+    expect(settingsToolsSource).toContain('testID="search-service-add"');
+    expect(settingsToolsSource).toContain(
+      'externalSearchProviderRequiresApiKey(input.kind, input.endpoint)'
+    );
     expect(appSource).toContain("variant=\"toolbar\"");
-    expect(appSource).toContain("openToolsSection('webSearch')");
+    expect(appSource).toContain("settings.open({ kind: 'tool', tool: 'webSearch' })");
     expect(appSource).toContain('isExternalSearchServiceConfigured');
-    expect(appSource).toContain('renderToolsHeaderRight');
+    expect(settingsToolsSource).not.toContain('renderHeaderRight:');
   });
 
   it('renders assistant message content as Markdown', async () => {
     const [appSource, mdSource] = await Promise.all([
-      source('App.tsx'),
+      source('src/features/chat/ChatPane.tsx'),
       source('src/ui/components/MessageMarkdown.tsx'),
     ]);
     expect(appSource).toContain('MessageMarkdown');
@@ -252,12 +280,11 @@ describe('Android mobile UI regressions', () => {
     expect(mdSource).toContain('parseMarkdownBlocks');
     expect(mdSource).toContain('resolveMessageMarkdownLink');
     expect(mdSource).toContain('export function MessageMarkdown');
-    expect(mdSource).toContain('resolveMessageMarkdownLink');
   });
 
   it('renders modular thinking and tool activity cards instead of three bouncing dots', async () => {
     const [appSource, activityUiSource, activitySource] = await Promise.all([
-      source('App.tsx'),
+      source('src/features/chat/ChatPane.tsx'),
       source('src/ui/components/MessageActivityModules.tsx'),
       source('src/services/messageActivity.ts'),
     ]);
@@ -330,8 +357,10 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('uses square attachment thumbnails and a native inline video player with save controls', async () => {
-    const [appSource, packageSource, mediaPickerSource] = await Promise.all([
-      source('App.tsx'),
+    const [appSource, attachmentSource, styleSource, packageSource, mediaPickerSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
+      source('src/features/chat/internal/presentation/ChatAttachmentPresentation.tsx'),
+      source('src/features/chat/internal/presentation/ChatAttachmentPresentationStyles.ts'),
       source('package.json'),
       source('src/services/mediaPicker.ts'),
     ]);
@@ -339,20 +368,20 @@ describe('Android mobile UI regressions', () => {
 
     expect(packageJson.dependencies['expo-video']).toMatch(/^~57\./);
     expect(appSource).toContain('<PendingAttachmentPreview');
-    expect(appSource).toMatch(/pendingAttachment:\s*\{[\s\S]*?aspectRatio:\s*1,/);
-    expect(appSource).toContain('<VideoView');
-    expect(appSource).toContain('fullscreenOptions={{ enable: true }}');
+    expect(styleSource).toMatch(/pendingAttachment:\s*\{[\s\S]*?aspectRatio:\s*1,/);
+    expect(attachmentSource).toContain('<VideoView');
+    expect(attachmentSource).toContain('fullscreenOptions={{ enable: true }}');
     expect(appSource).toContain(
       'videoActive={!settingsOpen && activeVideoAttachmentId === attachment.id}'
     );
-    expect(appSource).toContain('saveAttachmentToDevice(attachment)');
+    expect(attachmentSource).toContain('saveAttachmentToDevice(attachment)');
     expect(mediaPickerSource).toContain("base64: Platform.OS === 'web'");
-    expect(appSource).not.toContain("createElement('video'");
-    expect(appSource).not.toContain('>VIDEO</Text>');
+    expect(attachmentSource).not.toContain("createElement('video'");
+    expect(attachmentSource).not.toContain('>VIDEO</Text>');
   });
 
   it('keeps multi-model comparison group-scoped and explicit about provider billing', async () => {
-    const appSource = await source('App.tsx');
+    const appSource = await source('src/features/chat/ChatPane.tsx');
     const comparisonSource = appSource.slice(
       appSource.indexOf('async function sendComparisonMessage'),
       appSource.indexOf('async function sendMessage')
@@ -372,32 +401,31 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('guides unconfigured comparison and offers local project presets without network defaults', async () => {
-    const [appSource, presetSource] = await Promise.all([
-      source('App.tsx'),
+    const [appSource, presetSource, projectsReducer, settingsToolsSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
       source('src/data/workspaceProjectPresets.ts'),
+      source('src/features/projects/internal/projectConversationReducer.ts'),
+      source('src/features/settings/internal/SettingsToolsSectionView.tsx'),
     ]);
     const comparisonHandler = appSource.slice(
       appSource.indexOf('async function handleComposerComparisonPress()'),
       appSource.indexOf('function setWebSearchEnabled(')
     );
-    const projectCreation = appSource.slice(
-      appSource.indexOf('function createProjectFromInput('),
-      appSource.indexOf('function saveActiveProject(')
-    );
 
     expect(comparisonHandler).toContain("title: '先设置对比模型'");
     expect(comparisonHandler).toContain("confirmLabel: '去设置'");
-    expect(comparisonHandler).toContain("openSettingsDestination({ key: 'tools', section: 'comparison' })");
+    expect(comparisonHandler).toContain("openSettingsDestination({ kind: 'tool', tool: 'comparison' })");
     expect(appSource).toContain('onPress={() => { void handleComposerComparisonPress(); }}');
-    expect(appSource).toContain('key={`compare-provider:${provider.id}`}');
-    expect(appSource).toContain('workspace.providers.filter(isProviderEnabled)');
-    expect(appSource).toContain('onPress={() => setComparisonConfigProviderId(provider.id)}');
-    expect(appSource).not.toContain('onPress={() => selectProvider(provider.id)}');
+    expect(settingsToolsSource).toContain('key={`compare-provider:${provider.id}`}');
+    expect(settingsToolsSource).toContain('workspace.providers.filter(isProviderEnabled)');
+    expect(settingsToolsSource).toContain('onPress={() => setComparisonConfigProviderId(provider.id)}');
+    expect(settingsToolsSource).not.toContain('onPress={() => selectProvider(provider.id)}');
 
-    expect(appSource).toContain('workspaceProjectPresets.map((preset) => (');
-    expect(appSource).toContain('预设只写入本机项目指令');
-    expect(projectCreation).toContain('projectInstructionMessage(project, now)');
-    expect(projectCreation).toContain('conversations: sortConversations');
+    expect(settingsToolsSource).toContain('workspaceProjectPresets.map((preset) => (');
+    expect(settingsToolsSource).toContain('预设只写入本机项目指令');
+    expect(settingsToolsSource).toContain("type: 'project.create'");
+    expect(projectsReducer).toContain('projectInstructionMessage(project, now, createId)');
+    expect(projectsReducer).toContain('conversations: sortConversations');
     expect(presetSource).not.toContain('defaultTarget');
     expect(presetSource).not.toContain('apiKey');
     expect(presetSource).not.toContain('baseUrl');
@@ -405,7 +433,7 @@ describe('Android mobile UI regressions', () => {
 
   it('exposes only evidence-backed provider search with visible clickable citations', async () => {
     const [appSource, searchSource] = await Promise.all([
-      source('App.tsx'),
+      source('src/features/chat/internal/presentation/ChatMessagePresentation.tsx'),
       source('src/services/providerWebSearch.ts'),
     ]);
 
@@ -423,7 +451,7 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('ships the local productivity centers without an app-owned service dependency', async () => {
-    const appSource = await source('App.tsx');
+    const appSource = await source('src/features/settings/internal/SettingsToolsSectionView.tsx');
 
     expect(appSource).toContain('testID="prompt-library-settings-card"');
     expect(appSource).toContain('testID="usage-dashboard-card"');
@@ -435,17 +463,22 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('exposes local projects, branching, and bounded global search without a hosted index', async () => {
-    const [appSource, branchSource, searchSource] = await Promise.all([
-      source('App.tsx'),
+    const [appSource, messageSource, projectDrawerSource, branchSource, searchSource, projectsReducer, settingsToolsSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
+      source('src/features/chat/internal/presentation/ChatMessagePresentation.tsx'),
+      source('src/features/projects/ProjectDrawer.tsx'),
       source('src/services/conversationBranches.ts'),
       source('src/services/workspaceSearch.ts'),
+      source('src/features/projects/internal/projectConversationReducer.ts'),
+      source('src/features/settings/internal/SettingsToolsSectionView.tsx'),
     ]);
 
-    expect(appSource).toContain('testID="project-workspace-settings-card"');
-    expect(appSource).toContain('testID="project-switcher"');
-    expect(appSource).toContain('testID="global-search-results"');
-    expect(appSource).toContain('forkConversationAtMessage(');
-    expect(appSource).toContain('创建分支');
+    expect(settingsToolsSource).toContain('testID="project-workspace-settings-card"');
+    expect(projectDrawerSource).toContain('testID="project-switcher"');
+    expect(projectDrawerSource).toContain('testID="global-search-results"');
+    expect(appSource).toContain("type: 'conversation.fork'");
+    expect(messageSource).toContain('创建分支');
+    expect(projectsReducer).toContain('forkConversationAtMessage(');
     expect(branchSource).toContain('originMessageId: message.originMessageId ?? message.id');
     expect(searchSource).toContain('MAX_WORKSPACE_SEARCH_DOCUMENTS = 1_500');
     expect(searchSource).toContain('MAX_WORKSPACE_SEARCH_FIELD_LENGTH = 4_000');
@@ -454,17 +487,16 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('keeps provider setup and cost limits user-funded, local, and confirmed before requests', async () => {
-    const [appSource, providerDetailSource] = await Promise.all([
-      source('App.tsx'),
+    const [appSource, requestSource, settingsModelSource, providerDetailSource, settingsToolsSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
+      source('src/features/chat/internal/requests/ChatRequestExecution.ts'),
+      source('src/features/settings/internal/useSettingsScreenModel.ts'),
       source('src/ui/screens/settings/ProviderDetailScreen.tsx'),
+      source('src/features/settings/internal/SettingsToolsSectionView.tsx'),
     ]);
     const sendSource = appSource.slice(
       appSource.indexOf('async function sendMessage'),
       appSource.indexOf('function toggleSettingsScreen')
-    );
-    const requestSource = appSource.slice(
-      appSource.indexOf('async function runAssistantRequest'),
-      appSource.indexOf('function toggleReasoning')
     );
 
     expect(providerDetailSource).toContain('testID="provider-setup-wizard-card"');
@@ -473,91 +505,88 @@ describe('Android mobile UI regressions', () => {
     const tagSource = await source('src/ui/utils/modelDisplay.ts');
     expect(tagSource).toContain('export function modelCapabilityTags');
     expect(tagSource).toContain("'image-input': '视觉'");
-    expect(appSource).toContain('testID="cost-guard-settings-card"');
-    expect(appSource).toContain('Free / Trial 字样 ≠ 免费额度');
-    expect(appSource).toContain('providerKeyBindingFingerprint !== finalFingerprint');
-    expect(sendSource.indexOf('authorizeProviderRequestPlan')).toBeGreaterThan(-1);
-    expect(sendSource.indexOf('authorizeProviderRequestPlan')).toBeLessThan(
+    expect(settingsToolsSource).toContain('testID="cost-guard-settings-card"');
+    expect(settingsModelSource).toContain('Free / Trial 字样 ≠ 免费额度');
+    expect(settingsModelSource).toContain('providerKeyBindingFingerprint !== finalFingerprint');
+    expect(sendSource.indexOf('usageLedger.authorize')).toBeGreaterThan(-1);
+    expect(sendSource.indexOf('usageLedger.authorize')).toBeLessThan(
       sendSource.indexOf("beginActiveRequest('回答生成', { mcpActive })")
     );
-    expect(sendSource.indexOf('persistProviderUsageEvents')).toBeLessThan(
+    expect(sendSource.indexOf('usageLedger.persist')).toBeLessThan(
       sendSource.indexOf('runAssistantRequest')
     );
-    expect(requestSource).toContain('maxOutputTokens: workspaceRef.current.costGuard.enabled');
+    expect(requestSource).toContain('maxOutputTokens: this.host.readWorkspace().costGuard.enabled');
   });
 
   it('blocks provider changes and media refreshes across every active provider runtime', async () => {
-    const appSource = await source('App.tsx');
+    const [appSource, taskSource, settingsModelSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
+      source('src/features/chat/useChatTaskActions.ts'),
+      source('src/features/settings/internal/useSettingsScreenModel.ts'),
+    ]);
     const idleGateSource = appSource.slice(
       appSource.indexOf('function ensureProviderConfigurationIdle()'),
       appSource.indexOf('function beginActiveRequest('),
     );
-    const toggleProviderSource = appSource.slice(
-      appSource.indexOf('function toggleProviderEnabled('),
-      appSource.indexOf('function selectProvider('),
+    const toggleProviderSource = settingsModelSource.slice(
+      settingsModelSource.indexOf('function toggleProviderEnabled('),
+      settingsModelSource.indexOf('function addCustomProvider('),
     );
-    const refreshTaskSource = appSource.slice(
-      appSource.indexOf('async function refreshGenerationTask('),
-      appSource.indexOf('function refreshTaskCenterItem('),
-    );
+    expect(idleGateSource).toContain('chatOrchestration.current()');
+    expect(idleGateSource).toContain('audioBusy');
+    expect(idleGateSource).toContain('Object.values(queryingTaskByMessageId).some(Boolean)');
+    expect(toggleProviderSource).toContain('if (!ensureWritable() || !ensureConfigurationIdle())');
 
-    expect(idleGateSource).toContain('activeRequestRef.current');
-    expect(idleGateSource).toContain('activeAudioOperationRef.current');
-    expect(idleGateSource).toContain('generationTaskControllersRef.current.size > 0');
-    expect(toggleProviderSource).toContain(
-      'if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle())'
+    const providerLookupIndex = taskSource.indexOf(
+      'session.getSnapshot().providers.find((item) => item.id === task.providerId)'
     );
-
-    const providerLookupIndex = refreshTaskSource.indexOf(
-      'workspaceRef.current.providers.find((item) => item.id === task.providerId)'
-    );
-    const disabledGateIndex = refreshTaskSource.indexOf('if (!isProviderEnabled(provider))');
-    const requestIndex = refreshTaskSource.indexOf('queryGenerationTask(provider, task, controller.signal)');
+    const disabledGateIndex = taskSource.indexOf('if (!provider || provider.enabled === false)');
+    const requestIndex = taskSource.indexOf('adapter.queryTask({');
     expect(providerLookupIndex).toBeGreaterThan(-1);
     expect(disabledGateIndex).toBeGreaterThan(providerLookupIndex);
     expect(requestIndex).toBeGreaterThan(disabledGateIndex);
   });
 
   it('keeps v1.2 cross-feature state coherent under streaming, rebinding, and navigation', async () => {
-    const [appSource, branchSource] = await Promise.all([
-      source('App.tsx'),
+    const [appSource, ledgerSource, projectDrawerSource, settingsModelSource, branchSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
+      source('src/features/chat/internal/requests/ChatUsageLedger.ts'),
+      source('src/features/projects/ProjectDrawer.tsx'),
+      source('src/features/settings/internal/useSettingsScreenModel.ts'),
       source('src/services/conversationBranches.ts'),
     ]);
-    const ledgerSource = appSource.slice(
-      appSource.indexOf('async function persistProviderUsageEvents'),
-      appSource.indexOf('function requestUsageKind')
-    );
 
-    expect(appSource).toContain('const setWorkspace = useCallback');
-    expect(appSource.indexOf('workspaceRef.current = next;')).toBeLessThan(
-      appSource.indexOf('setWorkspaceState(next);')
-    );
-    expect(appSource).toContain('providerKeyBindingFingerprint !== finalFingerprint');
+    // Workspace Session owns the writable snapshot; Chat uses closed commands
+    // through a private runtime that is absent from the public feature barrel.
+    expect(appSource).toContain('new ChatWorkspaceRuntime(workspaceSession)');
+    expect(appSource).toContain('commitWorkspaceCommand');
+    expect(appSource).not.toContain('commitWorkspaceProjection');
+    expect(appSource).toContain('useWorkspaceSelector');
+    expect(appSource).not.toContain('setWorkspaceState');
+    expect(settingsModelSource).toContain('providerKeyBindingFingerprint !== finalFingerprint');
     expect(appSource).toContain("delete pendingMessage.originMessageId");
     expect(branchSource).toContain("source.messages[branchPointIndex].status === 'pending'");
     expect(appSource).toContain('userAlreadySelected');
-    expect(appSource).toContain('InteractionManager.runAfterInteractions');
-    expect(appSource).toContain('searchWorkspaceIndex(globalSearchIndex');
+    expect(projectDrawerSource).toContain('InteractionManager.runAfterInteractions');
+    expect(projectDrawerSource).toContain('searchWorkspaceIndex(searchIndex');
     expect(appSource).toContain('scrollToSearchMessage');
     expect(appSource).toContain('highlightedSearchMessageId === message.id');
     expect(appSource).toContain("Platform.OS === 'android' ? 120 : 60");
     expect(ledgerSource).toContain('insertedEventIds');
-    expect(ledgerSource).toContain('providerUsageEvents: workspaceRef.current.providerUsageEvents.filter');
+    expect(ledgerSource).toContain('.providerUsageEvents.filter((event) => !insertedEventIds.has(event.id))');
   });
 
-  it('revalidates project defaults and audio model tasks at the point of use', async () => {
-    const appSource = await source('App.tsx');
-
-    expect(appSource).toContain('syncProjectInstructionSnapshot');
-    expect(appSource).toContain('resolveProjectDefaultTarget(project, workspace.providers)');
-    expect(appSource).toContain("? 'audio-transcription'");
-    expect(appSource).toContain(": 'speech-generation';");
-    expect(appSource).toContain('inferModelTask(model) !== expectedTask');
-    expect(appSource).toContain('跨项目的资料选择、分支关联和来源追踪已安全清理');
+  it('revalidates project defaults at the point of use', async () => {
+    const projectsReducer = await source(
+      'src/features/projects/internal/projectConversationReducer.ts'
+    );
+    expect(projectsReducer).toContain('syncProjectInstructionSnapshot');
+    expect(projectsReducer).toContain('resolveProjectDefaultTarget(project, workspace.providers)');
+    expect(projectsReducer).toContain('跨项目的资料选择、分支关联和来源追踪已安全清理');
   });
 
   it('removes only the selected system instruction and preserves later conversation history', async () => {
-    const appSource = await source('App.tsx');
+    const appSource = await source('src/features/chat/ChatPane.tsx');
     const handlerSource = appSource.slice(
       appSource.indexOf('async function removeSystemInstruction'),
       appSource.indexOf('async function removeMessage')
@@ -568,11 +597,8 @@ describe('Android mobile UI regressions', () => {
     );
 
     expect(handlerSource).toContain("message.role !== 'system'");
-    expect(handlerSource).toContain(
-      'messages.filter((candidate) => candidate.id !== message.id)'
-    );
-    expect(handlerSource).toContain('messages: removeFrom(current.messages)');
-    expect(handlerSource).toContain('messages: removeFrom(conversation.messages)');
+    expect(handlerSource).toContain("type: 'message.remove-everywhere'");
+    expect(handlerSource).toContain('messageId: message.id');
     expect(handlerSource).not.toContain('.slice(0,');
     expect(handlerSource).not.toContain('deletePersistedAttachments');
     expect(systemCardSource).toContain(
@@ -582,18 +608,21 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('keeps assistant editing unavailable in both direct and overflow message actions', async () => {
-    const appSource = await source('App.tsx');
+    const [appSource, messageSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
+      source('src/features/chat/internal/presentation/ChatMessagePresentation.tsx'),
+    ]);
     const editHandlerSource = appSource.slice(
       appSource.indexOf('function beginEditUserMessage'),
       appSource.indexOf('function cancelEditUserMessage')
     );
-    const directActionsSource = appSource.slice(
-      appSource.indexOf('function MessageActions('),
-      appSource.indexOf('function MessageInlineEditor(')
+    const directActionsSource = messageSource.slice(
+      messageSource.indexOf('function MessageActions('),
+      messageSource.indexOf('function MessageInlineEditor(')
     );
-    const overflowActionsSource = appSource.slice(
-      appSource.indexOf('function MessageActionMenu('),
-      appSource.indexOf('function WebCitationList(')
+    const overflowActionsSource = messageSource.slice(
+      messageSource.indexOf('function MessageActionMenu('),
+      messageSource.indexOf('function WebCitationList(')
     );
 
     expect(editHandlerSource).toContain("if (message.role !== 'user')");
@@ -607,54 +636,45 @@ describe('Android mobile UI regressions', () => {
   it('clears removed model references from comparison, voice, and reasoning prefs', async () => {
     // Settings redesign no longer exposes in-place model task/capability overrides.
     // Reference cleanup still happens when a model is removed from a provider.
-    const appSource = await source('App.tsx');
-    const removeModelSource = appSource.slice(
-      appSource.indexOf('function removeModel('),
-      appSource.indexOf('async function refreshModels(')
+    const settingsModelSource = await source(
+      'src/features/settings/internal/useSettingsScreenModel.ts'
+    );
+    const removeModelSource = settingsModelSource.slice(
+      settingsModelSource.indexOf('function removeModel('),
+      settingsModelSource.indexOf('function updateActiveModel(')
     );
 
-    expect(removeModelSource).toContain(
-      'const comparisonTargets = current.comparisonTargets.filter('
-    );
-    expect(removeModelSource).toContain('delete voice.transcriptionTarget');
-    expect(removeModelSource).toContain('delete voice.speechTarget');
-    expect(removeModelSource).toContain(
-      'delete reasoningEffortByModel[`${activeProvider.id}:${modelId}`]'
-    );
-    expect(removeModelSource).toContain(
-      'comparisonEnabled: current.comparisonEnabled && comparisonTargets.length >= 2'
-    );
-    // Removing a model may clear a project default that pointed at it.
-    expect(removeModelSource).toContain('defaultTarget');
-    expect(removeModelSource).toContain('projects:');
+    expect(removeModelSource).toContain("type: 'model.remove'");
+    expect(removeModelSource).toContain('providerId: activeProvider.id');
+    expect(removeModelSource).toContain('modelId');
   });
 
   it('keeps manual model task and capability overrides available after the settings redesign', async () => {
-    const [appSource, settingsSource, providerDetailSource] = await Promise.all([
-      source('App.tsx'),
-      source('src/ui/screens/SettingsScreen.tsx'),
+    const [settingsModelSource, settingsSource, providerDetailSource] = await Promise.all([
+      source('src/features/settings/internal/useSettingsScreenModel.ts'),
+      source('src/features/settings/internal/SettingsScreen.tsx'),
       source('src/ui/screens/settings/ProviderDetailScreen.tsx'),
     ]);
 
-    expect(appSource).toContain('function setActiveModelTask(');
-    expect(appSource).toContain('function toggleActiveModelCapability(');
+    expect(settingsModelSource).toContain('function setActiveModelTask(');
+    expect(settingsModelSource).toContain('function toggleActiveModelCapability(');
     expect(providerDetailSource).toContain('testID="active-model-overrides-card"');
     expect(providerDetailSource).toContain('>模型用途</Text>');
     expect(providerDetailSource).toContain('能力覆盖');
     expect(providerDetailSource).toContain('自动识别不准确时可手动覆盖');
-    expect(settingsSource).toContain('onSetActiveModelTask={props.onSetActiveModelTask}');
+    expect(settingsSource).toContain('onSetActiveModelTask={props.models.setActiveTask}');
     expect(settingsSource).toContain(
-      'onToggleActiveModelCapability={props.onToggleActiveModelCapability}'
+      'onToggleActiveModelCapability={props.models.toggleActiveCapability}'
     );
-    expect(appSource).toContain('onSetActiveModelTask={setActiveModelTask}');
-    expect(appSource).toContain(
-      'onToggleActiveModelCapability={toggleActiveModelCapability}'
+    expect(settingsModelSource).toContain('setActiveTask: setActiveModelTask');
+    expect(settingsModelSource).toContain(
+      'toggleActiveCapability: toggleActiveModelCapability'
     );
   });
 
   it('keeps request-based voice Android-only and disables background audio services', async () => {
     const [appSource, appConfigSource, audioSource] = await Promise.all([
-      source('App.tsx'),
+      source('src/features/chat/internal/voice/useChatVoice.ts'),
       source('app.json'),
       source('src/services/providerAudio.ts'),
     ]);
@@ -676,7 +696,7 @@ describe('Android mobile UI regressions', () => {
     ]);
     expect(appSource).toContain('语音已转写到输入框，尚未自动发送');
     expect(appSource).toContain('正在播放 AI 合成语音');
-    expect(appSource).toContain('activeAudioOperationRef.current = operation');
+    expect(appSource).toContain('activeOperationRef.current = active');
     expect(appSource).toContain('应用进入后台，录音已停止并丢弃，未发送给任何服务商');
     expect(audioSource).toContain("if (platform !== 'android')");
     expect(audioSource).toContain('An API key supplied by the user is required');

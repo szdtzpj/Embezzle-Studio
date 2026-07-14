@@ -32,7 +32,7 @@ interface WorkspaceWorkbenchProps {
   onDeleteArtifact: (artifactId: string) => void;
   onExportArtifact: (artifactId: string) => void;
   onSaveArtifactAsKnowledge: (artifactId: string) => void;
-  onCreateKnowledge: (title: string, content: string) => boolean;
+  onCreateKnowledge: (title: string, content: string) => boolean | Promise<boolean>;
   onSaveKnowledge: (sourceId: string, title: string, content: string) => void;
   onDeleteKnowledge: (sourceId: string) => void;
   onImportTextKnowledge: () => void;
@@ -507,7 +507,7 @@ export function WorkspaceWorkbench({
                 accessibilityRole="button"
                 disabled={readOnly || !newKnowledgeTitle.trim() || !newKnowledgeContent.trim()}
                 onPress={() => {
-                  createKnowledgeAndClearDraft(
+                  void createKnowledgeAndClearDraft(
                     onCreateKnowledge,
                     newKnowledgeTitle,
                     newKnowledgeContent,

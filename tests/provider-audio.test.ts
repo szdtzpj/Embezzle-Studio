@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { ProviderProfile } from '../src/domain/types';
+import type { AppWorkspace, ModelInfo, ProviderProfile } from '../src/domain/types';
 import {
   BAILIAN_AUDIO_MAX_BYTES,
   OPENAI_AUDIO_MAX_BYTES,
@@ -13,6 +13,7 @@ import {
   getProviderAudioReadiness,
   parseAudioTranscriptionResponse,
   parseSpeechSynthesisResponse,
+  resolveConfiguredProviderAudioTarget,
   resolveProviderAudioProtocol,
   synthesizeSpeech,
   transcribeAudio,
@@ -48,6 +49,37 @@ const bailian = provider(
   'bailian-compatible',
   'https://dashscope.aliyuncs.com/compatible-mode/v1'
 );
+
+const transcriptionModel: ModelInfo = {
+  id: 'whisper-1',
+  capabilities: ['speech-to-text'],
+  task: 'audio-transcription',
+  source: 'manual',
+};
+
+const speechModel: ModelInfo = {
+  id: 'gpt-4o-mini-tts',
+  capabilities: ['text-to-speech'],
+  task: 'speech-generation',
+  source: 'manual',
+};
+
+function voiceWorkspace(
+  kind: 'transcription' | 'speech',
+  audioProvider: ProviderProfile,
+  model: ModelInfo
+): Pick<AppWorkspace, 'providers' | 'voice'> {
+  return {
+    providers: [{ ...audioProvider, models: [model] }],
+    voice: {
+      ...(kind === 'transcription'
+        ? { transcriptionTarget: { providerId: audioProvider.id, modelId: model.id } }
+        : { speechTarget: { providerId: audioProvider.id, modelId: model.id } }),
+      speechVoice: 'alloy',
+      speechFormat: 'mp3',
+    },
+  };
+}
 
 function audioFile(overrides: Partial<PreparedProviderAudioFile> = {}): PreparedProviderAudioFile {
   return {
@@ -113,6 +145,64 @@ describe('provider audio readiness and official routing', () => {
       ready: false,
       reason: 'missing-api-key',
     });
+  });
+
+  it('resolves configured voice targets only when provider, model, and protocol are executable', () => {
+    const workspace = voiceWorkspace('transcription', openAi, transcriptionModel);
+    expect(
+      resolveConfiguredProviderAudioTarget(workspace, 'transcription', 'android')
+    ).toMatchObject({
+      provider: { id: openAi.id },
+      model: { id: transcriptionModel.id },
+      modelId: transcriptionModel.id,
+    });
+
+    expect(
+      resolveConfiguredProviderAudioTarget(
+        voiceWorkspace('transcription', { ...openAi, enabled: false }, transcriptionModel),
+        'transcription',
+        'android'
+      )
+    ).toBeNull();
+    expect(
+      resolveConfiguredProviderAudioTarget(
+        voiceWorkspace('transcription', openAi, {
+          ...transcriptionModel,
+          task: 'chat',
+        }),
+        'transcription',
+        'android'
+      )
+    ).toBeNull();
+    expect(
+      resolveConfiguredProviderAudioTarget(
+        voiceWorkspace('transcription', openAi, {
+          ...transcriptionModel,
+          capabilities: ['text'],
+        }),
+        'transcription',
+        'android'
+      )
+    ).toBeNull();
+    expect(
+      resolveConfiguredProviderAudioTarget(workspace, 'transcription', 'web')
+    ).toBeNull();
+  });
+
+  it('uses the same resolver for configured speech targets', () => {
+    const workspace = voiceWorkspace('speech', openAi, speechModel);
+    expect(resolveConfiguredProviderAudioTarget(workspace, 'speech', 'android')).toMatchObject({
+      provider: { id: openAi.id },
+      model: { id: speechModel.id },
+      modelId: speechModel.id,
+    });
+    expect(
+      resolveConfiguredProviderAudioTarget(
+        voiceWorkspace('speech', { ...openAi, apiKey: ' ' }, speechModel),
+        'speech',
+        'android'
+      )
+    ).toBeNull();
   });
 
   it('derives only the documented official endpoints from an allowed origin', () => {
