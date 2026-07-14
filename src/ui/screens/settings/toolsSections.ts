@@ -1,14 +1,6 @@
-export type SettingsToolsSection =
-  | 'workspace'
-  | 'comparison'
-  | 'webSearch'
-  | 'prompts'
-  | 'costGuard'
-  | 'usage'
-  | 'media'
-  | 'backup'
-  | 'voice'
-  | 'mcp';
+import type { SettingsToolsSection } from '../../../app/navigation/settingsNavigation';
+
+export type { SettingsToolsSection } from '../../../app/navigation/settingsNavigation';
 
 export const settingsToolsSectionTitles: Record<SettingsToolsSection, string> = {
   workspace: '项目工作台',

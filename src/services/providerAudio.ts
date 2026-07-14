@@ -1,6 +1,13 @@
 import { Platform } from 'react-native';
 
-import type { ChatTokenUsage, ProviderProfile } from '../domain/types';
+import type {
+  AppWorkspace,
+  ChatTokenUsage,
+  ModelInfo,
+  ProviderProfile,
+} from '../domain/types';
+import { inferModelTask } from './modelCapabilities';
+import { isProviderEnabled } from './workspaceRuntime';
 
 export type ProviderAudioProtocol = 'openai-official' | 'bailian-compatible';
 
@@ -17,6 +24,14 @@ export interface ProviderAudioReadiness {
     | 'unsupported-provider'
     | 'invalid-base-url';
   message?: string;
+}
+
+export type ProviderAudioTargetKind = 'transcription' | 'speech';
+
+export interface ResolvedProviderAudioTarget {
+  provider: ProviderProfile;
+  model: ModelInfo;
+  modelId: string;
 }
 
 export interface ProviderAudioEndpoints {
@@ -332,6 +347,43 @@ export function getProviderAudioReadiness(
     canSynthesize: true,
     protocol,
   };
+}
+
+/**
+ * Resolve a configured voice target only when Chat can execute it now.
+ * Settings and Chat share this rule so validity labels and runtime controls
+ * cannot drift on provider state, model semantics, platform, or protocol.
+ */
+export function resolveConfiguredProviderAudioTarget(
+  workspace: Pick<AppWorkspace, 'providers' | 'voice'>,
+  kind: ProviderAudioTargetKind,
+  platform: string = Platform.OS
+): ResolvedProviderAudioTarget | null {
+  const target =
+    kind === 'transcription'
+      ? workspace.voice.transcriptionTarget
+      : workspace.voice.speechTarget;
+  if (!target) return null;
+
+  const provider = workspace.providers.find((item) => item.id === target.providerId);
+  const model = provider?.models.find((item) => item.id === target.modelId);
+  const expectedTask =
+    kind === 'transcription' ? 'audio-transcription' : 'speech-generation';
+  const capability = kind === 'transcription' ? 'speech-to-text' : 'text-to-speech';
+  if (
+    !isProviderEnabled(provider) ||
+    !model ||
+    inferModelTask(model) !== expectedTask ||
+    !model.capabilities.includes(capability)
+  ) {
+    return null;
+  }
+
+  const readiness = getProviderAudioReadiness(provider, platform);
+  if (kind === 'transcription' ? !readiness.canTranscribe : !readiness.canSynthesize) {
+    return null;
+  }
+  return { provider, model, modelId: model.id };
 }
 
 function assertProviderAudioReady(

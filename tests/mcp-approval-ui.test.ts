@@ -3,6 +3,12 @@ import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
+import { createDefaultWorkspace } from '../src/data/providerCatalog';
+import {
+  createRemoteMcpPlugin,
+  prepareRemoteMcpEnable,
+} from '../src/features/settings/internal/settingsMcpPolicy';
+
 async function source(filePath: string): Promise<string> {
   return readFile(path.resolve(filePath), 'utf8');
 }
@@ -17,52 +23,101 @@ function sliceBetween(value: string, start: string, end: string): string {
 
 describe('MCP approval UI safety regressions', () => {
   it('requires a nonempty exact allowed-tools list and rejects wildcard expectations', async () => {
-    const appSource = await source('App.tsx');
+    const settingsViewSource = await source(
+      'src/features/settings/internal/SettingsToolsSectionView.tsx'
+    );
     const settingsSource = sliceBetween(
-      appSource,
+      settingsViewSource,
       '<View style={styles.settingsCard} testID="mcp-tool-center-card">',
       '{notice ? <Text style={styles.settingsNotice}>{notice}</Text> : null}'
-    );
-    const addServerSource = sliceBetween(
-      appSource,
-      'function addRemoteMcpServer()',
-      'async function toggleRemoteMcpServer'
     );
 
     expect(settingsSource).toContain('<Text style={styles.fieldLabel}>允许的精确工具名</Text>');
     expect(settingsSource).toContain('testID="mcp-allowed-tools-input"');
     expect(settingsSource).toContain('value={mcpAllowedTools}');
     expect(settingsSource).toContain('必须至少填写一个工具名；不支持 *、自动导入全部工具或模糊匹配。');
-    expect(addServerSource).toContain('const allowedTools = normalizeMcpAllowedTools(');
-    expect(addServerSource).toContain('if (!allowedTools.length)');
-    expect(addServerSource).toContain('请填写至少一个精确工具名；使用逗号或换行分隔，不支持通配符。');
-    expect(addServerSource.indexOf('if (!allowedTools.length)')).toBeLessThan(
-      addServerSource.indexOf('setWorkspace((current) =>')
-    );
+    const provider = createDefaultWorkspace().providers[0];
+    expect(
+      createRemoteMcpPlugin(
+        { name: 'Remote', endpoint: 'https://mcp.example.com', description: '', allowedTools: '*', authorization: '' },
+        provider,
+        'mcp-1'
+      )
+    ).toMatchObject({ ok: false, notice: expect.stringContaining('不支持通配符') });
+    expect(
+      createRemoteMcpPlugin(
+        { name: 'Remote', endpoint: 'https://mcp.example.com', description: '', allowedTools: 'read_file, write_file', authorization: '' },
+        provider,
+        'mcp-2'
+      )
+    ).toMatchObject({ ok: true, value: { allowedTools: ['read_file', 'write_file'], enabled: false } });
   });
 
-  it('discloses billing, Authorization transmission, per-call approval, and irreversible side effects before enabling', async () => {
-    const appSource = await source('App.tsx');
+  it('discloses billing, Authorization transmission, per-call approval, and irreversible side effects before enabling', () => {
+    const workspace = createDefaultWorkspace();
+    const provider = {
+      ...workspace.providers[0],
+      kind: 'openai-compatible' as const,
+      baseUrl: 'https://api.openai.com/v1',
+      enabled: true,
+    };
+    const created = createRemoteMcpPlugin(
+      {
+        name: 'Remote',
+        endpoint: 'https://mcp.example.com',
+        description: '',
+        allowedTools: 'read_file',
+        authorization: 'Bearer secret',
+      },
+      provider,
+      'mcp-1'
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const prepared = prepareRemoteMcpEnable(
+      {
+        ...workspace,
+        providers: [provider],
+        activeProviderId: provider.id,
+        plugins: [created.value],
+      },
+      created.value.id
+    );
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    expect(prepared.value.title).toBe('授权并启用这个 MCP 服务？');
+    expect(prepared.value.description).toContain('MCP Authorization 会随每次请求发送给你选择的 OpenAI 账号');
+    expect(prepared.value.description).toContain('OpenAI 和远程 MCP 服务都会接触获批的工具参数，并可能分别计费');
+    expect(prepared.value.description).toContain('每次真实工具调用仍会展示完整参数并单独询问，不会记住批准');
+    expect(prepared.value.description).toContain('工具可能修改外部数据，批准后的副作用无法由本应用撤销');
+  });
+
+  it('revalidates MCP policy and activity after the asynchronous confirmation', async () => {
+    const settingsSource = await source(
+      'src/features/settings/internal/SettingsToolsSectionView.tsx'
+    );
     const toggleSource = sliceBetween(
-      appSource,
+      settingsSource,
       'async function toggleRemoteMcpServer',
       'function removeRemoteMcpServer'
     );
-
-    expect(toggleSource).toContain("'授权并启用这个 MCP 服务？'");
-    expect(toggleSource).toContain('MCP Authorization 会随每次请求发送给你选择的 OpenAI 账号');
-    expect(toggleSource).toContain('OpenAI 和远程 MCP 服务都会接触获批的工具参数，并可能分别计费');
-    expect(toggleSource).toContain('每次真实工具调用仍会展示完整参数并单独询问，不会记住批准');
-    expect(toggleSource).toContain('工具可能修改外部数据，批准后的副作用无法由本应用撤销');
-    expect(toggleSource.indexOf('const confirmed = await confirmDestructiveAction(')).toBeLessThan(
-      toggleSource.indexOf('setWorkspace((current) =>')
+    const confirmationIndex = toggleSource.indexOf('const confirmed = await requestConfirm({');
+    const activityIndex = toggleSource.indexOf('chatActivityRef.current.configurationLocked');
+    const revalidationIndex = toggleSource.indexOf(
+      'prepareRemoteMcpEnable(session.getSnapshot(), pluginId)'
     );
+    const commitIndex = toggleSource.indexOf("type: 'plugin.set-enabled'");
+
+    expect(confirmationIndex).toBeGreaterThanOrEqual(0);
+    expect(activityIndex).toBeGreaterThan(confirmationIndex);
+    expect(revalidationIndex).toBeGreaterThan(activityIndex);
+    expect(commitIndex).toBeGreaterThan(revalidationIndex);
   });
 
   it('shows complete approval context, raw payload size, three actions, and Android safe-area protection', async () => {
-    const [modalSource, appSource] = await Promise.all([
+    const [modalSource, decisionSource] = await Promise.all([
       source('src/components/McpApprovalModal.tsx'),
-      source('App.tsx'),
+      source('src/features/chat/internal/decisions/useChatRequestDecisions.ts'),
     ]);
 
     expect(modalSource).toContain("import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';");
@@ -86,7 +141,7 @@ describe('MCP approval UI safety regressions', () => {
     expect(modalSource).toContain('argumentBytes: number;');
     expect(modalSource).toContain('formatByteLength(request.argumentBytes)');
     expect(modalSource).toContain("const exact = `${bytes.toLocaleString('en-US')} B`;");
-    expect(appSource).toContain('argumentBytes: request.argumentBytes');
+    expect(decisionSource).toContain('argumentBytes: request.argumentBytes');
     expect(modalSource).toContain('以下为服务商拟发送给 MCP 服务的完整原始参数；内容仅作为文本显示。');
     expect(modalSource).toContain("{request.argumentsText || '{}'}");
 
@@ -101,42 +156,39 @@ describe('MCP approval UI safety regressions', () => {
   });
 
   it('settles an open approval as cancel on Abort and component unmount', async () => {
-    const appSource = await source('App.tsx');
-    const requestSource = sliceBetween(
-      appSource,
-      'function requestMcpApproval(',
-      'async function authorizeProviderRequestPlan'
-    );
-    const unmountSource = sliceBetween(
-      appSource,
-      'useEffect(() => {\n    const taskControllers = generationTaskControllersRef.current;',
-      'useEffect(() => {\n    let mounted = true;'
-    );
+    const [decisionSource, appSource] = await Promise.all([
+      source('src/features/chat/internal/decisions/useChatRequestDecisions.ts'),
+      source('src/features/chat/ChatPane.tsx'),
+    ]);
 
-    expect(requestSource).toContain("const onAbort = () => settle('cancel');");
-    expect(requestSource).toContain("signal?.addEventListener('abort', onAbort, { once: true });");
-    expect(requestSource).toContain("signal?.removeEventListener('abort', onAbort);");
-    expect(requestSource).toContain("return Promise.resolve('cancel');");
-    expect(requestSource).toContain('let settled = false;');
-    expect(unmountSource).toContain('mountedRef.current = false;');
-    expect(unmountSource).toContain('activeRequestRef.current?.controller.abort();');
-    expect(unmountSource).toContain("mcpApprovalResolverRef.current?.settle('cancel');");
-    expect(unmountSource).toContain('mcpApprovalResolverRef.current = null;');
-    expect(appSource).toContain('if (activeRequestRef.current?.mcpActive)');
+    expect(decisionSource).toContain("const onAbort = () => settle('cancel');");
+    expect(decisionSource).toContain("signal?.addEventListener('abort', onAbort, { once: true });");
+    expect(decisionSource).toContain("signal?.removeEventListener('abort', onAbort);");
+    expect(decisionSource).toContain("return Promise.resolve('cancel');");
+    expect(decisionSource).toContain('let settled = false;');
+    expect(decisionSource).toContain('queue.activate();');
+    expect(decisionSource).toContain('return () => queue.dispose();');
+    expect(decisionSource).toContain("this.pendingMcp?.settle('cancel');");
+    expect(appSource).toContain('chatOrchestration.stop();');
+    expect(appSource).toContain('cancelRequestDecisions();');
+    expect(appSource).toContain('if (chatOrchestration.current()?.mcpActive)');
     expect(appSource).toContain("应用进入后台，本次 MCP 审批与回答已取消；不会自动重放批准。");
   });
 
   it('stores only bounded activity metadata and marks post-approval interruption as uncertain', async () => {
-    const appSource = await source('App.tsx');
+    const [messageSource, executionSource] = await Promise.all([
+      source('src/features/chat/internal/presentation/ChatMessagePresentation.tsx'),
+      source('src/features/chat/internal/requests/ChatRequestExecution.ts'),
+    ]);
     const activityPanelSource = sliceBetween(
-      appSource,
+      messageSource,
       'function McpActivityPanel',
       'function TokenUsageLine'
     );
     const assistantRequestSource = sliceBetween(
-      appSource,
-      'async function runAssistantRequest({',
-      'async function copyMessage'
+      executionSource,
+      'async execute({',
+      'private providerRequestOperation('
     );
 
     expect(activityPanelSource).toContain('MCP 工具记录');
@@ -149,7 +201,7 @@ describe('MCP approval UI safety regressions', () => {
   });
 
   it('keeps Web Search and comparison mutually exclusive with MCP in both toggle directions', async () => {
-    const appSource = await source('App.tsx');
+    const appSource = await source('src/features/chat/ChatPane.tsx');
     const comparisonToggleSource = sliceBetween(
       appSource,
       'function setComparisonEnabled',
@@ -158,12 +210,7 @@ describe('MCP approval UI safety regressions', () => {
     const searchToggleSource = sliceBetween(
       appSource,
       'function applyComposerSearchMode',
-      'function upsertExternalSearchService'
-    );
-    const mcpToggleSource = sliceBetween(
-      appSource,
-      'async function toggleRemoteMcpServer',
-      'function removeRemoteMcpServer'
+      'const composerSearchSummary'
     );
     const comparisonSendSource = sliceBetween(
       appSource,
@@ -177,32 +224,51 @@ describe('MCP approval UI safety regressions', () => {
     expect(searchToggleSource).toContain('hasBlockingMcpForSearch');
     expect(searchToggleSource).toContain('请先关闭当前服务商的 MCP');
 
-    expect(mcpToggleSource).toContain('anySearchEnabled(workspace)');
-    expect(mcpToggleSource).toContain('请先关闭联网搜索（服务商或外部）');
-    expect(mcpToggleSource).toContain('workspace.comparisonEnabled');
-    expect(mcpToggleSource).toContain('请先关闭多模型对比');
-    expect(mcpToggleSource.indexOf('anySearchEnabled(workspace)')).toBeLessThan(
-      mcpToggleSource.indexOf('const confirmed = await confirmDestructiveAction(')
+    const workspace = createDefaultWorkspace();
+    const provider = {
+      ...workspace.providers[0],
+      kind: 'openai-compatible' as const,
+      baseUrl: 'https://api.openai.com/v1',
+      enabled: true,
+    };
+    const created = createRemoteMcpPlugin(
+      { name: 'Remote', endpoint: 'https://mcp.example.com', description: '', allowedTools: 'read_file', authorization: '' },
+      provider,
+      'mcp-1'
     );
-    expect(mcpToggleSource.indexOf('workspace.comparisonEnabled')).toBeLessThan(
-      mcpToggleSource.indexOf('const confirmed = await confirmDestructiveAction(')
-    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const base = {
+      ...workspace,
+      providers: [provider],
+      activeProviderId: provider.id,
+      plugins: [created.value],
+    };
+    expect(prepareRemoteMcpEnable({ ...base, webSearch: { ...base.webSearch, enabled: true } }, 'mcp-1'))
+      .toMatchObject({ ok: false, notice: expect.stringContaining('关闭联网搜索') });
+    expect(prepareRemoteMcpEnable({
+      ...base,
+      comparisonEnabled: true,
+      comparisonTargets: [{ providerId: provider.id, modelId: 'model-a' }],
+    }, 'mcp-1')).toMatchObject({ ok: false, notice: expect.stringContaining('关闭多模型对比') });
     expect(comparisonSendSource).toContain('对比请求未发出：v1.4 的 MCP 与多模型对比互斥');
   });
 
   it('authorizes each continuation charge before persisting providerRequestCount plus one', async () => {
-    const appSource = await source('App.tsx');
+    const appSource = await source(
+      'src/features/chat/internal/requests/ChatRequestExecution.ts'
+    );
     const continuationSource = sliceBetween(
       appSource,
       'beforeContinuation: async (context) => {',
       'onStreamUpdate: (update) => {'
     );
 
-    const authorizationIndex = continuationSource.indexOf('const authorized = await authorizeProviderRequestPlan({');
+    const authorizationIndex = continuationSource.indexOf('const authorized = await this.host.authorize({');
     const incrementIndex = continuationSource.indexOf(
       'providerRequestCount: trackedUsageEvent.providerRequestCount + 1'
     );
-    const persistenceIndex = continuationSource.indexOf('await persistProviderUsageEvents([nextUsageEvent]);');
+    const persistenceIndex = continuationSource.indexOf('await this.host.persistUsageEvents([nextUsageEvent]);');
     expect(authorizationIndex).toBeGreaterThanOrEqual(0);
     expect(incrementIndex).toBeGreaterThan(authorizationIndex);
     expect(persistenceIndex).toBeGreaterThan(incrementIndex);
@@ -211,7 +277,9 @@ describe('MCP approval UI safety regressions', () => {
   });
 
   it('authorizes and records every external-search model continuation', async () => {
-    const appSource = await source('App.tsx');
+    const appSource = await source(
+      'src/features/chat/internal/requests/ChatRequestExecution.ts'
+    );
     const continuationSource = sliceBetween(
       appSource,
       'beforeExternalSearchProviderRequest: async (context) => {',
@@ -219,13 +287,13 @@ describe('MCP approval UI safety regressions', () => {
     );
 
     const authorizationIndex = continuationSource.indexOf(
-      'const authorized = await authorizeProviderRequestPlan({'
+      'const authorized = await this.host.authorize({'
     );
     const countIndex = continuationSource.indexOf(
       'providerRequestCount: context.requestNumber'
     );
     const persistenceIndex = continuationSource.indexOf(
-      'await persistProviderUsageEvents([nextUsageEvent]);'
+      'await this.host.persistUsageEvents([nextUsageEvent]);'
     );
     expect(continuationSource).toContain(
       'if (context.requestNumber <= trackedUsageEvent.providerRequestCount)'
@@ -234,23 +302,23 @@ describe('MCP approval UI safety regressions', () => {
     expect(countIndex).toBeGreaterThan(authorizationIndex);
     expect(persistenceIndex).toBeGreaterThan(countIndex);
     expect(continuationSource).toContain('trackedUsageEvent = nextUsageEvent;');
-    expect(continuationSource).toContain('assertCurrentProviderSendAllowed(controller, context.signal);');
+    expect(continuationSource).toContain('this.assertCurrentProviderSendAllowed(controller, context.signal);');
   });
 
   it('passes only enabled provider-bound plugins and revalidates official routing plus model MCP capability', async () => {
     const [appSource, routeSource] = await Promise.all([
-      source('App.tsx'),
+      source('src/features/chat/internal/requests/ChatRequestExecution.ts'),
       source('src/services/openAiCompatible.ts'),
     ]);
     const enabledFilterSource = sliceBetween(
       appSource,
-      'function enabledRemoteMcpPluginsForProvider(',
-      "type AudioOperation = 'idle'"
+      'export function enabledRemoteMcpPluginsForProvider(',
+      '/**\n * Owns a provider call'
     );
     const assistantRequestSource = sliceBetween(
       appSource,
-      'async function runAssistantRequest({',
-      'async function copyMessage'
+      'async execute({',
+      'private providerRequestOperation('
     );
     const mcpRouteSource = sliceBetween(
       routeSource,

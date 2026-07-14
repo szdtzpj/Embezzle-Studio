@@ -17,7 +17,7 @@ function section(value: string, start: string, end: string): string {
 
 describe('v1.3 local knowledge and artifact integration', () => {
   it('routes every provider-bound chat path through the shared workspace context composer', async () => {
-    const appSource = await source('App.tsx');
+    const appSource = await source('src/features/chat/ChatPane.tsx');
 
     expect(appSource).not.toContain('buildChatTranscript(');
     const regenerate = section(appSource, 'async function regenerateAssistantMessage(', 'async function rerunFromUserMessage(');
@@ -42,7 +42,7 @@ describe('v1.3 local knowledge and artifact integration', () => {
 
   it('keeps context preview and pending composer content on the same composition path', async () => {
     const [appSource, inspectorSource] = await Promise.all([
-      source('App.tsx'),
+      source('src/features/chat/ChatPane.tsx'),
       source('src/components/ContextInspectorModal.tsx'),
     ]);
 
@@ -56,7 +56,7 @@ describe('v1.3 local knowledge and artifact integration', () => {
 
   it('mounts the two large local tools only while open and exposes explicit capture actions', async () => {
     const [appSource, workbenchSource] = await Promise.all([
-      source('App.tsx'),
+      source('src/features/chat/ChatPane.tsx'),
       source('src/components/WorkspaceWorkbench.tsx'),
     ]);
 
@@ -82,7 +82,7 @@ describe('v1.3 local knowledge and artifact integration', () => {
   });
 
   it('reuses project-reference projection while only messages are streaming', async () => {
-    const appSource = await source('App.tsx');
+    const appSource = await source('src/features/chat/ChatPane.tsx');
     const cacheSection = section(
       appSource,
       'const workspaceKnowledgeContextCache = new WeakMap<',
@@ -96,13 +96,16 @@ describe('v1.3 local knowledge and artifact integration', () => {
   });
 
   it('migrates project-owned data and keeps source selection bounded and explicit', async () => {
-    const appSource = await source('App.tsx');
+    const [appSource, projectsReducer] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
+      source('src/features/projects/internal/projectConversationReducer.ts'),
+    ]);
 
-    expect(appSource).toContain('migrateWorkspaceArtifactsProject(');
-    expect(appSource).toContain('migrateProjectKnowledgeSources(');
+    expect(projectsReducer).toContain('migrateWorkspaceArtifactsProject(');
+    expect(projectsReducer).toContain('migrateProjectKnowledgeSources(');
     expect(appSource).toContain('MAX_PROJECT_KNOWLEDGE_CONTEXT_SOURCES');
-    expect(appSource).toContain('delete next.knowledgeSourceIds;');
-    expect(appSource).toContain('delete snapshot.sourceArtifactId;');
+    expect(projectsReducer).toContain('delete next.knowledgeSourceIds;');
+    expect(projectsReducer).toContain('delete next.sourceArtifactId;');
     expect(appSource).toContain('不会自动加入模型上下文');
   });
 

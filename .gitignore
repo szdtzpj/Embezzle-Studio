@@ -34,3 +34,4 @@ api_key.txt
 *.key
 
 pro-ref/
+.agent/
