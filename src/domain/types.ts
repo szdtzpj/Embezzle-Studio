@@ -329,8 +329,9 @@ export interface WebSearchSettings {
 
 /**
  * User-supplied third-party web search, separate from provider-hosted Responses search.
- * Free/local kinds (bing, duckduckgo) work without an API key. Firecrawl cloud
- * requires a key; an explicitly configured self-hosted endpoint may not.
+ * Bing, DuckDuckGo, and Firecrawl cloud can start without an API key.
+ * Firecrawl accepts an optional key for higher limits, and self-hosted endpoints
+ * may likewise be configured without one.
  */
 export type ExternalSearchProviderKind =
   | 'tavily'

@@ -341,8 +341,8 @@ export const SearchServicesPanel = forwardRef<
   };
 
   const addProviderKind = (kind: ExternalSearchProviderKind) => {
-    // Pure free local engines are one-tap. Firecrawl and keyed services need
-    // a form because Firecrawl cloud requires a key while self-host may not.
+    // Pure free local engines are one-tap. Firecrawl still uses the form so the
+    // user can optionally add a key for higher limits or choose a self-hosted endpoint.
     if (kind === 'bing' || kind === 'duckduckgo') {
       onAddExternalService({ kind });
       closeForms();
