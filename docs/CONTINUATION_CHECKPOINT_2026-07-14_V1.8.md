@@ -1,9 +1,9 @@
 # Embezzle Studio 1.8.0 P0/P1 continuation checkpoint — 2026-07-14
 
-This checkpoint is the current local truth for the P0/P1 implementation. The
-working tree remains authoritative. Existing user changes, ignored local
-credentials, generated Android files, and feedback images were not reset or
-discarded. P2 biometric lock is explicitly deferred.
+This checkpoint records the completed P0/P1 implementation and the formal
+publication evidence. The working tree remains authoritative. Existing user
+changes, ignored local credentials, generated Android files, and feedback
+images were not reset or discarded. P2 biometric lock is explicitly deferred.
 
 ## Scope completed
 
@@ -117,7 +117,51 @@ predates only that iOS metadata change, so its Android permissions and runtime
 scope remain applicable, but an exact current-tree production-signed APK now
 requires the protected release keystore/Actions environment.
 
-This is a local acceptance candidate, not a GitHub asset or public release.
+At the 2026-07-14 checkpoint this was a local acceptance candidate, not a
+GitHub asset or public release. The protected workflow later rebuilt the exact
+tagged source and produced the distinct formal artifact recorded below.
+
+## Post-checkpoint immutable release evidence - 2026-07-15
+
+- Release-source PRs [#26](https://github.com/szdtzpj/Embezzle-Studio/pull/26)
+  and [#27](https://github.com/szdtzpj/Embezzle-Studio/pull/27) merged the P0/P1
+  implementation and final official DeepSeek alias safeguard. Remote `main`,
+  the Release target, and annotated tag `v1.8.0` all resolve to peeled commit
+  `cafecfdbc74bc314239802ee121a938d4fa2c113`.
+- Main Quality run
+  [`29384672597`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29384672597),
+  protected Android run
+  [`29384863423`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29384863423),
+  and post-release Pages run
+  [`29385766421`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29385766421)
+  completed successfully.
+- [`v1.8.0`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.8.0)
+  is the stable Latest Release, immutable, non-draft, and non-prerelease. Its
+  exact three assets are in `uploaded` state and were uploaded by
+  `github-actions[bot]`; `gh release verify` and all three `verify-asset`
+  checks succeed against GitHub's signed Release attestation.
+- The formal APK is
+  `D:\EmbezzleStudio-Releases\v1.8.0\Embezzle-Studio-v1.8.0-release.apk`,
+  `152,673,746` bytes, SHA-256
+  `d4164aec039e5d827fcab09f9805d760ca06c4e285d1720ef874a31c32391e0e`.
+  Build Tools 36.0.0 independently reports package
+  `com.szdtzpj.embezzlestudio`, version `1.8.0`, versionCode `14`, minSdk `24`,
+  targetSdk `36`, `allowBackup=false`, `adjustResize`, and intentional
+  `RECORD_AUDIO`; `CAMERA`, `SYSTEM_ALERT_WINDOW`,
+  `REQUEST_INSTALL_PACKAGES`, `USE_BIOMETRIC`, and `USE_FINGERPRINT` are
+  absent.
+- `apksigner` reports exactly one non-debug signer with production certificate
+  SHA-256
+  `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`;
+  APK Signature Schemes v2/v3 and zipalign pass. The published signer report
+  byte-matches an independent local report.
+- The public
+  [`release-manifest.json`](https://szdtzpj.github.io/Embezzle-Studio/release-manifest.json),
+  [`release.html`](https://szdtzpj.github.io/Embezzle-Studio/release.html), and
+  [managed APK](https://szdtzpj.github.io/Embezzle-Studio/downloads/Embezzle-Studio-v1.8.0-release.apk)
+  return anonymous HTTP 200. The complete Pages APK stored under
+  `D:\EmbezzleStudio-Releases\v1.8.0-github-public-verify-20260715-110848`
+  has the same size and SHA-256 as the immutable Release asset.
 
 ## External and manual boundary
 
@@ -129,7 +173,9 @@ This is a local acceptance candidate, not a GitHub asset or public release.
   covered by local tests but not by a live user-owned storage service.
 - Broad real-provider billing/entitlement, long-running media, upload/reference,
   and provider-specific error acceptance remains outside local automation.
-- No push, tag, GitHub Release, Actions run, production secret configuration,
-  collaborator/branch-rule change, or remote protection change was performed.
+- At the original checkpoint no push, tag, GitHub Release, or Actions
+  publication had been performed. The owner later authorized and completed the
+  exact production flow recorded above. No collaborator permission or remote
+  protection rule was changed during this release continuation.
 - P2 biometric lock remains deferred. The blocked biometric permissions are a
   release hardening gate only; no biometric API or user flow was added.
