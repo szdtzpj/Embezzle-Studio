@@ -215,10 +215,11 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('exposes a composer search sheet with service rows and dynamic globe icon', async () => {
-    const [appSource, panelSource, settingsToolsSource] = await Promise.all([
+    const [appSource, panelSource, settingsToolsSource, settingsScreenSource] = await Promise.all([
       source('src/features/chat/ChatPane.tsx'),
       source('src/ui/components/SearchServicesPanel.tsx'),
       source('src/features/settings/internal/SettingsToolsSectionView.tsx'),
+      source('src/features/settings/internal/SettingsScreen.tsx'),
     ]);
     expect(appSource).toContain('testID="composer-search-globe"');
     expect(appSource).toContain('ComposerSearchSheet');
@@ -260,7 +261,11 @@ describe('Android mobile UI regressions', () => {
     expect(panelSource).toContain('externalSearchProviderAllowsAnonymous');
     expect(panelSource).not.toContain('免费 · 点按选用');
     expect(appSource).not.toContain('testID="composer-search-chip"');
-    expect(settingsToolsSource).toContain('testID="search-service-add"');
+    expect(settingsToolsSource).not.toContain('testID="search-service-add"');
+    expect(settingsScreenSource).toContain("current.section === 'webSearch'");
+    expect(settingsScreenSource).toContain('headerRight={');
+    expect(settingsScreenSource).toContain('testID="search-service-add"');
+    expect(settingsScreenSource).toContain('searchServicesPanelRef.current?.openAdd()');
     expect(settingsToolsSource).toContain(
       'externalSearchProviderRequiresApiKey(input.kind, input.endpoint)'
     );

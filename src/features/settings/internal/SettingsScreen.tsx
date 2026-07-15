@@ -1,4 +1,5 @@
-import { forwardRef, useImperativeHandle, useState } from 'react';
+import { forwardRef, useImperativeHandle, useRef, useState } from 'react';
+import { Plus } from 'lucide-react-native';
 import { StyleSheet, Text, View } from 'react-native';
 import { SettingsMainScreen } from '../../../ui/screens/settings/SettingsMainScreen';
 import { ColorModeScreen } from '../../../ui/screens/settings/ColorModeScreen';
@@ -12,7 +13,9 @@ import { ToolsPanelScreen } from '../../../ui/screens/settings/ToolsPanelScreen'
 import { settingsToolsSectionTitles } from '../../../ui/screens/settings/toolsSections';
 import type { SettingsToolsSection } from '../../../app/navigation/settingsNavigation';
 import { ConfirmDialog } from '../../../ui/components/ConfirmDialog';
+import { AnimatedPressable } from '../../../ui/components/AnimatedPressable';
 import { MotionSwitch } from '../../../ui/components/Motion';
+import type { SearchServicesPanelHandle } from '../../../ui/components/SearchServicesPanel';
 import { useKelivoTheme, type KelivoTheme } from '../../../ui/theme';
 import type { AppUpdateInfo } from '../../../services/updateChecker';
 import type {
@@ -139,6 +142,7 @@ export const SettingsScreen = forwardRef<SettingsScreenHandle, SettingsScreenMod
     useState<'forward' | 'backward' | 'none'>('none');
   /** Survives sub-page remounts so "关于" 等返回后仍停在刚才的滚动位置. */
   const [mainScrollOffsetY, setMainScrollOffsetY] = useState(0);
+  const searchServicesPanelRef = useRef<SearchServicesPanelHandle>(null);
   const current = stack[stack.length - 1];
 
   const push = (screen: Exclude<ScreenState, { key: 'main' }>) => {
@@ -288,8 +292,30 @@ export const SettingsScreen = forwardRef<SettingsScreenHandle, SettingsScreenMod
           <ToolsPanelScreen
             title={settingsToolsSectionTitles[current.section]}
             onBack={pop}
+            headerRight={
+              current.section === 'webSearch' ? (
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  accessibilityLabel="添加搜索服务"
+                  accessibilityState={{ disabled: props.status.readOnly }}
+                  disabled={props.status.readOnly}
+                  testID="search-service-add"
+                  onPress={() => searchServicesPanelRef.current?.openAdd()}
+                  haptic="light"
+                  style={[
+                    styles.headerAddButton,
+                    props.status.readOnly && styles.headerAddButtonDisabled,
+                  ]}
+                >
+                  <Plus size={22} color={theme.colors.text} strokeWidth={2.2} />
+                </AnimatedPressable>
+              ) : null
+            }
           >
-            <SettingsToolsSectionView section={current.section} />
+            <SettingsToolsSectionView
+              section={current.section}
+              searchServicesPanelRef={searchServicesPanelRef}
+            />
           </ToolsPanelScreen>
         );
       case 'providers':
@@ -404,6 +430,15 @@ function createStyles(theme: KelivoTheme) {
     container: {
       flex: 1,
       backgroundColor: theme.colors.surface,
+    },
+    headerAddButton: {
+      width: 38,
+      height: 38,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    headerAddButtonDisabled: {
+      opacity: 0.4,
     },
     noticeBanner: {
       marginHorizontal: 12,

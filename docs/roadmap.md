@@ -91,7 +91,7 @@ P0/P1 的实现范围已经落到当前工作树，目标版本为 `1.8.0` / And
 
 本机已验证：
 
-- `npm.cmd run check` 通过 76 个测试文件、1,012 项测试，TypeScript 与 ESLint 均干净；`npm.cmd run build:web` 通过（3,483 modules，主 bundle 约 8.2 MB）。
+- `npm.cmd run check` 通过 76 个测试文件、1,014 项测试，TypeScript 与 ESLint 均干净；`npm.cmd run build:web` 通过（3,483 modules，主 bundle 约 8.2 MB）。
 - `npx.cmd expo install --check` 通过，Expo Doctor 20/20；3 份 workflow YAML、36 个 Bash `run` 块、16 个完整 Action SHA、`git diff --check` 及 `expo-sharing` patch 反向检查均通过。
 - 依赖高危审计退出 0；剩余 12 个 moderate `uuid -> xcode -> @expo/config-plugins` 问题未使用会破坏 Expo 工具链的 `npm audit fix --force`。
 - 干净 `npx.cmd expo prebuild --platform android --clean --no-install` 与离线 `assembleRelease` 已完成；Android 清单/工作流门禁确认 `allowBackup=false`、`adjustResize`、无 `CAMERA`/overlay/`REQUEST_INSTALL_PACKAGES`/生物识别权限，并要求 APK v2/v3 签名。

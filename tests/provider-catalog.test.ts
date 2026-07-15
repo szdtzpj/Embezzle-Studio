@@ -10,6 +10,19 @@ describe('provider catalog ownership', () => {
     }
   });
 
+  it('includes a ready-to-configure DeepSeek compatible provider', () => {
+    expect(defaultProviders).toContainEqual(
+      expect.objectContaining({
+        id: 'deepseek',
+        name: 'DeepSeek',
+        kind: 'custom',
+        baseUrl: 'https://api.deepseek.com/v1',
+        capabilities: expect.arrayContaining(['text', 'tool-calling', 'reasoning', 'streaming']),
+      })
+    );
+    expect(isUserCreatedProvider({ id: 'deepseek' })).toBe(false);
+  });
+
   it.each<ProviderKind>([
     'custom',
     'openai-compatible',

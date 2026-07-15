@@ -29,13 +29,16 @@ discarded. P2 biometric lock is explicitly deferred.
 - User-owned WebDAV/S3 encrypted sync remains optional and fail-closed. API
   keys, sync credentials, media bytes, and the local usage ledger stay local;
   no Embezzle Studio server or quota was added.
+- Remote `main` PR #25 was integrated before release: the search setup entry
+  remains visible, DeepSeek is a built-in BYOK provider, and existing
+  workspaces add that built-in profile without replacing user credentials.
 - Android workflow gates now cover `allowBackup=false`, `adjustResize`,
   `REQUEST_INSTALL_PACKAGES`/biometric/fingerprint absence, and both APK v2/v3
   signature schemes. Prebuild uses `CI=1` and `--clean --no-install`.
 
 ## Local verification evidence
 
-- `npm.cmd run check`: 76 test files / 1,012 tests passed; TypeScript and ESLint
+- `npm.cmd run check`: 76 test files / 1,014 tests passed; TypeScript and ESLint
   are clean.
 - Ark wire-protocol tests mock the unrelated media-persistence boundary, whose
   native behavior remains covered by the dedicated media-storage/export tests.

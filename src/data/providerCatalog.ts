@@ -63,6 +63,15 @@ export const defaultProviders: ProviderProfile[] = [
     notes: 'Targets Bailian compatible mode before provider-specific extensions.',
   },
   {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    kind: 'custom',
+    baseUrl: 'https://api.deepseek.com/v1',
+    capabilities: ['text', 'tool-calling', 'reasoning', 'streaming'],
+    models: [],
+    notes: 'Direct DeepSeek OpenAI-compatible API. Add your API Key, then fetch available models.',
+  },
+  {
     id: 'new-api-relay',
     name: 'New API Relay',
     kind: 'new-api-relay',

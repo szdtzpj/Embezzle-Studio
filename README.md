@@ -262,4 +262,4 @@ GitHub Release 的多个资产上传不是事务操作。工作流仅在 owner-a
 
 ### 1.8.0 P0/P1 当前验证边界
 
-当前工作树的 P0/P1 已完成本机实现与验证：`npm.cmd run check` 通过 76 个测试文件 / 1,012 项测试，Web export、Expo Doctor 20/20、依赖一致性、workflow/YAML/Bash/SHA/diff 检查均通过；本机 production-signed Android 1.8.0/code 14 candidate 位于 `D:\EmbezzleStudio-Releases\v1.8.0-candidate`，它只早于最后一项仅影响 iOS 的 Face ID 元数据硬化，且仍不是 GitHub Release。当前树已重新完成 Android 干净构建和 Manifest 复核，但该重建包由 Android Debug 证书签名；精确当前树的 production APK 仍需受保护签名环境。P2 生物识别锁明确延期；真机、真实 WebDAV/S3、真实服务商计费/媒体长任务和 GitHub Actions 发布仍是外部边界。完整证据见 [checkpoint](./docs/CONTINUATION_CHECKPOINT_2026-07-14_V1.8.md)。
+当前工作树的 P0/P1 已完成本机实现与验证：`npm.cmd run check` 通过 76 个测试文件 / 1,014 项测试，Web export、Expo Doctor 20/20、依赖一致性、workflow/YAML/Bash/SHA/diff 检查均通过；本机 production-signed Android 1.8.0/code 14 candidate 位于 `D:\EmbezzleStudio-Releases\v1.8.0-candidate`，它只早于最后一项仅影响 iOS 的 Face ID 元数据硬化，且仍不是 GitHub Release。当前树已重新完成 Android 干净构建和 Manifest 复核，但该重建包由 Android Debug 证书签名；精确当前树的 production APK 仍需受保护签名环境。P2 生物识别锁明确延期；真机、真实 WebDAV/S3、真实服务商计费/媒体长任务和 GitHub Actions 发布仍是外部边界。完整证据见 [checkpoint](./docs/CONTINUATION_CHECKPOINT_2026-07-14_V1.8.md)。

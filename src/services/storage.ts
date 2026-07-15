@@ -424,7 +424,27 @@ function normalizePersistedProviders(value: unknown): PersistedProvider[] {
     throw shapeError('providers 必须是数组。');
   }
   const normalized = value.map(normalizeProvider);
-  return normalized.length ? normalized : defaultPersistedProviders();
+  if (!normalized.length) {
+    return defaultPersistedProviders();
+  }
+
+  // Existing snapshots must retain their provider selection. Add only the
+  // DeepSeek catalog entry introduced after v6, rather than restoring every
+  // absent built-in provider from a possibly intentionally reduced snapshot.
+  const existingIds = new Set(normalized.map((provider) => provider.id));
+  const deepSeekProvider = defaultPersistedProviders().find(
+    (provider) => provider.id === 'deepseek'
+  );
+  if (!deepSeekProvider || existingIds.has(deepSeekProvider.id)) {
+    return normalized;
+  }
+
+  // Do not let a newly added catalog entry mask recovery of a corrupt snapshot
+  // in which every existing provider was disabled.
+  const addedDeepSeek = normalized.some((provider) => provider.enabled !== false)
+    ? deepSeekProvider
+    : { ...deepSeekProvider, enabled: false };
+  return [...normalized, addedDeepSeek];
 }
 
 function normalizeAttachment(value: unknown, label: string): MediaAttachment {
