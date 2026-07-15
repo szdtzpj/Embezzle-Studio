@@ -10,11 +10,17 @@ import React, {
 import {
   isWorkspaceCommitRejectedError,
 } from '../../app/workspace/internal/WorkspaceCommitPort';
+import { useWorkspaceSession } from '../../app/workspace/internal/WorkspaceSessionContext';
 import {
-  useWorkspaceSession,
   useWorkspaceStatus,
 } from '../../app/workspace/WorkspaceSessionProvider';
 import { createId } from '../../services/id';
+import { discardUncommittedAttachments } from '../../services/mediaStorage';
+import {
+  tombstoneAndRemoveGenerationTaskOutboxForConversation,
+  readGenerationTaskOutbox,
+} from '../../services/generationTaskOutbox';
+import { messageAttachments } from './projectConversationHelpers';
 import type { ProjectConversationCommand } from './projectConversationCommands';
 import type { ProjectConversationResult } from './projectConversationResults';
 import {
@@ -51,6 +57,37 @@ export function ProjectsConversationsProvider(props: {
   const workspaceStatus = useWorkspaceStatus();
   const [drawerOpen, setDrawerOpen] = useState(false);
 
+  const cleanupDeletedConversation = useCallback(async (conversationId: string) => {
+    const snapshot = session.getSnapshot();
+    const retainedTaskIds = new Set(
+      [
+        ...snapshot.messages,
+        ...snapshot.conversations.flatMap((conversation) => conversation.messages),
+      ]
+        .map((message) => message.generationTask?.taskId)
+        .filter((taskId): taskId is string => Boolean(taskId))
+    );
+    const removed = await tombstoneAndRemoveGenerationTaskOutboxForConversation(
+      conversationId,
+      retainedTaskIds
+    );
+    if (!removed.length) return;
+    const remainingOutbox = await readGenerationTaskOutbox();
+    const referencedUris = new Set([
+      ...snapshot.messages.flatMap((message) => messageAttachments([message])),
+      ...snapshot.conversations.flatMap((conversation) => messageAttachments(conversation.messages)),
+      ...snapshot.composerDrafts.flatMap((draft) => draft.attachments ?? []),
+      ...remainingOutbox.flatMap((entry) => entry.attachments ?? []),
+    ].map((attachment) => attachment.uri));
+    const candidates = removed
+      .flatMap((entry) => entry.attachments ?? [])
+      .filter((attachment, index, all) =>
+        !referencedUris.has(attachment.uri) &&
+        all.findIndex((candidate) => candidate.uri === attachment.uri) === index
+      );
+    await discardUncommittedAttachments(candidates);
+  }, [session]);
+
   const runtime = useMemo(() => {
     const commit = session.bindCommitPort(createProjectsCommitReducer());
     return new ProjectsConversationsRuntime({
@@ -58,8 +95,9 @@ export function ProjectsConversationsProvider(props: {
       now: () => Date.now(),
       createId,
       isHistoryLocked: ports.isHistoryLocked,
+      onConversationDeleted: cleanupDeletedConversation,
     });
-  }, [ports.isHistoryLocked, session]);
+  }, [cleanupDeletedConversation, ports.isHistoryLocked, session]);
 
   const execute = useCallback(
     async (command: ProjectConversationCommand): Promise<ProjectConversationResult> => {

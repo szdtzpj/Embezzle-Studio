@@ -1,11 +1,16 @@
 import type { WorkspaceCommitPort } from '../../app/workspace/internal/WorkspaceCommitPort';
 import type { AppWorkspace } from '../../domain/types';
-import type { ProjectConversationCommand } from './projectConversationCommands';
+import {
+  changesProjectConversationRequestContext,
+  PROJECT_CONVERSATION_HISTORY_LOCK_NOTICE,
+  type ProjectConversationCommand,
+} from './projectConversationCommands';
 import type { ProjectConversationResult } from './projectConversationResults';
 import {
   reduceProjectConversationCommand,
   type ProjectConversationReduceContext,
 } from './internal/projectConversationReducer';
+import { recordGenerationTaskCleanupIntents } from '../../services/generationTaskCleanupJournal';
 
 export interface ProjectsConversationsRuntimeDeps {
   commit: WorkspaceCommitPort<
@@ -15,6 +20,8 @@ export interface ProjectsConversationsRuntimeDeps {
   now: () => number;
   createId: (prefix: string) => string;
   isHistoryLocked: () => boolean;
+  /** Runs after a durable conversation-delete commit. */
+  onConversationDeleted?: (conversationId: string) => Promise<void>;
 }
 
 /**
@@ -31,20 +38,43 @@ export class ProjectsConversationsRuntime {
       historyLocked: this.deps.isHistoryLocked(),
     };
 
-    if (
-      (command.type === 'conversation.delete' || command.type === 'project.delete') &&
-      context.historyLocked
-    ) {
+    // A provider request owns the active request context until it settles. Keep
+    // the drawer usable for read-only browsing, but reject commands that would
+    // switch, rewrite, or fork that context before the request commits.
+    if (context.historyLocked && changesProjectConversationRequestContext(command)) {
       return {
         ok: false,
-        notice:
-          command.type === 'conversation.delete'
-            ? '当前仍有服务商请求进行中；本次删除未执行。'
-            : '当前仍有服务商请求进行中；请先停止或等待完成，再删除项目。',
+        notice: PROJECT_CONVERSATION_HISTORY_LOCK_NOTICE,
       };
     }
 
-    return this.deps.commit.execute({ command, context });
+    // Record the destructive intent before the required workspace flush. If
+    // that flush fails after mutating the in-memory snapshot, foreground
+    // recovery can still tombstone the headless task and reclaim its media.
+    if (command.type === 'conversation.delete') {
+      await recordGenerationTaskCleanupIntents([
+        {
+          kind: 'conversation',
+          conversationId: command.conversationId,
+          createdAt: Date.now(),
+        },
+      ]);
+    }
+
+    const result = await this.deps.commit.execute(
+      { command, context },
+      command.type === 'conversation.delete' ? { durability: 'required' } : undefined
+    );
+    if (command.type === 'conversation.delete' && result.ok && this.deps.onConversationDeleted) {
+      try {
+        await this.deps.onConversationDeleted(command.conversationId);
+      } catch {
+        // The workspace delete is already durable. Cleanup is retried by the
+        // next foreground recovery rather than turning a successful delete
+        // into a misleading UI failure.
+      }
+    }
+    return result;
   }
 }
 

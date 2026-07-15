@@ -35,6 +35,7 @@ import {
   RefreshCw,
   Settings,
   ShieldCheck,
+  Sparkles,
   SlidersHorizontal,
   Square,
   Video,
@@ -45,9 +46,9 @@ import {
 import { isVolcengineArkProvider } from '../../data/arkModels';
 import {
   useWorkspaceSelector,
-  useWorkspaceSession,
   useWorkspaceStatus,
 } from '../../app/workspace/WorkspaceSessionProvider';
+import { useWorkspaceSession } from '../../app/workspace/internal/WorkspaceSessionContext';
 import { defaultParameterSettings } from '../../data/providerCatalog';
 import { messageAttachments } from '../../features/projects/projectConversationHelpers';
 import {
@@ -87,7 +88,10 @@ import {
   useChatAdapters,
   useChatOrchestrationController,
 } from '../../features/chat/ChatProvider';
-import { ChatWorkspaceRuntime } from './internal/ChatWorkspaceRuntime';
+import {
+  ChatWorkspaceRuntime,
+  type ChatWorkspaceCommand,
+} from './internal/ChatWorkspaceRuntime';
 import { useRegisterChatProjectNavigation } from './useChatProjectNavigation';
 import { useChatTaskRuntime } from './useChatTaskActions';
 import {
@@ -128,8 +132,21 @@ import {
   type ProjectKnowledgeContextResult,
 } from '../../services/projectKnowledge';
 import { pickProjectKnowledgeTextFile } from '../../services/knowledgeFileIO';
+import {
+  defaultKnowledgeImportSelection,
+  parsePickedDocumentImport,
+  pickDocumentImportAsset,
+  recognizeImageForLocalOcr,
+  renderPdfPageForLocalOcr,
+  selectKnowledgeImportSections,
+  setKnowledgeImportSectionContent,
+  type DocumentImportHandle,
+  type KnowledgeImportDraft,
+  type KnowledgeImportSection,
+} from '../../services/documentImport';
 import { exportWorkspaceArtifact } from '../../services/artifactExport';
 import { WorkspaceWorkbench } from '../../components/WorkspaceWorkbench';
+import { KnowledgeImportPreview } from '../../components/KnowledgeImportPreview';
 import { ContextInspectorModal } from '../../components/ContextInspectorModal';
 import { McpApprovalModal } from '../../components/McpApprovalModal';
 import {
@@ -142,6 +159,11 @@ import type {
 } from '../../app/navigation/settingsNavigation';
 import { useAppearance } from '../../ui/appearance/AppearanceProvider';
 import { coordinateMobileBack } from '../../ui/mobile/MobileBackCoordinator';
+import {
+  MainWorkspaceTabBar,
+  WorkspaceHub,
+  type MainWorkspaceTab,
+} from '../../ui/mobile/WorkspaceHub';
 import { useChatPaneTheme } from './chatPaneStyles';
 import { ConfirmDialog } from '../../ui/components/ConfirmDialog';
 import { MessageActivityModules } from '../../ui/components/MessageActivityModules';
@@ -323,11 +345,12 @@ export interface ChatPaneSettingsPort {
   back(): boolean;
 }
 
-export function ChatPane(props: { settings: ChatPaneSettingsPort }) {
+export function ChatPane(props: { settings: ChatPaneSettingsPort; onOpenSetup: () => void }) {
   const { colorMode, notice: appearanceNotice, setColorMode } = useAppearance();
   return (
     <ChatPaneImplementation
       settings={props.settings}
+      onOpenSetup={props.onOpenSetup}
       colorMode={colorMode}
       onSetColorMode={setColorMode}
       appearanceNotice={appearanceNotice}
@@ -337,11 +360,13 @@ export function ChatPane(props: { settings: ChatPaneSettingsPort }) {
 
 function ChatPaneImplementation({
   settings,
+  onOpenSetup,
   colorMode,
   onSetColorMode,
   appearanceNotice,
 }: {
   settings: ChatPaneSettingsPort;
+  onOpenSetup: () => void;
   colorMode: ColorMode;
   onSetColorMode: (colorMode: ColorMode) => void;
   appearanceNotice: string;
@@ -356,12 +381,22 @@ function ChatPaneImplementation({
   const workspace = useWorkspaceSelector((snapshot) => snapshot);
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
-  const commitWorkspaceCommand = workspaceCommandRuntime.execute.bind(workspaceCommandRuntime);
+  const commitWorkspaceCommand = useCallback(
+    (
+      command: ChatWorkspaceCommand,
+      options?: Parameters<ChatWorkspaceRuntime['execute']>[1]
+    ) => workspaceCommandRuntime.execute(command, options),
+    [workspaceCommandRuntime]
+  );
   const booting = workspaceStatus.phase === 'booting';
   const persistenceReady =
     workspaceStatus.phase === 'ready' || workspaceStatus.phase === 'replacing';
   const persistenceLoadError =
     workspaceStatus.phase === 'read-only' ? workspaceStatus.issue ?? null : null;
+  const persistenceSaveError =
+    workspaceStatus.phase === 'ready' && workspaceStatus.dirty
+      ? workspaceStatus.issue ?? null
+      : null;
   const settingsOpen = settings.isOpen;
   const workspaceReadOnly = isWorkspaceReadOnly(booting, persistenceReady);
   const closeSettings = useCallback(() => {
@@ -369,6 +404,16 @@ function ChatPaneImplementation({
   }, [settings]);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [workbenchArtifactId, setWorkbenchArtifactId] = useState<string | null>(null);
+  const [knowledgeImportHandle, setKnowledgeImportHandle] = useState<DocumentImportHandle | null>(null);
+  const [knowledgeImportDraft, setKnowledgeImportDraft] = useState<KnowledgeImportDraft | null>(null);
+  const [knowledgeImportBusy, setKnowledgeImportBusy] = useState(false);
+  const [knowledgeImportError, setKnowledgeImportError] = useState<string>();
+  const [knowledgeImportOcrSectionId, setKnowledgeImportOcrSectionId] = useState<string | null>(null);
+
+  useEffect(() => () => {
+    if (knowledgeImportHandle) void knowledgeImportHandle.cleanup();
+  }, [knowledgeImportHandle]);
+  const [mainTab, setMainTab] = useState<MainWorkspaceTab>('chat');
   const [contextInspectorOpen, setContextInspectorOpen] = useState(false);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
@@ -403,7 +448,7 @@ function ChatPaneImplementation({
   const usageLedger = useMemo(
     () =>
       new ChatUsageLedger({
-        readWorkspace: () => workspaceRef.current,
+        readWorkspace: () => workspaceSession.getSnapshot(),
         isReplacing: () => workspaceSession.isReplacing(),
         replaceUsageEvents: (events) =>
           workspaceCommandRuntime.execute({ type: 'usage.replace', events }),
@@ -429,6 +474,14 @@ function ChatPaneImplementation({
   const [editingMessageDraft, setEditingMessageDraft] = useState('');
   const [messageActionMenuId, setMessageActionMenuId] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!settingsOpen) return;
+    // Settings is a separate navigation surface; never leave chat-only menus
+    // logically open behind it or restore them when returning to Chat.
+    setSearchMenuOpen(false);
+    setMessageActionMenuId(null);
+  }, [settingsOpen]);
+
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -436,7 +489,10 @@ function ChatPaneImplementation({
   const searchHighlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSearchMessageIdRef = useRef<string | null>(null);
   const messageLayoutYByIdRef = useRef(new Map<string, number>());
+  const inputRef = useRef(input);
   const pendingAttachmentsRef = useRef(attachments);
+  const loadedDraftConversationIdRef = useRef<string | null>(null);
+  const draftSaveOperationRef = useRef(0);
   const mountedRef = useRef(true);
   const appStateRef = useRef(AppState.currentState);
   const chatScrollRef = useRef<ScrollView>(null);
@@ -448,6 +504,49 @@ function ChatPaneImplementation({
     resetComposer: resetComposerForConversationChange,
     discardPendingAttachments: clearPendingAttachments,
     clearTaskQueries: taskRuntime.cancelAll,
+    setComposerText: (text) => {
+      setInput(text);
+      switchMainTab('chat');
+    },
+    appendComposerText: (text) => {
+      setInput((current) => current.trim() ? `${current}\n\n${text}` : text);
+      switchMainTab('chat');
+    },
+    addComposerAttachments: async (incoming, textToAppend) => {
+      try {
+        const next = [...pendingAttachmentsRef.current, ...incoming];
+        validateAttachments(next);
+        const appended = textToAppend?.trim();
+        const nextText = appended
+          ? inputRef.current.trim()
+            ? `${inputRef.current}\n\n${appended}`
+            : appended
+          : inputRef.current;
+        draftSaveOperationRef.current += 1;
+        const accepted = await commitWorkspaceCommand(
+          {
+            type: 'draft.set',
+            conversationId: workspaceRef.current.activeConversationId,
+            text: nextText,
+            attachments: next,
+            now: Date.now(),
+          },
+          { durability: 'required' }
+        );
+        if (!accepted) return false;
+        inputRef.current = nextText;
+        pendingAttachmentsRef.current = next;
+        setInput(nextText);
+        setAttachments(next);
+        switchMainTab('chat');
+        return true;
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : '分享附件无法加入当前对话。');
+        return false;
+      }
+    },
+    showChat: () => switchMainTab('chat'),
+    openArtifact: (artifactId) => openHubArtifact(artifactId),
     revealMessage: (messageId) => {
       pendingSearchMessageIdRef.current = messageId;
       messageLayoutYByIdRef.current.delete(messageId);
@@ -480,6 +579,12 @@ function ChatPaneImplementation({
     }
     if (result.stage === 'ledger') {
       setNotice(result.error?.message ?? '费用保险丝台账写入失败，请求未发出。');
+      return;
+    }
+    if (result.stage === 'append' && result.rollbackError) {
+      setNotice(
+        `${result.error?.message ?? '请求准备失败，未联系服务商。'} 本地未发出请求的台账补偿也失败：${result.rollbackError.message}`
+      );
       return;
     }
     if (result.stage === 'preflight' || result.stage === 'append') {
@@ -515,10 +620,13 @@ function ChatPaneImplementation({
       }
       chatOrchestration.stop();
       cancelRequestDecisions();
-      void deletePersistedAttachments(pendingAttachmentsRef.current);
       // Workspace Session dispose (provider unmount) owns the final dirty flush.
     };
   }, [cancelRequestDecisions, chatOrchestration]);
+
+  useEffect(() => {
+    inputRef.current = input;
+  }, [input]);
 
   useEffect(() => {
     pendingAttachmentsRef.current = attachments;
@@ -642,8 +750,8 @@ function ChatPaneImplementation({
       return;
     }
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () =>
-      coordinateMobileBack(
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      const handled = coordinateMobileBack(
         {
           contextInspectorOpen,
           workbenchOpen,
@@ -694,8 +802,14 @@ function ChatPaneImplementation({
             setMessageActionMenuId(null);
           },
         }
-      )
-    );
+      );
+      if (handled) return true;
+      if (mainTab !== 'chat') {
+        switchMainTab('chat');
+        return true;
+      }
+      return false;
+    });
 
     return () => subscription.remove();
   }, [
@@ -705,6 +819,7 @@ function ChatPaneImplementation({
     messageActionMenuId,
     mcpApprovalView,
     modelPickerOpen,
+    mainTab,
     parameterMenuOpen,
     reasoningMenuOpen,
     projectsNavigation,
@@ -730,6 +845,44 @@ function ChatPaneImplementation({
     ),
     [workspace.activeConversationId, workspace.conversations]
   );
+  useEffect(() => {
+    if (workspaceStatus.phase !== 'ready') {
+      loadedDraftConversationIdRef.current = null;
+      return;
+    }
+    if (loadedDraftConversationIdRef.current === workspace.activeConversationId) return;
+    const draft = workspace.composerDrafts.find(
+      (candidate) => candidate.conversationId === workspace.activeConversationId
+    );
+    draftSaveOperationRef.current += 1;
+    loadedDraftConversationIdRef.current = workspace.activeConversationId;
+    setInput(draft?.text ?? '');
+    const draftAttachments = draft?.attachments?.map((attachment) => ({ ...attachment })) ?? [];
+    pendingAttachmentsRef.current = draftAttachments;
+    setAttachments(draftAttachments);
+  }, [workspace.activeConversationId, workspace.composerDrafts, workspaceStatus.phase]);
+
+  useEffect(() => {
+    if (workspaceStatus.phase !== 'ready') return;
+    const operation = ++draftSaveOperationRef.current;
+    const timer = setTimeout(() => {
+      if (draftSaveOperationRef.current !== operation) return;
+      void commitWorkspaceCommand({
+        type: 'draft.set',
+        conversationId: workspace.activeConversationId,
+        text: input,
+        attachments,
+        now: Date.now(),
+      });
+    }, 320);
+    return () => clearTimeout(timer);
+  }, [
+    attachments,
+    commitWorkspaceCommand,
+    input,
+    workspace.activeConversationId,
+    workspaceStatus.phase,
+  ]);
   const activeProjectArtifacts = useMemo(
     () => listWorkspaceArtifactsByProject(workspace.artifacts, activeProject.id),
     [activeProject.id, workspace.artifacts]
@@ -764,9 +917,11 @@ function ChatPaneImplementation({
     : '';
 
   const activeModel = addedModels.find((model) => model.id === activeModelId);
+  const needsConfiguration = !activeProvider?.apiKey?.trim() || !activeModelId;
   const activeModelTask = activeModel ? inferModelTask(activeModel) : 'chat';
   const activeModelSupportsComposer = ['chat', 'image-generation', 'video-generation'].includes(activeModelTask);
   const canConfigureParameters = Boolean(
+    workspace.experienceMode === 'advanced' &&
     activeModelTask === 'chat' &&
     activeProvider &&
     activeModel &&
@@ -1052,25 +1207,38 @@ function ChatPaneImplementation({
     highlightSearchMessage(messageId);
   }
 
-  function selectProviderModel(providerId: string, modelId: string) {
+  async function selectProviderModel(providerId: string, modelId: string) {
     if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
       return;
     }
-    const provider = workspaceRef.current.providers.find((item) => item.id === providerId);
+    const before = workspaceSession.getSnapshot();
+    const provider = before.providers.find((item) => item.id === providerId);
     if (!isProviderEnabled(provider)) {
       setNotice('请先启用该供应商。');
       setModelPickerOpen(false);
       return;
     }
 
-    void commitWorkspaceCommand({
-      type: 'model.select',
-      providerId,
-      modelId,
-      activateProvider: true,
-    });
-    clearPendingAttachments();
-    setModelPickerOpen(false);
+    try {
+      const accepted = await commitWorkspaceCommand({
+        type: 'model.select',
+        providerId,
+        modelId,
+        activateProvider: true,
+      });
+      if (accepted) {
+        const after = workspaceSession.getSnapshot();
+        const selectionChanged =
+          after.activeProviderId !== before.activeProviderId ||
+          after.activeModelIdByProvider[providerId] !==
+            before.activeModelIdByProvider[providerId];
+        if (selectionChanged) clearPendingAttachments();
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '模型切换失败，草稿附件已保留。');
+    } finally {
+      setModelPickerOpen(false);
+    }
   }
 
 
@@ -1409,8 +1577,10 @@ function ChatPaneImplementation({
       shouldAutoScrollRef.current = true;
       setHighlightedSearchMessageId(null);
     }
+    draftSaveOperationRef.current += 1;
     setInput('');
-    clearPendingAttachments();
+    pendingAttachmentsRef.current = [];
+    setAttachments([]);
     setActiveVideoAttachmentId(null);
     setAttachMenuOpen(false);
     setReasoningMenuOpen(false);
@@ -1452,6 +1622,10 @@ function ChatPaneImplementation({
   }
 
   async function branchConversation(messageId: string) {
+    if (chatOrchestration.current()) {
+      setNotice('当前请求仍在进行中，请先停止或等待完成，再创建分支。');
+      return;
+    }
     if (!ensureWorkspaceWritable()) return;
     const result = await projectsNavigation.execute({
       type: 'conversation.fork',
@@ -1499,6 +1673,19 @@ function ChatPaneImplementation({
       } else if (activeModel) {
         assertChatAttachmentsSupported(nextAttachments, activeModel, activeProvider ?? undefined);
       }
+      draftSaveOperationRef.current += 1;
+      const accepted = await commitWorkspaceCommand(
+        {
+          type: 'draft.set',
+          conversationId: workspace.activeConversationId,
+          text: inputRef.current,
+          attachments: nextAttachments,
+          now: Date.now(),
+        },
+        { durability: 'required' }
+      );
+      if (!accepted) throw new Error('附件变更未能保存，请稍后重试。');
+      pendingAttachmentsRef.current = nextAttachments;
       setAttachments(nextAttachments);
     } catch (error) {
       await discardUncommittedAttachments(picked);
@@ -1511,18 +1698,64 @@ function ChatPaneImplementation({
       return;
     }
 
-    const removed = attachments.find((attachment) => attachment.id === attachmentId);
-    if (removed) {
-      void discardUncommittedAttachments([removed]);
-    }
-    setAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
+    const removed = pendingAttachmentsRef.current.find((attachment) => attachment.id === attachmentId);
+    if (!removed) return;
+    const next = pendingAttachmentsRef.current.filter((attachment) => attachment.id !== attachmentId);
+    const conversationId = workspaceRef.current.activeConversationId;
+    draftSaveOperationRef.current += 1;
+    pendingAttachmentsRef.current = next;
+    setAttachments(next);
+    void commitWorkspaceCommand(
+      {
+        type: 'draft.set',
+        conversationId,
+        text: inputRef.current,
+        attachments: next,
+        now: Date.now(),
+      },
+      { durability: 'required' }
+    ).then((accepted) => {
+      if (accepted) {
+        return discardUncommittedAttachments([removed]);
+      }
+      pendingAttachmentsRef.current = [...next, removed];
+      setAttachments(pendingAttachmentsRef.current);
+      setNotice('附件变更未能保存，原附件仍保留。');
+      return undefined;
+    }).catch((error) => {
+      pendingAttachmentsRef.current = [...next, removed];
+      setAttachments(pendingAttachmentsRef.current);
+      setNotice(error instanceof Error ? error.message : '附件变更保存失败。');
+    });
   }
 
   function clearPendingAttachments() {
-    if (attachments.length) {
-      void discardUncommittedAttachments(attachments);
-    }
+    const removed = pendingAttachmentsRef.current;
+    if (!removed.length) return;
+    const conversationId = workspaceRef.current.activeConversationId;
+    draftSaveOperationRef.current += 1;
+    pendingAttachmentsRef.current = [];
     setAttachments([]);
+    void commitWorkspaceCommand(
+      {
+        type: 'draft.set',
+        conversationId,
+        text: inputRef.current,
+        attachments: [],
+        now: Date.now(),
+      },
+      { durability: 'required' }
+    ).then((accepted) => {
+      if (accepted) return discardUncommittedAttachments(removed);
+      pendingAttachmentsRef.current = removed;
+      setAttachments(removed);
+      setNotice('附件变更未能保存，原附件仍保留。');
+      return undefined;
+    }).catch((error) => {
+      pendingAttachmentsRef.current = removed;
+      setAttachments(removed);
+      setNotice(error instanceof Error ? error.message : '附件变更保存失败。');
+    });
   }
 
   function updateAssistantMessage(
@@ -1603,7 +1836,7 @@ function ChatPaneImplementation({
     announceCancellation?: boolean;
   }): Promise<AssistantRequestOutcome> {
     const execution = new ChatRequestExecution(providerRegistry, chatOrchestration, {
-      readWorkspace: () => workspaceRef.current,
+      readWorkspace: () => workspaceSession.getSnapshot(),
       appState: () => appStateRef.current,
       streamUpdateDelayMs: () => (Platform.OS === 'android' ? 120 : 60),
       discardAttachments: discardUncommittedAttachments,
@@ -1743,6 +1976,44 @@ function ChatPaneImplementation({
     setWorkbenchArtifactId(null);
   }
 
+  function switchMainTab(tab: MainWorkspaceTab) {
+    Keyboard.dismiss();
+    setAttachMenuOpen(false);
+    setReasoningMenuOpen(false);
+    setParameterMenuOpen(false);
+    setSearchMenuOpen(false);
+    setMessageActionMenuId(null);
+    setMainTab(tab);
+  }
+
+  async function openHubConversation(conversationId: string) {
+    const result = await projectsNavigation.execute({ type: 'conversation.activate', conversationId });
+    applyProjectConversationResult(result);
+    if (result.ok) switchMainTab('chat');
+  }
+
+  async function activateHubProject(projectId: string) {
+    applyProjectConversationResult(
+      await projectsNavigation.execute({ type: 'project.activate', projectId })
+    );
+  }
+
+  async function startHubConversation() {
+    const result = await projectsNavigation.execute({ type: 'conversation.start' });
+    applyProjectConversationResult(result);
+    if (result.ok) switchMainTab('chat');
+  }
+
+  function openHubArtifact(artifactId: string) {
+    setWorkbenchArtifactId(artifactId);
+    switchMainTab('artifacts');
+  }
+
+  function useHubTemplate(templateId: string) {
+    applyPromptTemplate(templateId);
+    switchMainTab('chat');
+  }
+
   function openContextInspector() {
     if (!contextToolsAvailable) {
       setNotice('图片/视频生成适配器只发送最新提示词，不使用对话历史或项目资料；请切换到聊天模型后再检查或压缩上下文。');
@@ -1863,6 +2134,29 @@ function ChatPaneImplementation({
       setNotice('旧版本内容已作为新的本地版本恢复，历史版本仍完整保留。');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '恢复成果版本失败。');
+    }
+  }
+
+  async function setArtifactFavorite(artifactId: string, favorite: boolean) {
+    if (!ensureWorkspaceWritable()) return;
+    applyProjectConversationResult(
+      await projectsNavigation.execute({ type: 'artifact.set-favorite', artifactId, favorite })
+    );
+  }
+
+  async function setArtifactTags(artifactId: string, tags: string[]) {
+    if (!ensureWorkspaceWritable()) return;
+    const result = await projectsNavigation.execute({ type: 'artifact.set-tags', artifactId, tags });
+    applyProjectConversationResult(result);
+    if (result.ok) setNotice('成果标签已保存在本机。');
+  }
+
+  async function continueArtifactConversation(conversationId: string) {
+    const result = await projectsNavigation.execute({ type: 'conversation.activate', conversationId });
+    applyProjectConversationResult(result);
+    if (result.ok) {
+      closeWorkspaceWorkbench();
+      switchMainTab('chat');
     }
   }
 
@@ -2010,6 +2304,104 @@ function ChatPaneImplementation({
     }
   }
 
+  async function importDocumentKnowledge() {
+    if (!ensureWorkspaceWritable() || knowledgeImportBusy) return;
+    setKnowledgeImportBusy(true);
+    setKnowledgeImportError(undefined);
+    try {
+      const asset = await pickDocumentImportAsset();
+      if (!asset) return;
+      const handle = await parsePickedDocumentImport(asset);
+      setKnowledgeImportHandle(handle);
+      setKnowledgeImportDraft(handle.draft);
+    } catch (error) {
+      setKnowledgeImportError(error instanceof Error ? error.message : '文档解析失败。');
+      setNotice(error instanceof Error ? error.message : '文档解析失败。');
+    } finally {
+      setKnowledgeImportBusy(false);
+    }
+  }
+
+  async function closeKnowledgeImport() {
+    const handle = knowledgeImportHandle;
+    setKnowledgeImportHandle(null);
+    setKnowledgeImportDraft(null);
+    setKnowledgeImportError(undefined);
+    setKnowledgeImportOcrSectionId(null);
+    if (handle) await handle.cleanup();
+  }
+
+  async function runKnowledgeImportOcr(section: KnowledgeImportSection) {
+    const draft = knowledgeImportDraft;
+    if (!draft?.sourceUri || knowledgeImportOcrSectionId) return;
+    setKnowledgeImportOcrSectionId(section.id);
+    setKnowledgeImportError(undefined);
+    let renderedUri: string | undefined;
+    try {
+      if (draft.format === 'pdf') {
+        const rendered = await renderPdfPageForLocalOcr(draft, section.pageNumber ?? 1);
+        renderedUri = rendered.uri;
+        const result = await recognizeImageForLocalOcr(rendered.uri, 'Chinese');
+        setKnowledgeImportDraft((current) => current
+          ? setKnowledgeImportSectionContent(current, section.id, result.text)
+          : current);
+      } else if (draft.format === 'image') {
+        const result = await recognizeImageForLocalOcr(draft.sourceUri, 'Chinese');
+        setKnowledgeImportDraft((current) => current
+          ? setKnowledgeImportSectionContent(current, section.id, result.text)
+          : current);
+      } else {
+        throw new Error('此分段不需要或不支持本机 OCR。');
+      }
+    } catch (error) {
+      setKnowledgeImportError(error instanceof Error ? error.message : '本机 OCR 失败。');
+    } finally {
+      if (renderedUri) {
+        try {
+          const { File } = await import('expo-file-system');
+          const rendered = new File(renderedUri);
+          if (rendered.exists) rendered.delete();
+        } catch {
+          // Native renderer cache cleanup is best effort.
+        }
+      }
+      setKnowledgeImportOcrSectionId(null);
+    }
+  }
+
+  async function confirmKnowledgeImport() {
+    const draft = knowledgeImportDraft;
+    if (!draft || knowledgeImportBusy || !ensureWorkspaceWritable()) return;
+    setKnowledgeImportBusy(true);
+    setKnowledgeImportError(undefined);
+    try {
+      const selected = selectKnowledgeImportSections(
+        draft,
+        defaultKnowledgeImportSelection(draft)
+      );
+      const result = await projectsNavigation.execute({
+        type: 'knowledge.import',
+        picked: {
+          title: selected.title,
+          content: selected.content,
+          fileName: selected.fileName,
+          ...(selected.mimeType ? { mimeType: selected.mimeType } : {}),
+        },
+      });
+      applyProjectConversationResult(result);
+      if (!result.ok) {
+        setKnowledgeImportError(result.notice);
+        return;
+      }
+      await closeKnowledgeImport();
+      setNotice('所选文档分段已保存为本地项目资料；不会自动加入模型上下文。');
+    } catch (error) {
+      setKnowledgeImportError(error instanceof Error ? error.message : '保存文档资料失败。');
+    } finally {
+      setKnowledgeImportBusy(false);
+    }
+  }
+
   function createAssistantPlaceholder(runtime: NonNullable<ReturnType<typeof resolveMessageRuntime>>): ChatMessage {
     return {
       id: createId('msg'),
@@ -2132,6 +2524,7 @@ function ChatPaneImplementation({
       acquireLease: () => beginActiveRequest('回答生成', { mcpActive }),
       releaseLease: finishActiveRequest,
       persistStartedLedger: () => usageLedger.persist([usageEvent]),
+      rollbackStartedLedger: () => usageLedger.rollbackStarted([usageEvent]),
       appendVisibleMessages: async () => {
         const accepted = await commitWorkspaceCommand({
           type: 'conversation.set-messages',
@@ -2282,6 +2675,7 @@ function ChatPaneImplementation({
       acquireLease: () => beginActiveRequest('回答生成', { mcpActive }),
       releaseLease: finishActiveRequest,
       persistStartedLedger: () => usageLedger.persist([usageEvent]),
+      rollbackStartedLedger: () => usageLedger.rollbackStarted([usageEvent]),
       appendVisibleMessages: async () => {
         const accepted = await commitWorkspaceCommand({
           type: 'conversation.set-messages',
@@ -2568,15 +2962,22 @@ function ChatPaneImplementation({
       acquireLease: () => beginActiveRequest('多模型对比'),
       releaseLease: finishActiveRequest,
       persistStartedLedger: () => usageLedger.persist(usageEvents),
+      rollbackStartedLedger: () => usageLedger.rollbackStarted(usageEvents),
       appendVisibleMessages: async () => {
-        const accepted = await commitWorkspaceCommand({
-          type: 'chat.append-messages',
-          conversationId,
-          messages: [userMessage, ...assistantMessages],
-          now: createdAt,
-          removeWelcome: true,
-        });
+        draftSaveOperationRef.current += 1;
+        const accepted = await commitWorkspaceCommand(
+          {
+            type: 'chat.append-messages',
+            conversationId,
+            messages: [userMessage, ...assistantMessages],
+            now: createdAt,
+            removeWelcome: true,
+          },
+          { durability: 'required' }
+        );
         if (!accepted) throw new Error('工作区已不可写，可见消息未提交，请求未发出。');
+        inputRef.current = '';
+        pendingAttachmentsRef.current = [];
         setInput('');
         setAttachments([]);
         shouldAutoScrollRef.current = true;
@@ -2786,15 +3187,22 @@ function ChatPaneImplementation({
       acquireLease: () => beginActiveRequest('回答生成', { mcpActive }),
       releaseLease: finishActiveRequest,
       persistStartedLedger: () => usageLedger.persist([usageEvent]),
+      rollbackStartedLedger: () => usageLedger.rollbackStarted([usageEvent]),
       appendVisibleMessages: async () => {
-        const accepted = await commitWorkspaceCommand({
-          type: 'chat.append-messages',
-          conversationId,
-          messages: [userMessage, assistantMessage],
-          now: userMessage.createdAt,
-          removeWelcome: true,
-        });
+        draftSaveOperationRef.current += 1;
+        const accepted = await commitWorkspaceCommand(
+          {
+            type: 'chat.append-messages',
+            conversationId,
+            messages: [userMessage, assistantMessage],
+            now: userMessage.createdAt,
+            removeWelcome: true,
+          },
+          { durability: 'required' }
+        );
         if (!accepted) throw new Error('工作区已不可写，可见消息未提交，请求未发出。');
+        inputRef.current = '';
+        pendingAttachmentsRef.current = [];
         setInput('');
         setAttachments([]);
         shouldAutoScrollRef.current = true;
@@ -2823,6 +3231,8 @@ function ChatPaneImplementation({
     setAttachMenuOpen(false);
     setReasoningMenuOpen(false);
     setParameterMenuOpen(false);
+    setSearchMenuOpen(false);
+    setMessageActionMenuId(null);
     setActiveVideoAttachmentId(null);
     projectsNavigation.closeDrawer();
     setModelPickerOpen(false);
@@ -2835,6 +3245,8 @@ function ChatPaneImplementation({
     setReasoningMenuOpen(false);
     setParameterMenuOpen(false);
     if (!settingsOpen) {
+      setSearchMenuOpen(false);
+      setMessageActionMenuId(null);
       setActiveVideoAttachmentId(null);
       projectsNavigation.closeDrawer();
       setModelPickerOpen(false);
@@ -2878,7 +3290,7 @@ function ChatPaneImplementation({
           keyboardVerticalOffset={0}
           style={styles.keyboard}
         >
-          {!settingsOpen ? (
+          {!settingsOpen && mainTab === 'chat' ? (
             <View style={styles.topBar}>
               <View style={styles.topHeaderRow}>
                 <View style={styles.topLeft}>
@@ -2887,24 +3299,37 @@ function ChatPaneImplementation({
                   </AnimatedPressable>
                   <AnimatedPressable
                     accessibilityRole="button"
-                    accessibilityLabel="选择模型"
+                    accessibilityLabel={needsConfiguration ? '开始配置服务商' : '选择模型'}
                     testID="model-picker-trigger"
-                    onPress={() => setModelPickerOpen(true)}
-                    style={styles.modelPickerPill}
+                    onPress={needsConfiguration ? onOpenSetup : () => setModelPickerOpen(true)}
+                    style={[
+                      styles.modelPickerPill,
+                      needsConfiguration && styles.modelPickerPillAttention,
+                    ]}
                   >
-                    <ModelAvatar
-                      modelId={activeModelId}
-                      providerName={activeProvider.name}
-                      size={16}
-                      containerSize={24}
-                    />
+                    {needsConfiguration ? (
+                      <Sparkles size={17} color={palette.accentText} strokeWidth={2.3} />
+                    ) : (
+                      <ModelAvatar
+                        modelId={activeModelId}
+                        providerName={activeProvider.name}
+                        size={16}
+                        containerSize={24}
+                      />
+                    )}
                     <Text numberOfLines={1} style={styles.modelPickerPillText}>
-                      {activeModelId ? formatCompactModelName(activeModelId, activeProvider.name) : '选择模型'}
+                      {needsConfiguration
+                        ? '开始配置'
+                        : activeModelId
+                          ? formatCompactModelName(activeModelId, activeProvider.name)
+                          : '选择模型'}
                       {activeReasoningEffort !== 'default' && activeModelTask === 'chat'
                         ? ` ${activeReasoningOptions.find((o) => o.key === activeReasoningEffort)?.label ?? reasoningEffortLabels[activeReasoningEffort]}`
                         : ''}
                     </Text>
-                    <ChevronDown size={16} color={palette.textSecondary} strokeWidth={2} />
+                    {!needsConfiguration ? (
+                      <ChevronDown size={16} color={palette.textSecondary} strokeWidth={2} />
+                    ) : null}
                   </AnimatedPressable>
                 </View>
                 <View style={styles.topHeaderActions}>
@@ -2959,10 +3384,13 @@ function ChatPaneImplementation({
           />
 
           <View
-            style={[styles.screenPane, settingsOpen && styles.screenPaneHidden]}
-            pointerEvents={settingsOpen ? 'none' : 'auto'}
-            accessibilityElementsHidden={settingsOpen}
-            importantForAccessibility={settingsOpen ? 'no-hide-descendants' : 'auto'}
+            style={[
+              styles.screenPane,
+              (settingsOpen || mainTab !== 'chat') && styles.screenPaneHidden,
+            ]}
+            pointerEvents={settingsOpen || mainTab !== 'chat' ? 'none' : 'auto'}
+            accessibilityElementsHidden={settingsOpen || mainTab !== 'chat'}
+            importantForAccessibility={settingsOpen || mainTab !== 'chat' ? 'no-hide-descendants' : 'auto'}
           >
             <ScreenFade>
               <ScrollView
@@ -3252,6 +3680,11 @@ function ChatPaneImplementation({
                 })}
               </ScrollView>
 
+              {persistenceSaveError ? (
+                <Text accessibilityLiveRegion="assertive" style={styles.notice}>
+                  本机工作区尚未保存：{persistenceSaveError}
+                </Text>
+              ) : null}
               {notice ? <Text accessibilityLiveRegion="polite" style={styles.notice}>{notice}</Text> : null}
 
               {attachments.length ? (
@@ -3705,7 +4138,52 @@ function ChatPaneImplementation({
               </View>
             </ScreenFade>
           </View>
+
+          {!settingsOpen && mainTab === 'projects' ? (
+            <WorkspaceHub
+              workspace={workspace}
+              onOpenConversation={(conversationId) => { void openHubConversation(conversationId); }}
+              onActivateProject={(projectId) => { void activateHubProject(projectId); }}
+              onOpenArtifact={openHubArtifact}
+              onOpenTasks={() => openSettingsDestination({ kind: 'tool', tool: 'media' })}
+              onUseTemplate={useHubTemplate}
+              onNewConversation={() => { void startHubConversation(); }}
+              onOpenSettings={toggleSettingsScreen}
+            />
+          ) : null}
+
+          {!settingsOpen && mainTab === 'artifacts' ? (
+            <WorkspaceWorkbench
+              visible
+              presentation="screen"
+              projectName="全部项目"
+              artifacts={workspace.artifacts}
+              knowledgeSources={workspace.knowledgeSources}
+              projects={workspace.projects}
+              initialArtifactId={workbenchArtifactId}
+              readOnly={workspaceReadOnly}
+              onClose={() => switchMainTab('projects')}
+              onCreateArtifact={createArtifact}
+              onSaveArtifact={saveArtifact}
+              onRestoreArtifactRevision={restoreArtifactRevision}
+              onDeleteArtifact={(artifactId) => { void removeArtifact(artifactId); }}
+              onExportArtifact={(artifactId) => { void exportArtifact(artifactId); }}
+              onSaveArtifactAsKnowledge={saveArtifactAsKnowledge}
+              onSetArtifactFavorite={(artifactId, favorite) => { void setArtifactFavorite(artifactId, favorite); }}
+              onSetArtifactTags={(artifactId, tags) => { void setArtifactTags(artifactId, tags); }}
+              onContinueConversation={(conversationId) => { void continueArtifactConversation(conversationId); }}
+              onCreateKnowledge={createKnowledge}
+              onSaveKnowledge={saveKnowledge}
+              onDeleteKnowledge={(sourceId) => { void removeKnowledge(sourceId); }}
+              onImportTextKnowledge={() => { void importTextKnowledge(); }}
+              onImportDocumentKnowledge={() => { void importDocumentKnowledge(); }}
+            />
+          ) : null}
         </KeyboardAvoidingView>
+
+        {!settingsOpen ? (
+          <MainWorkspaceTabBar active={mainTab} onChange={switchMainTab} />
+        ) : null}
 
         <McpApprovalModal
           visible={mcpApprovalView !== null}
@@ -3731,6 +4209,7 @@ function ChatPaneImplementation({
             projectName={activeProject.name}
             artifacts={activeProjectArtifacts}
             knowledgeSources={activeProjectKnowledgeSources}
+            projects={workspace.projects}
             initialArtifactId={workbenchArtifactId}
             readOnly={workspaceReadOnly}
             onClose={closeWorkspaceWorkbench}
@@ -3740,10 +4219,14 @@ function ChatPaneImplementation({
             onDeleteArtifact={(artifactId) => { void removeArtifact(artifactId); }}
             onExportArtifact={(artifactId) => { void exportArtifact(artifactId); }}
             onSaveArtifactAsKnowledge={saveArtifactAsKnowledge}
+            onSetArtifactFavorite={(artifactId, favorite) => { void setArtifactFavorite(artifactId, favorite); }}
+            onSetArtifactTags={(artifactId, tags) => { void setArtifactTags(artifactId, tags); }}
+            onContinueConversation={(conversationId) => { void continueArtifactConversation(conversationId); }}
             onCreateKnowledge={createKnowledge}
             onSaveKnowledge={saveKnowledge}
             onDeleteKnowledge={(sourceId) => { void removeKnowledge(sourceId); }}
             onImportTextKnowledge={() => { void importTextKnowledge(); }}
+            onImportDocumentKnowledge={() => { void importDocumentKnowledge(); }}
           />
         ) : null}
 
@@ -3772,6 +4255,18 @@ function ChatPaneImplementation({
             onToggleKnowledgeSource={toggleConversationKnowledgeSource}
           />
         ) : null}
+
+        <KnowledgeImportPreview
+          visible={knowledgeImportDraft !== null}
+          draft={knowledgeImportDraft}
+          busy={knowledgeImportBusy}
+          error={knowledgeImportError}
+          ocrBusySectionId={knowledgeImportOcrSectionId}
+          onChangeDraft={setKnowledgeImportDraft}
+          onRequestOcr={runKnowledgeImportOcr}
+          onConfirm={confirmKnowledgeImport}
+          onClose={() => { void closeKnowledgeImport(); }}
+        />
 
         <Toast message={toastMessage} />
       </SafeAreaView>

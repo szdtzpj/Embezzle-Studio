@@ -11,8 +11,8 @@ import { AppState } from 'react-native';
 
 import {
   useWorkspaceSelector,
-  useWorkspaceSession,
 } from '../../../../app/workspace/WorkspaceSessionProvider';
+import { useWorkspaceSession } from '../../../../app/workspace/internal/WorkspaceSessionContext';
 import type { ChatMessage } from '../../../../domain/types';
 import { createId } from '../../../../services/id';
 import { estimateMessageCost } from '../../../../services/usageAnalytics';
@@ -230,14 +230,18 @@ export function useChatVoice(options: {
         ) {
           return;
         }
-        usageEvent = options.usageLedger.createStarted({
+        const startedEvent = options.usageLedger.createStarted({
           id: createId('usage'),
           kind: 'audio-transcription',
           providerId: target.provider.id,
           modelId: target.modelId,
           createdAt: Date.now(),
         });
-        await options.usageLedger.persist([usageEvent]);
+        await options.usageLedger.persist([startedEvent]);
+        // Keep the event visible to the catch path only after persistence has
+        // succeeded; a failed ledger write must not be marked as a provider
+        // failure or completed as though a request had started.
+        usageEvent = startedEvent;
         options.notify('正在使用你的服务商账号转写录音…');
         const result = await audioAdapter.transcribe({
           provider: target.provider,
@@ -417,7 +421,7 @@ export function useChatVoice(options: {
     }
     let usageEvent = null as ReturnType<ChatUsageLedger['createStarted']> | null;
     try {
-      usageEvent = options.usageLedger.createStarted({
+      const startedEvent = options.usageLedger.createStarted({
         id: createId('usage'),
         kind: 'speech-generation',
         providerId: target.provider.id,
@@ -425,7 +429,9 @@ export function useChatVoice(options: {
         createdAt: Date.now(),
         messageId: message.id,
       });
-      await options.usageLedger.persist([usageEvent]);
+      await options.usageLedger.persist([startedEvent]);
+      // Do not expose an unpersisted attempt to the provider-error catch path.
+      usageEvent = startedEvent;
     } catch (error) {
       finishOperation(next);
       options.notify(

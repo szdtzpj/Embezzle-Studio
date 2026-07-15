@@ -681,23 +681,28 @@ function uniqueBoundedIds(ids: readonly string[] | undefined, limit: number): st
   return unique;
 }
 
-/**
- * Builds an entirely local, bounded index. The accepted type contains no
- * provider, credential, plugin, or network fields, and only known source
- * properties are projected into chunks.
- */
-export function buildProjectKnowledgeIndex(
+type ProjectKnowledgeIndexBuildOptions = {
+  selectedSourceIds?: readonly string[];
+};
+
+function buildKnowledgeIndex(
   sources: readonly ProjectKnowledgeSource[],
-  projectId: string,
-  options: { selectedSourceIds?: readonly string[] } = {}
+  indexProjectId: string,
+  projectIdFilter: string | undefined,
+  options: ProjectKnowledgeIndexBuildOptions
 ): ProjectKnowledgeIndex {
-  const validatedProjectId = validatedProjectIdentifier(projectId, '项目 ID');
   const selectedIds = uniqueBoundedIds(
     options.selectedSourceIds,
     MAX_PROJECT_KNOWLEDGE_SOURCES
   );
   const selectedOrder = new Map(selectedIds.map((id, index) => [id, index] as const));
-  const projectSources = sources.filter((source) => source.projectId === validatedProjectId);
+  const projectSources = sources.filter((source) => {
+    const sourceProjectId = source.projectId.trim();
+    return (
+      isLegacyWorkspaceId(sourceProjectId) &&
+      (projectIdFilter === undefined || sourceProjectId === projectIdFilter)
+    );
+  });
   const candidates = projectSources
     .sort((left, right) => {
       const leftSelected = selectedOrder.get(left.id);
@@ -735,7 +740,7 @@ export function buildProjectKnowledgeIndex(
     sourceChunks.forEach((content, chunkIndex) => {
       chunks.push({
         id: `${source.id}:chunk:${chunkIndex}`,
-        projectId: validatedProjectId,
+        projectId: source.projectId.trim(),
         sourceId: source.id,
         sourceKind: source.kind,
         sourceTitle: boundedCharacters(source.title, MAX_PROJECT_KNOWLEDGE_TITLE_CHARACTERS),
@@ -757,7 +762,29 @@ export function buildProjectKnowledgeIndex(
       truncated = true;
     }
   }
-  return { projectId: validatedProjectId, chunks, indexedSourceIds, truncated };
+  return { projectId: indexProjectId, chunks, indexedSourceIds, truncated };
+}
+
+/**
+ * Builds an entirely local, bounded index for one project. The accepted type
+ * contains no provider, credential, plugin, or network fields, and only known
+ * source properties are projected into chunks.
+ */
+export function buildProjectKnowledgeIndex(
+  sources: readonly ProjectKnowledgeSource[],
+  projectId: string,
+  options: ProjectKnowledgeIndexBuildOptions = {}
+): ProjectKnowledgeIndex {
+  const validatedProjectId = validatedProjectIdentifier(projectId, '项目 ID');
+  return buildKnowledgeIndex(sources, validatedProjectId, validatedProjectId, options);
+}
+
+/** Builds the same bounded local index across every valid workspace project. */
+export function buildWorkspaceKnowledgeIndex(
+  sources: readonly ProjectKnowledgeSource[],
+  options: ProjectKnowledgeIndexBuildOptions = {}
+): ProjectKnowledgeIndex {
+  return buildKnowledgeIndex(sources, 'workspace', undefined, options);
 }
 
 function queryTerms(normalizedQuery: string): string[] {

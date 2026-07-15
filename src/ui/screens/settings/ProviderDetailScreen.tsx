@@ -27,6 +27,7 @@ import { SettingsSelect } from '../../components/settings/SettingsSelect';
 import { useKelivoTheme, type KelivoTheme } from '../../theme';
 import type {
   Capability,
+  ExperienceMode,
   ModelInfo,
   ModelTask,
   ProviderKind,
@@ -53,6 +54,7 @@ const providerKindOptions: Array<{ key: ProviderKind; label: string }> = [
 export interface ProviderDetailScreenProps {
   readOnly: boolean;
   provider: ProviderProfile;
+  experienceMode: ExperienceMode;
   addedModelCount: number;
   candidateModelCount: number;
   refreshingModels: boolean;
@@ -107,6 +109,7 @@ export interface ProviderModelsScreenProps {
 export function ProviderDetailScreen({
   readOnly,
   provider,
+  experienceMode,
   addedModelCount,
   candidateModelCount,
   refreshingModels,
@@ -185,6 +188,7 @@ export function ProviderDetailScreen({
       <ConfigTab
         key={provider.id}
         readOnly={readOnly}
+        experienceMode={experienceMode}
         showKey={showKey}
         nameDraft={nameDraft}
         kindDraft={kindDraft}
@@ -208,6 +212,7 @@ export function ProviderDetailScreen({
 
 function ConfigTab({
   readOnly,
+  experienceMode,
   showKey,
   nameDraft,
   kindDraft,
@@ -226,6 +231,7 @@ function ConfigTab({
   onRefreshModels,
 }: {
   readOnly: boolean;
+  experienceMode: ExperienceMode;
   showKey: boolean;
   nameDraft: string;
   kindDraft: ProviderKind;
@@ -245,6 +251,8 @@ function ConfigTab({
 }) {
   const theme = useKelivoTheme();
   const styles = getStyles(theme);
+  const showAdvancedEndpoint =
+    experienceMode === 'advanced' || kindDraft === 'custom' || kindDraft === 'new-api-relay';
 
   return (
     <ScrollView
@@ -258,7 +266,7 @@ function ConfigTab({
           <View style={styles.cardHeader}>
             <Text style={styles.sectionLabel}>服务商配置向导</Text>
             <Text style={styles.badgeText}>
-              {endpointInspection.valid ? '本地校验通过' : '等待修正'}
+              {endpointInspection.valid ? '地址格式可用' : '等待修正'}
             </Text>
           </View>
           <Text style={styles.inputHint}>
@@ -288,18 +296,26 @@ function ConfigTab({
             />
           </View>
 
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Base URL</Text>
-            <TextInput
-              autoCapitalize="none"
-              editable={!readOnly}
-              value={baseUrlDraft}
-              onChangeText={(baseUrl) => onChangeBindingDraft({ baseUrl })}
-              style={styles.input}
-              placeholder="https://api.example.com/v1"
-              placeholderTextColor={theme.colors.textTertiary}
-            />
-          </View>
+          {showAdvancedEndpoint ? (
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Base URL</Text>
+              <TextInput
+                autoCapitalize="none"
+                editable={!readOnly}
+                value={baseUrlDraft}
+                onChangeText={(baseUrl) => onChangeBindingDraft({ baseUrl })}
+                style={styles.input}
+                placeholder="https://api.example.com/v1"
+                placeholderTextColor={theme.colors.textTertiary}
+              />
+            </View>
+          ) : (
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>服务地址</Text>
+              <Text selectable style={styles.inputHint}>{baseUrlDraft}</Text>
+              <Text style={styles.inputHint}>简单模式使用已审核的预设地址；切换到高级模式后可编辑 Endpoint。</Text>
+            </View>
+          )}
 
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>API Key</Text>
@@ -355,7 +371,7 @@ function ConfigTab({
             onPress={onSaveProviderDraft}
             style={[styles.secondaryButton, readOnly && styles.buttonDisabled]}
           >
-            <Text style={styles.secondaryButtonText}>保存并绑定此端点</Text>
+            <Text style={styles.secondaryButtonText}>保存服务商配置</Text>
           </AnimatedPressable>
 
           <AnimatedPressable

@@ -52,6 +52,7 @@ export function ModelManageRow({
           <Text style={styles.name} numberOfLines={1}>
             {model.name ?? model.id}
           </Text>
+          <Text style={styles.meta} numberOfLines={1}>{model.id} · 费用由服务商账户结算</Text>
           <View style={styles.badgeRow}>
             {active ? (
               <View style={styles.activeBadge}>
@@ -118,6 +119,11 @@ function createStyles(theme: KelivoTheme) {
     flex: 1,
     gap: 5,
   },
+  meta: {
+    color: theme.colors.textSecondary,
+    fontSize: 11,
+    lineHeight: 16,
+  },
   name: {
     fontSize: 15,
     fontWeight: '600',
@@ -151,9 +157,9 @@ function createStyles(theme: KelivoTheme) {
     color: theme.colors.textOnPrimary,
   },
   action: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: theme.colors.surfaceSunken,

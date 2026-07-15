@@ -27,7 +27,7 @@ export function CandidateModelRow({ model, providerName, added, disabled = false
           {model.name ?? model.id}
         </Text>
         <Text numberOfLines={1} style={styles.meta}>
-          {model.id}
+          {model.id} · 费用由服务商账户结算
         </Text>
         <View style={styles.badgeRow}>
           {tags.map((tag) => (
@@ -104,7 +104,7 @@ function createStyles(theme: KelivoTheme) {
   },
   addButton: {
     minWidth: 48,
-    height: 36,
+    minHeight: 44,
     borderRadius: theme.radius.pill,
     backgroundColor: theme.colors.accent,
     alignItems: 'center',

@@ -18,6 +18,7 @@ describe('ChatOrchestrator', () => {
       acquireLease: () => lease,
       releaseLease: () => undefined,
       persistStartedLedger: () => undefined,
+      rollbackStartedLedger: () => undefined,
       appendVisibleMessages: () => undefined,
     });
 
@@ -52,6 +53,7 @@ describe('ChatOrchestrator', () => {
       persistStartedLedger: () => {
         throw new Error('disk full');
       },
+      rollbackStartedLedger: () => undefined,
       appendVisibleMessages: () => {
         appended = true;
       },
@@ -66,6 +68,7 @@ describe('ChatOrchestrator', () => {
   it('releases the lease when the awaited visible-message commit is rejected', async () => {
     const orchestrator = new ChatOrchestrator();
     let released = false;
+    let rolledBack = false;
 
     const result = await orchestrator.start({
       intent: { type: 'send' },
@@ -78,6 +81,9 @@ describe('ChatOrchestrator', () => {
         released = true;
       },
       persistStartedLedger: () => undefined,
+      rollbackStartedLedger: () => {
+        rolledBack = true;
+      },
       appendVisibleMessages: async () => {
         await Promise.resolve();
         throw new Error('workspace became read-only');
@@ -88,6 +94,39 @@ describe('ChatOrchestrator', () => {
       ok: false,
       stage: 'append',
       error: { message: 'workspace became read-only' },
+    });
+    expect(released).toBe(true);
+    expect(rolledBack).toBe(true);
+  });
+
+  it('reports a failed ledger compensation without hiding the append failure', async () => {
+    const orchestrator = new ChatOrchestrator();
+    let released = false;
+
+    const result = await orchestrator.start({
+      intent: { type: 'send' },
+      readRevision: () => 3,
+      preflight: () => undefined,
+      authorize: () => true,
+      revalidate: () => true,
+      acquireLease: () => ({ id: 'lease' }),
+      releaseLease: () => {
+        released = true;
+      },
+      persistStartedLedger: () => undefined,
+      rollbackStartedLedger: () => {
+        throw new Error('workspace is replacing');
+      },
+      appendVisibleMessages: () => {
+        throw new Error('append rejected');
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      stage: 'append',
+      error: { message: 'append rejected' },
+      rollbackError: { message: 'workspace is replacing' },
     });
     expect(released).toBe(true);
   });
@@ -107,6 +146,7 @@ describe('ChatOrchestrator', () => {
       },
       releaseLease: () => undefined,
       persistStartedLedger: () => undefined,
+      rollbackStartedLedger: () => undefined,
       appendVisibleMessages: () => undefined,
     });
 

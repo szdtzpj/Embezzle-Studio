@@ -21,7 +21,14 @@ export interface GenerationTaskListItem {
 }
 
 const completedStatuses = new Set(['complete', 'completed', 'done', 'success', 'succeeded']);
-const failedStatuses = new Set(['cancelled', 'canceled', 'error', 'expired', 'failed']);
+const failedStatuses = new Set([
+  'blocked',
+  'cancelled',
+  'canceled',
+  'error',
+  'expired',
+  'failed',
+]);
 
 function normalizedProviderStatus(status: string | undefined): string {
   return status?.trim().toLowerCase().replace(/[\s-]+/g, '_') ?? '';

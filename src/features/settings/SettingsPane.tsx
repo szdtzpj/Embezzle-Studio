@@ -1,5 +1,5 @@
 import React, { type ReactElement } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { Platform, StyleSheet, View } from 'react-native';
 
 import {
   SettingsScreen,
@@ -46,7 +46,10 @@ function MountedSettingsPane(props: {
 
   return (
     <View
-      style={[styles.pane, !props.isOpen && styles.hidden]}
+      style={[
+        styles.pane,
+        !props.isOpen && (Platform.OS === 'web' ? styles.webHidden : styles.nativeHidden),
+      ]}
       pointerEvents={props.isOpen ? 'auto' : 'none'}
       accessibilityElementsHidden={!props.isOpen}
       importantForAccessibility={props.isOpen ? 'auto' : 'no-hide-descendants'}
@@ -58,5 +61,9 @@ function MountedSettingsPane(props: {
 
 const styles = StyleSheet.create({
   pane: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, zIndex: 20 },
-  hidden: { opacity: 0 },
+  // Keep the pane mounted so drafts/navigation survive toggles. On web, display:none
+  // also removes hidden controls from layout and the browser tab order; native keeps
+  // the existing transparent overlay for cheaper remount-free transitions.
+  webHidden: { display: 'none' },
+  nativeHidden: { opacity: 0 },
 });

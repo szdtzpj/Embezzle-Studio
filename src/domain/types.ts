@@ -41,6 +41,71 @@ export type ReasoningEffort =
 
 export type ColorMode = 'system' | 'light' | 'dark';
 
+export type ExperienceMode = 'simple' | 'advanced';
+
+export type OnboardingStep =
+  | 'provider'
+  | 'credentials'
+  | 'connection'
+  | 'models'
+  | 'sample';
+
+export interface OnboardingState {
+  status: 'pending' | 'completed' | 'dismissed';
+  lastStep: OnboardingStep;
+  completedAt?: number;
+  dismissedAt?: number;
+}
+
+export interface ConversationDraft {
+  conversationId: string;
+  text: string;
+  updatedAt: number;
+  /** Persisted, app-owned attachments waiting in the composer. */
+  attachments?: MediaAttachment[];
+}
+
+export interface BackupPreferences {
+  reminderIntervalDays: 0 | 7 | 14 | 30;
+  lastExportedAt?: number;
+  lastVerifiedAt?: number;
+  snoozedUntil?: number;
+}
+
+export type CloudSyncProviderKind = 'webdav' | 's3';
+export type CloudSyncStatus = 'idle' | 'syncing' | 'synced' | 'conflict' | 'error';
+
+export interface CloudSyncConflict {
+  id: string;
+  detectedAt: number;
+  localDigest: string;
+  remoteDigest: string;
+  baseDigest?: string;
+  localObjectKey?: string;
+  remoteObjectKey: string;
+  remoteUpdatedAt?: number;
+}
+
+/**
+ * Non-secret cloud-sync configuration. Usernames, passwords, access keys and
+ * the backup encryption password live in SecureStore (or tab-session memory on Web).
+ */
+export interface CloudSyncSettings {
+  enabled: boolean;
+  provider: CloudSyncProviderKind;
+  endpoint: string;
+  remotePath: string;
+  bucket?: string;
+  region?: string;
+  deviceId: string;
+  lastStatus: CloudSyncStatus;
+  lastSyncAt?: number;
+  lastSyncedDigest?: string;
+  lastRemoteDigest?: string;
+  lastError?: string;
+  conflicts: CloudSyncConflict[];
+}
+
 export type ModelTask =
   | 'chat'
   | 'image-generation'
@@ -136,6 +201,8 @@ export interface WorkspaceArtifact {
   activeRevisionId: string;
   sourceConversationId?: string;
   sourceMessageId?: string;
+  favorite?: boolean;
+  tags?: string[];
   createdAt: number;
   updatedAt: number;
 }
@@ -262,8 +329,9 @@ export interface WebSearchSettings {
 
 /**
  * User-supplied third-party web search, separate from provider-hosted Responses search.
- * Free/local kinds (bing, duckduckgo) work without an API key. Firecrawl cloud
- * requires a key; an explicitly configured self-hosted endpoint may not.
+ * Bing, DuckDuckGo, and Firecrawl cloud can start without an API key.
+ * Firecrawl accepts an optional key for higher limits, and self-hosted endpoints
+ * may likewise be configured without one.
  */
 export type ExternalSearchProviderKind =
   | 'tavily'
@@ -306,6 +374,10 @@ export interface GenerationTaskInfo {
   taskId: string;
   kind: 'video';
   status?: string;
+  lastCheckedAt?: number;
+  nextCheckAt?: number;
+  attemptCount?: number;
+  notifiedStatus?: 'completed' | 'failed';
 }
 
 export interface McpActivitySummary {
@@ -439,6 +511,11 @@ export interface AppWorkspace {
   webSearch: WebSearchSettings;
   externalSearch: ExternalSearchSettings;
   voice: VoiceSettings;
+  experienceMode: ExperienceMode;
+  onboarding: OnboardingState;
+  composerDrafts: ConversationDraft[];
+  backupPreferences: BackupPreferences;
+  cloudSync: CloudSyncSettings;
 }
 
 export interface ChatCompletionResult {

@@ -17,6 +17,7 @@ import {
   createWorkspaceBackupEnvelope,
   exportEncryptedWorkspaceBackup,
   importEncryptedWorkspaceBackup,
+  mergeValidatedWorkspaceBackupEnvelope,
   sanitizeWorkspaceForBackup,
   validateWorkspaceBackupEnvelope,
   type WorkspaceBackupEnvelope,
@@ -467,6 +468,32 @@ describe('workspace backup sanitization', () => {
     expect(safe.plugins[1].allowedTools).toEqual(['search', 'fetch']);
   });
 
+  it('deep-copies device-local draft attachments without carrying base64 bytes', () => {
+    const workspace = createDefaultWorkspace();
+    workspace.composerDrafts = [{
+      conversationId: workspace.activeConversationId,
+      text: '',
+      updatedAt: 1,
+      attachments: [{
+        id: 'draft-image',
+        kind: 'image',
+        uri: 'file:///documents/draft.png',
+        name: 'draft.png',
+        size: 8,
+        base64: 'secret-draft-bytes',
+      }],
+    }];
+
+    const imported = createWorkspaceBackupEnvelope(createDefaultWorkspace());
+    const merged = mergeValidatedWorkspaceBackupEnvelope(imported, workspace);
+
+    expect(merged.composerDrafts[0].attachments?.[0]).toMatchObject({
+      uri: 'file:///documents/draft.png',
+      base64: null,
+    });
+    expect(merged.composerDrafts[0].attachments).not.toBe(workspace.composerDrafts[0].attachments);
+  });
+
   it('rejects a provider endpoint with structured secrets before randomness or encryption', async () => {
     const workspace = createDefaultWorkspace();
     workspace.providers[0] = providerFrom(workspace.providers[0], {
@@ -515,6 +542,21 @@ describe('workspace backup sanitization', () => {
 });
 
 describe('encrypted workspace backup round trip', () => {
+  it('merges an already validated envelope without another password-based decrypt', () => {
+    const source = populatedWorkspace();
+    const current = currentWorkspaceWithLocalSecrets();
+    const envelope = createWorkspaceBackupEnvelope(source, 1_700_000_000_000);
+    const imported = mergeValidatedWorkspaceBackupEnvelope(envelope, current);
+
+    expect(imported.providers.find((item) => item.id === 'volcengine-ark')?.apiKey).toBe(
+      'CURRENT-DEVICE-API-KEY'
+    );
+    expect(imported.plugins.find((item) => item.id === 'plugin-shared')).not.toHaveProperty(
+      'authorization'
+    );
+    expect(imported.messages[0]).not.toHaveProperty('attachments');
+  });
+
   it('uses expo-crypto as the default random source for a 32-byte salt and 24-byte nonce', async () => {
     cryptoMocks.getRandomBytesAsync.mockClear();
     await exportEncryptedWorkspaceBackup(createDefaultWorkspace(), password, {

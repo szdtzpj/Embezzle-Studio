@@ -175,8 +175,8 @@ export function createSettingsToolsStyles(theme: KelivoTheme) {
     toolSegmentText: { color: colors.textSecondary, fontSize: 12, fontWeight: '700' },
     toolSegmentTextActive: { color: colors.accentText },
     messageErrorText: { color: colors.error, fontSize: 12, lineHeight: 18 },
-    updateActionRow: { flexDirection: 'row', gap: 10 },
-    updateActionButton: { flex: 1, minWidth: 0, height: 40 },
+    updateActionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+    updateActionButton: { flexGrow: 1, minWidth: 132, minHeight: 44 },
     costGuardTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
     costGuardTodayRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   });

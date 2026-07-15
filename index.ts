@@ -2,7 +2,13 @@
 import 'react-native-gesture-handler';
 import { registerRootComponent } from 'expo';
 
+// TaskManager definitions must execute in bundle global scope so Android can
+// start the worker without mounting React views.
+import './src/services/generationTaskBackground';
+import { installGenerationTaskNotificationHandler } from './src/services/generationTaskNotifications';
 import App from './App';
+
+installGenerationTaskNotificationHandler();
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);
 // It also ensures that whether you load the app in Expo Go or in a native build,

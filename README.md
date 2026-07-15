@@ -56,7 +56,9 @@
 - 安全对话框：确认与提示请求按 FIFO 顺序处理，避免并发请求覆盖前一个未完成 Promise；长提示内容可在小屏幕上滚动，键盘弹出时仍可到达操作按钮。浅色/深色主题分别提供可读的警告、菜单、编辑器、媒体遮罩和工作台差异颜色。
 - 本地项目工作区：项目、项目指令、默认模型和会话归属都保存在本机；删除项目时会明确迁移其中会话，不依赖 Embezzle Studio 的同步服务。新建项目可从研究分析、写作编辑、软件开发、学习整理四个纯本地预设开始，预设只填入可审阅的名称与指令，不调用 API 或 Embezzle Studio 服务器。
 - 本地成果工作台：`1.3.0` 可把消息保存为项目成果，或新建 Markdown/纯文本/代码/JSON/HTML 成果；编辑会追加有界版本，旧版本恢复会生成新版本而不破坏后续历史，并支持有界行级差异和当前版本导出。HTML 以 `.html.txt`/`text/plain` 惰性导出，不执行脚本、代码或网络预览。
-- 项目资料与本地检索：可手写资料、从消息/成果保存快照，或导入受支持的纯文本/代码文件；项目内检索和分块均在本机有界完成。当前不解析 PDF/Word/Excel/PowerPoint/OpenDocument，也不声称这是向量 RAG、自动记忆或云端知识库。
+- 项目资料与本地检索：可手写资料、从消息/成果保存快照，或导入纯文本/代码、HTML、DOCX、XLSX、PPTX，以及 Android 原生 PDF 文本层；扫描 PDF 和图片可在用户明确确认后使用本机 ML Kit OCR。Web 或缺少原生模块时只保留待 OCR 草稿，不会自动调用服务商；项目内检索和分块始终在本机有界完成，也不声称这是向量 RAG、自动记忆或云端知识库。
+- Android 系统分享与后台任务：可从系统分享文字、链接、图片、视频、PDF 和 Office 文件，先预览/解析再保存到当前对话；纯文字/链接分享还可选择项目资料或成果，含附件的分享不会被静默丢弃或错误写入文字库。成功写入后才清除分享 payload。长时间媒体任务使用系统允许的后台尽力查询、持久 outbox 和本地完成/失败通知，不依赖 Embezzle Studio 服务器或推送服务。
+- 用户自有云同步：可选使用用户自己的 WebDAV 或 S3 兼容存储同步加密工作区快照；媒体、API Key、同步凭据和本机费用账本不会上传。ETag/CAS 不可用或发生冲突时 fail-closed，必须明确选择保留本机或远端版本。
 - 显式上下文控制：资料只在当前会话明确勾选后才可注入聊天请求；检查器展示保守文本 Token 估计、实际纳入/裁剪/排除/置顶消息、附件不确定性与资料纳入/省略状态。比较模型共享最小窗口的一份上下文；图片/视频生成只发送最新提示词。压缩按钮只生成待审阅草稿，不自动扣费。
 - 对话记录与全局搜索：本地保存历史会话，支持置顶、改名、分享、删除，以及对项目、模板、会话和消息做有长度/文档数/结果数上限的字面量全局搜索；搜索内容不会发送给服务商。
 - 消息操作与对话分支：支持原生/网页复制、分享、停止生成、保留流式部分内容、重新生成、编辑、按因果分支删除，以及从任意消息克隆本地对话分支。分支重新生成消息/对比组 ID，并用 canonical `originMessageId` 在用量分析和任务中心去重，避免把同一历史事件重复累计。
@@ -69,11 +71,13 @@
 
 ## 仍在完善
 
-当前稳定 Latest 是 [`v1.7.0`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.7.0) / Android versionCode 13。正式安装包来自受保护 Actions 构建与生产签名流程，并通过 immutable Release、GitHub attestation、SHA-256 校验文件及公共 Pages 下载闭环复核。
+当前稳定 Latest 仍是 [`v1.7.0`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.7.0) / Android versionCode 13。正式安装包来自受保护 Actions 构建与生产签名流程，并通过 immutable Release、GitHub attestation、SHA-256 校验文件及公共 Pages 下载闭环复核。
 
 `1.7.0` 的官方协议核对、安全修正、本机质量门和候选 APK 证据见 [`1.7.0` 发布源续作断点](./docs/CONTINUATION_CHECKPOINT_2026-07-13_V1.7.md)。
 
-Embezzle Studio 不购买、转售、补贴或代理模型、搜索、语音、媒体或 MCP 能力，也不运行生产 API、MCP 网关、审批服务器、汇率服务、云同步、遥测后端或任务 worker。所有服务商与工具调用及费用都由用户配置的账号承担；本地费用护栏不做汇率换算，且其估算/尝试账本不能替代服务商账单。
+当前工作树包含尚未发布的 `1.8.0` / Android versionCode 14 P0/P1 开发版本：工作区 v7 迁移、首次配置向导、项目/成果工作台、文档导入与显式 OCR、Android 后台媒体任务、系统分享入口，以及用户自有 WebDAV/S3 加密同步。它已经过本机源码与离线协议验证，但尚未创建 tag、GitHub Release 或 Actions 正式 APK；不要把本机构建包当作公开稳定版。
+
+Embezzle Studio 不购买、转售、补贴或代理模型、搜索、语音、媒体或 MCP 能力，也不运行生产 API、MCP 网关、审批服务器、汇率服务、遥测后端或任务 worker。应用没有自有同步服务器；若启用同步，连接的是用户自己的 WebDAV/S3 存储，存储费用与权限由用户承担。所有服务商与工具调用及费用都由用户配置的账号承担；本地费用护栏不做汇率换算，且其估算/尝试账本不能替代服务商账单。
 
 - 对话视频附件目前只为百炼兼容模式实现 `video_url` 传输；其他服务商仍需各自的上传、转码或引用协议适配。
 - 用户已在一台 Android 真机上确认键盘避让、Seedance 预览/下载、图片预览尺寸和设置/聊天切换的主路径解决；更多机型、系统目录取消/失败/空间不足、远程媒体过期和长时间压力矩阵仍需验收。Web 回归不能替代这些扩展原生验证。
@@ -142,7 +146,7 @@ Pull Request 和 `main` 分支推送会触发 `.github/workflows/quality.yml`。
 
 干净 prebuild、`clean assembleRelease` 与正式证书本机签名通过。候选 APK 位于 `D:\EmbezzleStudio-Releases\v1.3.0-candidate\Embezzle-Studio-v1.3.0-candidate-release.apk`，97,448,407 字节，SHA-256 `c95dafe6e6eb77f3a1a4c7504c6ad05c27218b45972de2e247db264ec4c777d4`。包名/版本/code 为 `com.szdtzpj.embezzlestudio` / 1.3.0 / 9，min/target 24/36，`allowBackup=false`，有意 `RECORD_AUDIO`，无 CAMERA/`SYSTEM_ALERT_WINDOW`；只有一个预期正式签名者，证书 SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`，v2/v3 和 zipalign 通过。
 
-PR [#13](https://github.com/szdtzpj/Embezzle-Studio/pull/13) 已合并为精确发布提交 `ea9409f1ea3540520eaf469a0c777fe1bc87e7f8`；PR Quality [`29176034579`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29176034579)、main Quality [`29176125303`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29176125303)、初始 Pages [`29176125307`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29176125307)、production Android [`29176245049`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29176245049) 和发布后 Pages [`29176763721`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29176763721) 均成功，tag `v1.3.0` 精确指向该提交。正式 Release 是 Latest、immutable、非 prerelease，Release attestation 与 3 个 asset attestation 均通过。
+PR [#13](https://github.com/szdtzpj/Embezzle-Studio/pull/13) 已合并为精确发布提交 `ea9409f1ea3540520eaf469a0c777fe1bc87e7f8`；PR Quality [`29176034579`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29176034579)、main Quality [`29176125303`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29176125303)、初始 Pages [`29176125307`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29176125307)、production Android [`29176245049`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29176245049) 和发布后 Pages [`29176763721`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29176763721) 均成功，tag `v1.3.0` 精确指向该提交。正式 Release 发布时曾为 Latest，现为历史版本；它仍为 immutable、非 prerelease，Release attestation 与 3 个 asset attestation 均通过。
 
 Actions 正式 `Embezzle-Studio-v1.3.0-release.apk` 为 97,448,407 字节，SHA-256 `b5e48387e62d99512ae18a2c4f4a80ddf482c3c1b489768e924845e0adceb7fe`；它与同尺寸但 SHA-256 为 `c95dafe6e6eb77f3a1a4c7504c6ad05c27218b45972de2e247db264ec4c777d4` 的本机候选不是同一字节。正式 APK 的包名/版本/code 为 `com.szdtzpj.embezzlestudio` / 1.3.0 / 9，min/target 24/36，`allowBackup=false`，有意 `RECORD_AUDIO`，无 CAMERA/`SYSTEM_ALERT_WINDOW`，单一预期 signer、证书 SHA-256 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`，v2/v3 与 zipalign 通过。3 个正式资产另存于 `D:\EmbezzleStudio-Releases\v1.3.0`。
 
@@ -150,7 +154,7 @@ Actions 正式 `Embezzle-Studio-v1.3.0-release.apk` 为 97,448,407 字节，SHA-
 
 `1.4.0` / code 10 的本机候选门已通过：41 个测试文件 / 749 个测试、TypeScript/ESLint、3,264-module Web export（7.4 MB）、Expo Doctor 20/20、390×844 本地拦截浏览器 MCP 批准/拒绝/取消、YAML/Bash/Action-SHA/diff/敏感边界、干净 Android prebuild/未签名 Release、正式证书本机签名及 aapt/apksigner/zipalign 均通过。本机候选 `D:\EmbezzleStudio-Releases\v1.4.0-candidate\Embezzle-Studio-v1.4.0-candidate-release.apk` 为 97,518,039 字节，SHA-256 `683eb6e98efec3e301594e59c627b3698b410c2a58f841b3c3c3642b1a2a20ed`；它是发布前证据，不是 GitHub 正式资产。
 
-PR [#15](https://github.com/szdtzpj/Embezzle-Studio/pull/15) 的精确 head 为 `1176df7964712078d58c5eade50d781a8245d52e`，合并提交、远端 `main` 与 annotated tag `v1.4.0` 的 peeled commit 均为 `f83cea7fae36fcbaa0bff361fac2113c3edfb3d7`。PR Quality [`29182946741`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29182946741)、`main` Quality [`29183001171`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183001171)、发布前 Pages [`29183001176`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183001176)、production Android [`29183097617`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183097617) 和发布后 Pages [`29183525831`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183525831) 均成功。正式 Release 是 stable Latest、immutable、非 prerelease，包含精确 3 个资产；Release attestation 与全部 3 个 asset attestation 均通过。
+PR [#15](https://github.com/szdtzpj/Embezzle-Studio/pull/15) 的精确 head 为 `1176df7964712078d58c5eade50d781a8245d52e`，合并提交、远端 `main` 与 annotated tag `v1.4.0` 的 peeled commit 均为 `f83cea7fae36fcbaa0bff361fac2113c3edfb3d7`。PR Quality [`29182946741`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29182946741)、`main` Quality [`29183001171`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183001171)、发布前 Pages [`29183001176`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183001176)、production Android [`29183097617`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183097617) 和发布后 Pages [`29183525831`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29183525831) 均成功。正式 Release 发布时曾为 stable Latest，现为历史版本；它仍为 immutable、非 prerelease，包含精确 3 个资产，Release attestation 与全部 3 个 asset attestation 均通过。
 
 Actions 正式 `Embezzle-Studio-v1.4.0-release.apk` 为 97,518,039 字节，SHA-256 `c650e142e221821f8da91e37fefd76dad0e7ad94c0348a3d7749b69f14fc67eb`，与同尺寸但 SHA-256 为 `683eb6e98efec3e301594e59c627b3698b410c2a58f841b3c3c3642b1a2a20ed` 的本机候选不是同一字节。正式 APK 的包名/版本/code 为 `com.szdtzpj.embezzlestudio` / 1.4.0 / 10，min/target 24/36，`allowBackup=false`，有意包含 `RECORD_AUDIO`，无 CAMERA/`SYSTEM_ALERT_WINDOW`；它只有一个 signer，证书 SHA-256 为 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`，v2/v3 与 zipalign 均通过。正式三项资产保存在 `D:\EmbezzleStudio-Releases\v1.4.0`。
 
@@ -162,7 +166,7 @@ Actions 正式 `Embezzle-Studio-v1.4.0-release.apk` 为 97,518,039 字节，SHA-
 
 最终工作树已重新完成干净 Expo prebuild、`clean assembleRelease --no-daemon` 与本机正式证书签名。未签名输入为 97,461,244 字节；最终候选位于 `D:\EmbezzleStudio-Releases\v1.5.0-candidate\Embezzle-Studio-v1.5.0-candidate-release.apk`，大小 97,595,863 字节，SHA-256 `2456bdb7de0405f283a1a4fd0fffd0994dbcb37dd06e502e2b4aae6cbf90941f`。`aapt`/Manifest 复核 `com.szdtzpj.embezzlestudio` / 1.5.0 / code 11、min/target 24/36、`allowBackup=false`、`adjustResize` 与有意 `RECORD_AUDIO`；CAMERA、`SYSTEM_ALERT_WINDOW`、`REQUEST_INSTALL_PACKAGES` 缺席。`apksigner`/zipalign 证明只有一个证书 SHA-256 为 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02` 的 signer，v2/v3 与对齐均通过。
 
-PR [#17](https://github.com/szdtzpj/Embezzle-Studio/pull/17) 的精确 head 为 `a5475a11ca5947ea255865f174f5ac0569d8fb07`，合并提交、发布提交与 annotated tag `v1.5.0` 的 peeled commit 均为 `29409b13cc1599ba543f937c9ba5fc8b85cc46f7`。PR Quality [`29195544004`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29195544004)、`main` Quality [`29195629389`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29195629389)、初始 Pages [`29195629374`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29195629374)、production Android [`29195736374`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29195736374) 和发布后 Pages [`29196365268`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29196365268) 均成功。正式 Release 是 stable Latest、immutable、非 prerelease，包含精确 3 个资产；Release attestation 与全部 3 个 asset attestation 均通过。
+PR [#17](https://github.com/szdtzpj/Embezzle-Studio/pull/17) 的精确 head 为 `a5475a11ca5947ea255865f174f5ac0569d8fb07`，合并提交、发布提交与 annotated tag `v1.5.0` 的 peeled commit 均为 `29409b13cc1599ba543f937c9ba5fc8b85cc46f7`。PR Quality [`29195544004`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29195544004)、`main` Quality [`29195629389`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29195629389)、初始 Pages [`29195629374`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29195629374)、production Android [`29195736374`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29195736374) 和发布后 Pages [`29196365268`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29196365268) 均成功。正式 Release 发布时曾为 stable Latest，现为历史版本；它仍为 immutable、非 prerelease，包含精确 3 个资产，Release attestation 与全部 3 个 asset attestation 均通过。
 
 Actions 正式 `Embezzle-Studio-v1.5.0-release.apk` 为 97,595,863 字节，SHA-256 `bc1a3c434d00b5f4d99be29f4f1b5327d85e2efe9f7bd98286c8ce7b5614f622`，与同尺寸但 SHA-256 为 `2456bdb7de0405f283a1a4fd0fffd0994dbcb37dd06e502e2b4aae6cbf90941f` 的本机候选不是同一字节；正式三项资产保存在 `D:\EmbezzleStudio-Releases\v1.5.0`。`aapt`/Manifest 复核正式 APK 的包名/版本/code 为 `com.szdtzpj.embezzlestudio` / 1.5.0 / 11、min/target 24/36、`allowBackup=false`、`adjustResize` 与有意 `RECORD_AUDIO`，且无 CAMERA、`SYSTEM_ALERT_WINDOW`、`REQUEST_INSTALL_PACKAGES`；`apksigner`/zipalign 证明只有一个预期 signer，证书 SHA-256 为 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`，v2/v3 与对齐均通过。
 
@@ -172,7 +176,7 @@ Actions 正式 `Embezzle-Studio-v1.5.0-release.apk` 为 97,595,863 字节，SHA-
 
 Release 模式的未签名构建完成后，本机使用既有生产证书签出候选 `D:\EmbezzleStudio-Releases\v1.6.0-candidate\Embezzle-Studio-v1.6.0-candidate-release.apk`。它为 97,480,976 字节，SHA-256 `7C8BC0B8EA2C6E088FD7214398D4918A6787DBB52D17DB09335810A639055DFD`，包名 `com.szdtzpj.embezzlestudio`、版本 `1.6.0` / code 12；签名方案 v2/v3 通过，生产证书 SHA-256 为 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`。这是本地验收候选，不是 GitHub Release 或公开下载资产。
 
-PR [#19](https://github.com/szdtzpj/Embezzle-Studio/pull/19) 已合并；合并提交、远端 `main` 与 annotated tag `v1.6.0` 的 peeled commit 均为 `80a60fd97c7618d98789a6784f697ab9caeaf8ec`。受保护 Android run [`29222449682`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29222449682) 和发布后的 Pages workflow_run [`29223191138`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29223191138) 均成功。[正式 Release](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.6.0) 是 stable Latest、immutable、非 draft、非 prerelease，作者为 `szdtzpj`，包含精确 3 个由 `github-actions[bot]` 上传的资产；本轮发布证据限于 immutable、GitHub digest 与 checksum 闭环。
+PR [#19](https://github.com/szdtzpj/Embezzle-Studio/pull/19) 已合并；合并提交、远端 `main` 与 annotated tag `v1.6.0` 的 peeled commit 均为 `80a60fd97c7618d98789a6784f697ab9caeaf8ec`。受保护 Android run [`29222449682`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29222449682) 和发布后的 Pages workflow_run [`29223191138`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29223191138) 均成功。[正式 Release](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.6.0) 发布时曾为 stable Latest，现为历史版本；它仍为 immutable、非 draft、非 prerelease，作者为 `szdtzpj`，包含精确 3 个由 `github-actions[bot]` 上传的资产；本轮发布证据限于 immutable、GitHub digest 与 checksum 闭环。
 
 Actions 正式 `Embezzle-Studio-v1.6.0-release.apk` 为 97,599,959 字节，SHA-256 `6D27F0EA3502C0841276E35C6513D6DD0C1A5BC24B49E15ACE96BB408FAF5ECA`，包名/版本/code 为 `com.szdtzpj.embezzlestudio` / 1.6.0 / 12；只有一个预期生产签名者，证书 SHA-256 为 `F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`，签名方案 v2/v3 通过。它与上面的本机预发布候选是不同产物，正式下载应以 Actions APK 的大小和哈希为准。
 
@@ -250,4 +254,12 @@ GitHub Release 的多个资产上传不是事务操作。工作流仅在 owner-a
 - [Product and Architecture](./docs/product-architecture.md)
 - [Provider Protocol Matrix](./docs/provider-protocols.md)
 - [BYOK Productivity Suite](./docs/byok-productivity-suite.md)
+- [Local Knowledge and Artifact Workbench](./docs/local-knowledge-workbench.md)
+- [User-owned Cloud Sync](./docs/cloud-sync.md)
+- [Native background tasks and Android share intake](./docs/NATIVE_BACKGROUND_AND_SHARE.md)
 - [Roadmap](./docs/roadmap.md)
+- [1.8.0 P0/P1 continuation checkpoint](./docs/CONTINUATION_CHECKPOINT_2026-07-14_V1.8.md)
+
+### 1.8.0 P0/P1 当前验证边界
+
+当前工作树的 P0/P1 已完成本机实现与验证：`npm.cmd run check` 通过 76 个测试文件 / 1,014 项测试，Web export、Expo Doctor 20/20、依赖一致性、workflow/YAML/Bash/SHA/diff 检查均通过；本机 production-signed Android 1.8.0/code 14 candidate 位于 `D:\EmbezzleStudio-Releases\v1.8.0-candidate`，它只早于最后一项仅影响 iOS 的 Face ID 元数据硬化，且仍不是 GitHub Release。当前树已重新完成 Android 干净构建和 Manifest 复核，但该重建包由 Android Debug 证书签名；精确当前树的 production APK 仍需受保护签名环境。P2 生物识别锁明确延期；真机、真实 WebDAV/S3、真实服务商计费/媒体长任务和 GitHub Actions 发布仍是外部边界。完整证据见 [checkpoint](./docs/CONTINUATION_CHECKPOINT_2026-07-14_V1.8.md)。

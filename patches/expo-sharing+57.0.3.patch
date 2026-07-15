@@ -1,0 +1,430 @@
+diff --git a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingModule.kt b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingModule.kt
+index 69ccba6..3db9df2 100644
+--- a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingModule.kt
++++ b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/SharingModule.kt
+@@ -75,6 +75,7 @@ class SharingModule : Module() {
+
+     Function("clearSharedPayloads") {
+       SharingSingleton.intent = null
++      ResolvingShareIntentDataParser.clearCache(context)
+     }
+
+     OnActivityResult { _, (requestCode) ->
+diff --git a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/dataParsers/ResolvingShareIntentDataParser.kt b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/dataParsers/ResolvingShareIntentDataParser.kt
+index 5f4d942..bf47d94 100644
+--- a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/dataParsers/ResolvingShareIntentDataParser.kt
++++ b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/dataParsers/ResolvingShareIntentDataParser.kt
+@@ -7,84 +7,200 @@ import android.net.Uri
+ import android.provider.OpenableColumns
+ import java.io.File
+ import java.io.FileOutputStream
+-import java.net.HttpURLConnection
+-import java.net.URL
+-import kotlin.text.indexOf
+-import kotlin.text.substring
++import java.util.UUID
+
+ class ResolvingShareIntentDataParser {
+   companion object {
++    fun clearCache(context: Context) {
++      File(context.cacheDir, CACHE_DIRECTORY).deleteRecursively()
++    }
++
+     fun parse(context: Context, intent: Intent): List<ResolvedSharePayload> {
+       val type = intent.type ?: return emptyList()
++      val copyBatch = CopyBatch()
+
+-      return when (intent.action) {
+-        Intent.ACTION_SEND -> handleSendAction(context, intent, type)
+-        Intent.ACTION_SEND_MULTIPLE -> handleSendMultipleAction(context, intent, type)
+-        else -> emptyList()
++      return try {
++        when (intent.action) {
++          Intent.ACTION_SEND -> handleSendAction(context, intent, type, copyBatch)
++          Intent.ACTION_SEND_MULTIPLE -> handleSendMultipleAction(context, intent, type, copyBatch)
++          else -> emptyList()
++        }
++      } catch (e: Exception) {
++        copyBatch.rollback()
++        throw e
+       }
+     }
+
+-    private fun handleSendAction(context: Context, intent: Intent, type: String): List<ResolvedSharePayload> {
+-      return if (type == "text/plain") {
+-        extractTextPayload(intent)
++    private fun handleSendAction(
++      context: Context,
++      intent: Intent,
++      type: String,
++      copyBatch: CopyBatch
++    ): List<ResolvedSharePayload> {
++      val textPayloads = extractTextPayloads(intent, type)
++      val uri = intent.getParcelableExtraCompat<Uri>(Intent.EXTRA_STREAM)
++      val uriPayloads = if (textPayloads.size < MAX_SHARE_ITEMS) {
++        listOfNotNull(uri?.let { resolveUri(context, it, type, copyBatch) })
+       } else {
+-        val uri = intent.getParcelableExtraCompat<Uri>(Intent.EXTRA_STREAM)
+-        listOfNotNull(uri?.let { resolveUri(context, it, type) })
++        emptyList()
+       }
++      return (textPayloads + uriPayloads).take(MAX_SHARE_ITEMS)
+     }
+
+-    private fun handleSendMultipleAction(context: Context, intent: Intent, type: String): List<ResolvedSharePayload> {
++    private fun handleSendMultipleAction(
++      context: Context,
++      intent: Intent,
++      type: String,
++      copyBatch: CopyBatch
++    ): List<ResolvedSharePayload> {
++      val textPayloads = extractTextPayloads(intent, type)
++      val remainingItemCount = MAX_SHARE_ITEMS - textPayloads.size
+       val uris = intent.getParcelableArrayListExtraCompat<Uri>(Intent.EXTRA_STREAM)
+-      return uris?.map { resolveUri(context, it, type) } ?: emptyList()
++      val uriPayloads = uris
++        ?.take(remainingItemCount)
++        ?.map { resolveUri(context, it, type, copyBatch) }
++        ?: emptyList()
++      return textPayloads + uriPayloads
+     }
+
+-    private fun extractTextPayload(intent: Intent): List<ResolvedSharePayload> {
+-      val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return emptyList()
+-
+-      if (android.util.Patterns.WEB_URL.matcher(text).matches()) {
+-        return listOf(resolveUrlContext(text))
++    private fun extractTextPayloads(intent: Intent, mimeType: String): List<ResolvedSharePayload> {
++      val multiple = intent.getCharSequenceArrayListExtra(Intent.EXTRA_TEXT)
++        ?.asSequence()
++        ?.map { it.toString() }
++        ?.filter { it.isNotEmpty() }
++        ?.take(MAX_SHARE_ITEMS)
++        ?.toList()
++        .orEmpty()
++      val values = if (multiple.isNotEmpty()) {
++        multiple
++      } else {
++        listOfNotNull(intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString())
++          .filter { it.isNotEmpty() }
+       }
+
+-      return listOf(
+-        ResolvedSharePayload().apply {
+-          value = text
+-          shareType = ShareType.Text
+-          mimeType = "text/plain"
++      val textMimeType = mimeType.takeIf { it.startsWith("text/", ignoreCase = true) } ?: "text/plain"
++      return values.map { text ->
++        if (android.util.Patterns.WEB_URL.matcher(text).matches()) {
++          resolveUrlContext(text, textMimeType)
++        } else {
++          ResolvedSharePayload().apply {
++            value = text
++            shareType = ShareType.Text
++            this.mimeType = textMimeType
++          }
+         }
+-      )
++      }
+     }
+
+-    private fun resolveUri(context: Context, uri: Uri, mimeType: String): ResolvedSharePayload {
++    private fun resolveUri(
++      context: Context,
++      uri: Uri,
++      mimeType: String,
++      copyBatch: CopyBatch
++    ): ResolvedSharePayload {
+       val contentResolver = context.contentResolver
+-      val fileName = getFileName(contentResolver, uri) ?: "unknown"
+-      val fileSize = getFileSize(contentResolver, uri)
+       val specificMimeType = contentResolver.getType(uri) ?: mimeType
+       val type = ShareType.fromMimeType(specificMimeType)
++      val itemByteLimit = getItemByteLimit(specificMimeType)
++      val declaredSize = getFileSize(contentResolver, uri)
++      validateDeclaredSize(declaredSize, itemByteLimit, copyBatch.totalBytes)
++      val fileName = sanitizeFileName(getFileName(contentResolver, uri))
++      val sharingCacheDir = File(context.cacheDir, CACHE_DIRECTORY).apply {
++        if (!exists() && !mkdirs()) {
++          throw FailedToResolveSharedDataException("Failed to create the incoming share cache directory")
++        }
++      }
++      val file = File(sharingCacheDir, "${UUID.randomUUID()}-$fileName")
++      copyBatch.files += file
++      var copiedBytes = 0L
+
+-      // Copy to cache dir to ensure access
+-      val file = File(context.cacheDir, fileName)
+       try {
+-        contentResolver.openInputStream(uri)?.use { input ->
++        val inputStream = contentResolver.openInputStream(uri)
++          ?: throw FailedToResolveSharedDataException("The shared content stream could not be opened")
++        inputStream.use { input ->
+           FileOutputStream(file).use { output ->
+-            input.copyTo(output)
++            val buffer = ByteArray(COPY_BUFFER_SIZE)
++            while (true) {
++              val read = input.read(buffer)
++              if (read < 0) {
++                break
++              }
++              if (read == 0) {
++                continue
++              }
++              val nextItemSize = copiedBytes + read
++              val nextTotalSize = copyBatch.totalBytes + nextItemSize
++              if (nextItemSize > itemByteLimit) {
++                throw FailedToResolveSharedDataException(
++                  "Shared item exceeds its ${itemByteLimit}-byte limit"
++                )
++              }
++              if (nextTotalSize > MAX_TOTAL_BYTES) {
++                throw FailedToResolveSharedDataException(
++                  "Shared items exceed the ${MAX_TOTAL_BYTES}-byte total limit"
++                )
++              }
++              output.write(buffer, 0, read)
++              copiedBytes = nextItemSize
++            }
+           }
+         }
+       } catch (e: Exception) {
+-        e.printStackTrace()
++        file.delete()
++        if (e is FailedToResolveSharedDataException) {
++          throw e
++        }
++        throw FailedToResolveSharedDataException("Failed to copy shared content: ${e.message}", e)
+       }
++      copyBatch.totalBytes += copiedBytes
+
+       return ResolvedSharePayload().apply {
+         value = uri.toString()
+         shareType = type
+         this.mimeType = specificMimeType
+-        contentUri = file.toURI().toString()
++        contentUri = Uri.fromFile(file).toString()
+         contentType = ContentType.fromMimeType(specificMimeType)
+-        contentSize = fileSize
++        contentSize = copiedBytes
+         contentMimeType = specificMimeType
+         originalName = fileName
+       }
+     }
+
++    private fun validateDeclaredSize(declaredSize: Long?, itemByteLimit: Long, copiedTotal: Long) {
++      if (declaredSize == null) {
++        return
++      }
++      if (declaredSize > itemByteLimit) {
++        throw FailedToResolveSharedDataException(
++          "Shared item declares a size above its ${itemByteLimit}-byte limit"
++        )
++      }
++      if (copiedTotal + declaredSize > MAX_TOTAL_BYTES) {
++        throw FailedToResolveSharedDataException(
++          "Shared items declare a size above the ${MAX_TOTAL_BYTES}-byte total limit"
++        )
++      }
++    }
++
++    private fun getItemByteLimit(mimeType: String): Long {
++      return when {
++        mimeType.startsWith("image/", ignoreCase = true) -> MAX_IMAGE_BYTES
++        mimeType.startsWith("video/", ignoreCase = true) -> MAX_VIDEO_BYTES
++        else -> MAX_OTHER_BYTES
++      }
++    }
++
++    private fun sanitizeFileName(candidate: String?): String {
++      val baseName = (candidate ?: DEFAULT_FILE_NAME)
++        .substringAfterLast('/')
++        .substringAfterLast('\\')
++      val sanitized = baseName
++        .replace(UNSAFE_FILE_NAME_CHARACTER, "_")
++        .trim('.')
++        .take(MAX_FILE_NAME_LENGTH)
++      return sanitized.ifBlank { DEFAULT_FILE_NAME }
++    }
++
+     private fun getFileName(resolver: ContentResolver, uri: Uri): String? {
+       val cursor = resolver.query(uri, null, null, null, null)
+       val name = cursor?.use { cursor ->
+@@ -111,66 +227,48 @@ class ResolvingShareIntentDataParser {
+           .takeIf { it.moveToFirst() }
+           ?.getColumnIndex(OpenableColumns.SIZE)
+
+-        if (sizeIndex != null && sizeIndex != -1) {
+-          cursor.getLong(sizeIndex)
++        if (sizeIndex != null && sizeIndex != -1 && !cursor.isNull(sizeIndex)) {
++          cursor.getLong(sizeIndex).takeIf { it >= 0 }
+         } else {
+           null
+         }
+       }
+     }
+
+-    private fun resolveUrlContext(urlString: String): ResolvedSharePayload {
+-      val payload = ResolvedSharePayload().apply {
++    private fun resolveUrlContext(urlString: String, sourceMimeType: String): ResolvedSharePayload {
++      // Captions are intentionally treated as opaque user text. Resolving a URL
++      // here would perform an unsolicited network request from a share intent.
++      return ResolvedSharePayload().apply {
+         value = urlString
+         shareType = ShareType.Url
+-        mimeType = "text/plain"
++        mimeType = sourceMimeType
+       }
++    }
+
+-      try {
+-        val url = URL(urlString)
+-        val connection = url.openConnection() as HttpURLConnection
+-
+-        // Use GET instead of HEAD. Even though we want only the head, this works better with
+-        // redirects (e.g., https://picsum.photos/200/300), where requesting the HEAD will not redirect to the
+-        // final photo.
+-        connection.requestMethod = "GET"
+-
+-        connection.instanceFollowRedirects = true
+-        connection.connectTimeout = 5000
+-        connection.readTimeout = 5000
+-        connection.connect()
+-
+-        // Retrieve the final URL after any redirects
+-        val finalUrl = connection.url
+-        val finalUrlString = finalUrl.toString()
+-
+-        val mimeType = connection.contentType ?: "text/plain"
+-        val size = connection.contentLengthLong
+-        val disposition = connection.getHeaderField("Content-Disposition")
+-        var fileName: String? = finalUrl.lastPathComponent
+-
+-        disposition?.let {
+-          val index = disposition.indexOf("filename=")
+-          if (index > 0) {
+-            fileName = disposition.substring(index + 9).replace("\"", "")
+-          }
+-        }
++    private class CopyBatch(var totalBytes: Long = 0) {
++      val files = mutableListOf<File>()
+
+-        val contentType = ContentType.fromMimeType(mimeType)
+-        payload.apply {
+-          contentUri = finalUrlString
+-          this.contentType = contentType
+-          contentSize = if (size >= 0) size else null
+-          contentMimeType = mimeType
+-          originalName = fileName
++      fun rollback() {
++        files.forEach { file ->
++          try {
++            file.delete()
++          } catch (_: Exception) {
++            // Best effort: the original parse error remains authoritative.
++          }
+         }
+-
+-        // We only need headers, disconnect without reading the whole stream
+-        connection.disconnect()
+-      } catch (e: Exception) {
+-        throw FailedToResolveSharedDataException("Failed to resolve shared data: ${e.message}", e)
++        files.clear()
+       }
+-      return payload
+     }
++
++    private val UNSAFE_FILE_NAME_CHARACTER = Regex("[^A-Za-z0-9._-]")
++    private const val DEFAULT_FILE_NAME = "shared-file"
++    private const val CACHE_DIRECTORY = "expo-sharing"
++    private const val MAX_FILE_NAME_LENGTH = 120
++    private const val MAX_SHARE_ITEMS = 32
++    private const val COPY_BUFFER_SIZE = 64 * 1024
++    private const val MAX_IMAGE_BYTES = 10L * 1024 * 1024
++    private const val MAX_VIDEO_BYTES = 100L * 1024 * 1024
++    private const val MAX_OTHER_BYTES = 20L * 1024 * 1024
++    private const val MAX_TOTAL_BYTES = 120L * 1024 * 1024
+   }
+ }
+diff --git a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/dataParsers/SimpleShareIntentDataParser.kt b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/dataParsers/SimpleShareIntentDataParser.kt
+index 8dd50e8..6c4f32a 100644
+--- a/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/dataParsers/SimpleShareIntentDataParser.kt
++++ b/node_modules/expo-sharing/android/src/main/java/expo/modules/sharing/dataParsers/SimpleShareIntentDataParser.kt
+@@ -17,26 +17,54 @@ internal class SimpleShareIntentDataParser {
+     }
+
+     private fun handleSendAction(context: Context, intent: Intent, type: String): List<SharePayload> {
+-      return if (type == "text/plain") {
+-        val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return emptyList()
+-        val isUrl = android.util.Patterns.WEB_URL.matcher(text).matches()
+-
+-        listOf(
+-          SharePayload().apply {
+-            value = text
+-            shareType = if (isUrl) ShareType.Url else ShareType.Text
+-            mimeType = "text/plain"
+-          }
+-        )
+-      } else {
+-        val uri = intent.getParcelableExtraCompat<Uri>(Intent.EXTRA_STREAM)
++      val textPayloads = extractTextPayloads(intent, type)
++      val uri = intent.getParcelableExtraCompat<Uri>(Intent.EXTRA_STREAM)
++      val uriPayloads = if (textPayloads.size < MAX_SHARE_ITEMS) {
+         listOfNotNull(uri?.let { createUriPayload(context, it, type) })
++      } else {
++        emptyList()
+       }
++      return (textPayloads + uriPayloads).take(MAX_SHARE_ITEMS)
+     }
+
+     private fun handleSendMultipleAction(context: Context, intent: Intent, type: String): List<SharePayload> {
++      val textPayloads = extractTextPayloads(intent, type)
++      val remainingItemCount = MAX_SHARE_ITEMS - textPayloads.size
+       val uris = intent.getParcelableArrayListExtraCompat<Uri>(Intent.EXTRA_STREAM)
+-      return uris?.map { createUriPayload(context, it, type) } ?: emptyList()
++      val uriPayloads = uris
++        ?.take(remainingItemCount)
++        ?.map { createUriPayload(context, it, type) }
++        ?: emptyList()
++      return textPayloads + uriPayloads
++    }
++
++    private fun extractTextPayloads(intent: Intent, mimeType: String): List<SharePayload> {
++      val multiple = intent.getCharSequenceArrayListExtra(Intent.EXTRA_TEXT)
++        ?.asSequence()
++        ?.map { it.toString() }
++        ?.filter { it.isNotEmpty() }
++        ?.take(MAX_SHARE_ITEMS)
++        ?.toList()
++        .orEmpty()
++      val values = if (multiple.isNotEmpty()) {
++        multiple
++      } else {
++        listOfNotNull(intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString())
++          .filter { it.isNotEmpty() }
++      }
++
++      val textMimeType = mimeType.takeIf { it.startsWith("text/", ignoreCase = true) } ?: "text/plain"
++      return values.map { text ->
++        SharePayload().apply {
++          value = text
++          shareType = if (android.util.Patterns.WEB_URL.matcher(text).matches()) {
++            ShareType.Url
++          } else {
++            ShareType.Text
++          }
++          this.mimeType = textMimeType
++        }
++      }
+     }
+
+     private fun createUriPayload(context: Context, uri: Uri, defaultType: String): SharePayload {
+@@ -47,5 +75,7 @@ internal class SimpleShareIntentDataParser {
+         mimeType = specificType
+       }
+     }
++
++    private const val MAX_SHARE_ITEMS = 32
+   }
+ }

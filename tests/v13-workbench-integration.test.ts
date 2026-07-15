@@ -124,4 +124,11 @@ describe('v1.3 local knowledge and artifact integration', () => {
     expect(combined).not.toContain('new Function(');
     expect(combined).not.toContain('fetch(');
   });
+
+  it('uses a workspace-wide bounded knowledge index in the all-project workbench', async () => {
+    const workbench = await source('src/components/WorkspaceWorkbench.tsx');
+
+    expect(workbench).toContain('buildWorkspaceKnowledgeIndex(knowledgeSources)');
+    expect(workbench).not.toContain('knowledgeSources[0]?.projectId');
+  });
 });

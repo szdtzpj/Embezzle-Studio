@@ -22,6 +22,7 @@ import type {
   Capability,
   ModelInfo,
   ModelTask,
+  ExperienceMode,
   ProviderKind,
   ProviderProfile,
 } from '../../../domain/types';
@@ -45,6 +46,8 @@ export interface SettingsScreenModel {
   appearance: {
     colorMode: 'system' | 'light' | 'dark';
     onSetColorMode: (mode: 'system' | 'light' | 'dark') => void;
+    experienceMode: ExperienceMode;
+    onSetExperienceMode: (mode: ExperienceMode) => void;
   };
   providers: {
     providers: ProviderProfile[];
@@ -103,7 +106,10 @@ export interface SettingsScreenHandle {
   handleBack: () => boolean;
   resetNavigation: () => void;
   openProviders: () => void;
+  /** Legacy active-provider shortcut retained for callers without a target id. */
   openActiveProviderModels: () => void;
+  /** Open model settings for a specific provider, selecting it first when needed. */
+  openProviderModels: (providerId?: string) => Promise<void>;
   /** Jump from composer (etc.) into a tools sub-page without manual drill-down. */
   openToolsSection: (section: SettingsToolsSection) => void;
 }
@@ -217,12 +223,31 @@ export const SettingsScreen = forwardRef<SettingsScreenHandle, SettingsScreenMod
         { key: 'providerModels' },
       ]);
     },
+    openProviderModels: async (providerId?: string) => {
+      if (providerId && providerId !== props.providers.activeProvider.id) {
+        const provider = props.providers.providers.find((item) => item.id === providerId);
+        if (!provider || provider.enabled === false) {
+          return;
+        }
+        if (!(await props.providers.select(providerId))) {
+          return;
+        }
+      }
+      setPendingProviderDeletion(null);
+      setNavigationDirection('forward');
+      setStack([
+        { key: 'main' },
+        { key: 'providers' },
+        { key: 'providerDetail' },
+        { key: 'providerModels' },
+      ]);
+    },
     openToolsSection: (section: SettingsToolsSection) => {
       setPendingProviderDeletion(null);
       setNavigationDirection('forward');
       setStack([{ key: 'main' }, { key: 'tools', section }]);
     },
-  }), [pendingProviderDeletion, stack.length]);
+  }), [pendingProviderDeletion, props.providers, stack.length]);
 
   const renderScreen = () => {
     switch (current.key) {
@@ -230,11 +255,13 @@ export const SettingsScreen = forwardRef<SettingsScreenHandle, SettingsScreenMod
         return (
           <SettingsMainScreen
             colorMode={props.appearance.colorMode}
+            experienceMode={props.appearance.experienceMode}
             activeProvider={props.providers.activeProvider}
             scrollOffsetY={mainScrollOffsetY}
             onScrollOffsetChange={setMainScrollOffsetY}
             onBack={props.onClose}
             onColorMode={() => push({ key: 'colorMode' })}
+            onExperienceMode={props.appearance.onSetExperienceMode}
             onProviders={() => push({ key: 'providers' })}
             onToolsSection={(section) => push({ key: 'tools', section })}
             onAbout={() => push({ key: 'about' })}
@@ -309,6 +336,7 @@ export const SettingsScreen = forwardRef<SettingsScreenHandle, SettingsScreenMod
           <ProviderDetailScreen
             readOnly={props.status.readOnly}
             provider={props.providers.activeProvider}
+            experienceMode={props.appearance.experienceMode}
             addedModelCount={props.models.addedModels.length}
             candidateModelCount={props.models.candidates.length}
             refreshingModels={props.models.refreshing}

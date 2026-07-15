@@ -3,7 +3,7 @@ import type { ApplicationLifecyclePort } from '../lifecycle/applicationLifecycle
 import { createExpoWorkspacePersistenceAdapter } from '../workspace/adapters/expoWorkspacePersistenceAdapter';
 import type { WorkspacePersistenceAdapter } from '../workspace/adapters/workspacePersistenceAdapter';
 import type { ChatProviderAdapters } from '../../features/chat';
-import type { ProjectsConversationsPorts } from '../../features/projects/ProjectsConversationsProvider';
+import type { ProjectsConversationsPorts } from '../../features/projects';
 import { createProductionProviderAdapterRegistry } from '../../features/chat/orchestration/ProviderAdapterRegistry';
 import { createProductionChatAudioAdapter } from '../../features/chat/orchestration/ChatAudioAdapter';
 

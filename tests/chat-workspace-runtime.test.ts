@@ -183,4 +183,44 @@ describe('feature workspace runtimes', () => {
       user.id,
     ]);
   });
+
+  it('clears the durable composer draft when the user message is committed', async () => {
+    const { session, chat } = createRuntimes();
+    await session.boot();
+    const conversationId = session.getSnapshot().activeConversationId;
+    const attachment = {
+      id: 'draft-image',
+      kind: 'image' as const,
+      uri: 'file:///documents/draft-image.png',
+      name: 'draft-image.png',
+      mimeType: 'image/png',
+      size: 12,
+    };
+
+    await chat.execute({
+      type: 'draft.set',
+      conversationId,
+      text: 'pending text',
+      attachments: [attachment],
+      now: 1,
+    });
+    expect(session.getSnapshot().composerDrafts[0]?.attachments).toHaveLength(1);
+
+    await chat.execute({
+      type: 'chat.append-messages',
+      conversationId,
+      messages: [{
+        id: 'user-message',
+        role: 'user',
+        content: 'pending text',
+        attachments: [attachment],
+        createdAt: 2,
+        status: 'ready',
+      }],
+      now: 2,
+    });
+
+    expect(session.getSnapshot().composerDrafts).toEqual([]);
+    expect(session.getSnapshot().messages.at(-1)?.attachments?.[0].uri).toBe(attachment.uri);
+  });
 });

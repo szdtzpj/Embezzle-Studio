@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { mutateSessionForTest } from './helpers/workspaceSessionTestHarness';
 
+import type { ApplicationLifecycleListener } from '../src/app/lifecycle/applicationLifecyclePort';
 import { MemoryApplicationLifecycleAdapter } from '../src/app/lifecycle/memoryApplicationLifecycleAdapter';
 import { FakeClock } from '../src/app/testing/fakeClock';
 import { TraceRecorder } from '../src/app/testing/traceRecorder';
@@ -12,6 +13,23 @@ import {
 } from '../src/app/workspace/WorkspaceSession';
 import { createDefaultWorkspace } from '../src/data/providerCatalog';
 import { WorkspaceSaveError } from '../src/services/workspaceSaveError';
+
+class CountingApplicationLifecycleAdapter extends MemoryApplicationLifecycleAdapter {
+  subscribeCount = 0;
+  unsubscribeCount = 0;
+
+  override subscribe(listener: ApplicationLifecycleListener): () => void {
+    this.subscribeCount += 1;
+    const unsubscribe = super.subscribe(listener);
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      this.unsubscribeCount += 1;
+      unsubscribe();
+    };
+  }
+}
 
 function createSession(options: {
   persistence?: MemoryWorkspacePersistenceAdapter;
@@ -220,6 +238,38 @@ describe('Workspace Session interface', () => {
     expect(session.getStatus().issue).toContain('save failed');
   });
 
+  it('subscribes to lifecycle events only when boot starts, and only once', async () => {
+    const clock = new FakeClock();
+    const lifecycle = new CountingApplicationLifecycleAdapter();
+    const persistence = new MemoryWorkspacePersistenceAdapter({
+      initial: createDefaultWorkspace(),
+    });
+    const { session } = createSession({ persistence, clock, lifecycle, autoBoot: false });
+
+    expect(lifecycle.subscribeCount).toBe(0);
+    lifecycle.emit('background');
+    await session.settle();
+    expect(persistence.savedSnapshots).toHaveLength(0);
+
+    await session.boot();
+    await session.boot();
+    expect(lifecycle.subscribeCount).toBe(1);
+    await mutateSessionForTest(session, (current) => ({
+      ...current,
+      projects: current.projects.map((project, index) =>
+        index === 0 ? { ...project, name: 'Boot lifecycle' } : project
+      ),
+    }));
+    lifecycle.emit('background');
+    await session.settle();
+
+    expect(persistence.savedSnapshots).toHaveLength(1);
+    expect(persistence.savedSnapshots[0]?.projects[0]?.name).toBe('Boot lifecycle');
+
+    session.dispose();
+    expect(lifecycle.unsubscribeCount).toBe(1);
+  });
+
   it('flushes on background lifecycle events', async () => {
     const clock = new FakeClock();
     const lifecycle = new MemoryApplicationLifecycleAdapter();
@@ -243,6 +293,31 @@ describe('Workspace Session interface', () => {
     expect(persistence.savedSnapshots).toHaveLength(1);
     expect(persistence.savedSnapshots[0]?.projects[0]?.name).toBe('Background');
     trace.assertOrder(['workspace.flush.start', 'workspace.flush.success']);
+  });
+
+  it('keeps deferred background save failures visible through status.issue', async () => {
+    const clock = new FakeClock();
+    const lifecycle = new MemoryApplicationLifecycleAdapter();
+    const persistence = new MemoryWorkspacePersistenceAdapter({
+      initial: createDefaultWorkspace(),
+      saveError: 'background save failed',
+    });
+    const { session } = createSession({ persistence, clock, lifecycle });
+    await session.boot();
+
+    await mutateSessionForTest(session, (current) => ({
+      ...current,
+      projects: current.projects.map((project, index) =>
+        index === 0 ? { ...project, name: 'Background failure' } : project
+      ),
+    }));
+    lifecycle.emit('background');
+    await session.settle();
+
+    expect(session.getStatus()).toMatchObject({
+      dirty: true,
+      issue: 'background save failed',
+    });
   });
 
   it('required durability finishes before the caller continues', async () => {

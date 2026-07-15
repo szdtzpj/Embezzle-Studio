@@ -98,6 +98,7 @@ export function isUserCreatedProvider(provider: Pick<ProviderProfile, 'id'>): bo
 
 export function createDefaultWorkspace(): AppWorkspace {
   const now = Date.now();
+  const deviceId = `device-${now.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   const initialConversationId = 'conversation-default';
   const initialProjectId = 'project-default';
   const welcomeMessage = {
@@ -163,6 +164,24 @@ export function createDefaultWorkspace(): AppWorkspace {
     voice: {
       speechVoice: 'alloy',
       speechFormat: 'mp3',
+    },
+    experienceMode: 'simple',
+    onboarding: {
+      status: 'pending',
+      lastStep: 'provider',
+    },
+    composerDrafts: [],
+    backupPreferences: {
+      reminderIntervalDays: 14,
+    },
+    cloudSync: {
+      enabled: false,
+      provider: 'webdav',
+      endpoint: '',
+      remotePath: 'Embezzle-Studio',
+      deviceId,
+      lastStatus: 'idle',
+      conflicts: [],
     },
   };
 }

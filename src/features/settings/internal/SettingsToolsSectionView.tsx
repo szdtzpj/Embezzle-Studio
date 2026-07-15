@@ -4,10 +4,13 @@ import {
   BookOpen,
   Download,
   FileText,
+  HardDrive,
+  KeyRound,
   MessageSquare,
   Pin,
   RefreshCw,
   ShieldCheck,
+  Stethoscope,
   Trash2,
   Wrench,
   X,
@@ -15,9 +18,9 @@ import {
 
 import {
   useWorkspaceSelector,
-  useWorkspaceSession,
   useWorkspaceStatus,
 } from '../../../app/workspace/WorkspaceSessionProvider';
+import { useWorkspaceSession } from '../../../app/workspace/internal/WorkspaceSessionContext';
 import { workspaceProjectPresets, type WorkspaceProjectPreset } from '../../../data/workspaceProjectPresets';
 import type {
   ExternalSearchProviderKind,
@@ -29,14 +32,15 @@ import type {
 } from '../../../domain/types';
 import {
   useChatActivity,
+  useChatConfigurationActions,
   useChatProjectNavigation,
   useChatTaskActions,
 } from '../../chat';
-import { useProjectConversationNavigation } from '../../projects/ProjectsConversationsProvider';
 import {
   applyProjectConversationChatEffects,
   type ProjectConversationResult,
-} from '../../projects/projectConversationResults';
+  useProjectConversationNavigation,
+} from '../../projects';
 import {
   getProviderAudioReadiness,
   resolveConfiguredProviderAudioTarget,
@@ -61,6 +65,7 @@ import { summarizeDailyProviderUsage } from '../../../services/costGuard';
 import {
   exportEncryptedWorkspaceBackup,
   importEncryptedWorkspaceBackup,
+  verifyEncryptedWorkspaceBackup,
 } from '../../../services/workspaceBackup';
 import {
   exportWorkspaceBackupFile,
@@ -70,9 +75,31 @@ import { isWorkspaceReplacementError } from '../../../services/workspaceReplacem
 import { saveAttachmentToDevice } from '../../../services/mediaExport';
 import {
   deletePersistedAttachments,
+  cleanupOrphanedMediaStorage,
   flushPendingAttachmentDeletions,
 } from '../../../services/mediaStorage';
+import {
+  createRedactedDiagnosticBundle,
+  exportRedactedDiagnosticBundle,
+  type RedactedDiagnosticBundle,
+} from '../../../services/localDiagnostics';
+import {
+  cloudSyncSettingsAfterError,
+  resolveCloudSyncConflict,
+  synchronizeWorkspace,
+} from '../../../services/cloudSync';
+import {
+  clearCloudSyncCredentials,
+  readCloudSyncCredentials,
+  writeCloudSyncCredentials,
+  type CloudSyncCredentialRecord,
+} from '../../../services/cloudSyncCredentials';
+import { refreshProviderModels } from '../../../services/modelDiscovery';
+import { classifyProviderConnectionError } from '../../../services/providerDiagnostics';
+import { isAbortError } from '../../../services/openAiCompatible';
+import { isBackupReminderDue } from '../../../services/workspaceProductState';
 import { AnimatedPressable } from '../../../ui/components/AnimatedPressable';
+import { GenerationTaskNotificationPermissionButton } from '../../background';
 import {
   SearchServicesPanel,
   type SearchServicesPanelHandle,
@@ -92,6 +119,12 @@ function getSelectableModels(provider: ProviderProfile): ModelInfo[] {
 
 function formatTokenCount(value?: number): string {
   return typeof value === 'number' ? value.toLocaleString() : '-';
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function formatCompactModelName(modelId?: string, _providerName?: string, maxLength = 18): string {
@@ -127,6 +160,7 @@ export function SettingsToolsSectionView(props: {
   const runtime = useMemo(() => new SettingsWorkspaceRuntime(session), [session]);
   const commitWorkspaceCommand = runtime.execute.bind(runtime);
   const chatActivity = useChatActivity();
+  const chatConfiguration = useChatConfigurationActions();
   const chatProjectNavigation = useChatProjectNavigation();
   const chatActivityRef = useRef(chatActivity);
   chatActivityRef.current = chatActivity;
@@ -135,6 +169,21 @@ export function SettingsToolsSectionView(props: {
   const settingsLauncher = useSettingsLauncher();
   const workspaceReadOnly = status.phase !== 'ready';
   const [notice, setNotice] = useState('');
+  const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<RedactedDiagnosticBundle | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncProviderDraft, setSyncProviderDraft] = useState<'webdav' | 's3'>('webdav');
+  const [syncEndpointDraft, setSyncEndpointDraft] = useState('');
+  const [syncRemotePathDraft, setSyncRemotePathDraft] = useState('Embezzle-Studio');
+  const [syncBucketDraft, setSyncBucketDraft] = useState('');
+  const [syncRegionDraft, setSyncRegionDraft] = useState('');
+  const [syncUsernameDraft, setSyncUsernameDraft] = useState('');
+  const [syncPasswordDraft, setSyncPasswordDraft] = useState('');
+  const [syncAccessKeyDraft, setSyncAccessKeyDraft] = useState('');
+  const [syncSecretKeyDraft, setSyncSecretKeyDraft] = useState('');
+  const [syncSessionTokenDraft, setSyncSessionTokenDraft] = useState('');
+  const [syncEncryptionPasswordDraft, setSyncEncryptionPasswordDraft] = useState('');
+  const syncBindingKeyRef = useRef('');
   const [comparisonConfigProviderId, setComparisonConfigProviderId] = useState<string | null>(null);
   const [projectNewName, setProjectNewName] = useState('');
   const [projectNameDraft, setProjectNameDraft] = useState('');
@@ -230,6 +279,47 @@ export function SettingsToolsSectionView(props: {
       return undefined;
     }
   }, [configuredSpeechTarget]);
+
+  useEffect(() => {
+    const settings = workspace.cloudSync;
+    const binding = {
+      provider: settings.provider,
+      endpoint: settings.endpoint,
+      remotePath: settings.remotePath,
+      ...(settings.provider === 's3' && settings.bucket ? { bucket: settings.bucket } : {}),
+      ...(settings.provider === 's3' && settings.region ? { region: settings.region } : {}),
+    } as const;
+    const bindingKey = JSON.stringify({ ...binding, enabled: settings.enabled });
+    if (syncBindingKeyRef.current === bindingKey) return;
+    syncBindingKeyRef.current = bindingKey;
+    setSyncProviderDraft(settings.provider);
+    setSyncEndpointDraft(settings.endpoint);
+    setSyncRemotePathDraft(settings.remotePath || 'Embezzle-Studio');
+    setSyncBucketDraft(settings.bucket ?? '');
+    setSyncRegionDraft(settings.region ?? '');
+    setSyncUsernameDraft('');
+    setSyncPasswordDraft('');
+    setSyncAccessKeyDraft('');
+    setSyncSecretKeyDraft('');
+    setSyncSessionTokenDraft('');
+    setSyncEncryptionPasswordDraft('');
+    if (!settings.enabled) return;
+    let cancelled = false;
+    void readCloudSyncCredentials(binding)
+      .then((credentials) => {
+        if (cancelled || !credentials) return;
+        setSyncUsernameDraft(credentials.username ?? '');
+        setSyncPasswordDraft(credentials.password ?? '');
+        setSyncAccessKeyDraft(credentials.accessKeyId ?? '');
+        setSyncSecretKeyDraft(credentials.secretAccessKey ?? '');
+        setSyncSessionTokenDraft(credentials.sessionToken ?? '');
+        setSyncEncryptionPasswordDraft(credentials.encryptionPassword);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace.cloudSync]);
   const webSearchReady = Boolean(
     activeProvider?.apiKey?.trim() &&
       activeModel?.capabilities.includes('web-search') &&
@@ -271,6 +361,12 @@ export function SettingsToolsSectionView(props: {
   const visibleGenerationTasks = useMemo(
     () => filterGenerationTasks(generationTasks, generationTaskFilter),
     [generationTaskFilter, generationTasks]
+  );
+  const referencedAttachments = useMemo(
+    () => workspace.conversations.flatMap((conversation) =>
+      conversation.messages.flatMap((message) => message.attachments ?? [])
+    ),
+    [workspace.conversations]
   );
 
   useEffect(() => {
@@ -341,6 +437,164 @@ export function SettingsToolsSectionView(props: {
     if (!chatActivity.configurationLocked) return true;
     setNotice(`${chatActivity.label ?? '服务商操作'}仍在进行中，请稍后修改配置。`);
     return false;
+  }
+
+  function syncBindingFromDraft() {
+    return {
+      provider: syncProviderDraft,
+      endpoint: syncEndpointDraft,
+      remotePath: syncRemotePathDraft,
+      ...(syncProviderDraft === 's3' && syncBucketDraft.trim()
+        ? { bucket: syncBucketDraft }
+        : {}),
+      ...(syncProviderDraft === 's3' && syncRegionDraft.trim()
+        ? { region: syncRegionDraft }
+        : {}),
+    } as const;
+  }
+
+  function syncCredentialsFromDraft(): CloudSyncCredentialRecord {
+    return {
+      ...(syncProviderDraft === 'webdav'
+        ? { username: syncUsernameDraft, password: syncPasswordDraft }
+        : {
+            accessKeyId: syncAccessKeyDraft,
+            secretAccessKey: syncSecretKeyDraft,
+            ...(syncSessionTokenDraft ? { sessionToken: syncSessionTokenDraft } : {}),
+          }),
+      encryptionPassword: syncEncryptionPasswordDraft,
+    };
+  }
+
+  async function persistSyncConfiguration(): Promise<CloudSyncCredentialRecord | null> {
+    if (!ensureWorkspaceWritable()) return null;
+    if (!syncEncryptionPasswordDraft) {
+      setNotice('请填写同步加密密码；它只保存在本机安全存储或当前 Web 标签页。');
+      return null;
+    }
+    const binding = syncBindingFromDraft();
+    const credentials = syncCredentialsFromDraft();
+    let credentialsWritten = false;
+    try {
+      await writeCloudSyncCredentials(binding, credentials);
+      credentialsWritten = true;
+      const accepted = await commitWorkspaceCommand({
+        type: 'cloud-sync.update',
+        patch: {
+          enabled: true,
+          provider: syncProviderDraft,
+          endpoint: syncEndpointDraft,
+          remotePath: syncRemotePathDraft,
+          ...(syncProviderDraft === 's3'
+            ? { bucket: syncBucketDraft, region: syncRegionDraft }
+            : { bucket: undefined, region: undefined }),
+          lastStatus: 'idle',
+          lastError: undefined,
+        },
+      });
+      if (!accepted) {
+        await clearCloudSyncCredentials();
+        setNotice('工作区当前不可写，未保存同步配置。');
+        return null;
+      }
+      return credentials;
+    } catch (error) {
+      if (credentialsWritten) {
+        try {
+          // A failed workspace commit must not leave a new credential bound to
+          // an unapplied or stale sync target. The user can retry explicitly.
+          await clearCloudSyncCredentials();
+        } catch {
+          // Preserve the original error; secure-store cleanup is best effort.
+        }
+      }
+      setNotice(error instanceof Error ? error.message : '同步凭据保存失败。');
+      return null;
+    }
+  }
+
+  async function syncNow() {
+    if (syncBusy) return;
+    const credentials = await persistSyncConfiguration();
+    if (!credentials) return;
+    setSyncBusy(true);
+    try {
+      const revision = session.getRevision();
+      const result = await synchronizeWorkspace({
+        workspace: session.getSnapshot(),
+        credentials,
+      });
+      if (session.getRevision() !== revision) {
+        throw new Error('同步期间工作区发生了变化；为避免覆盖本地修改，本次同步未应用。');
+      }
+      await session.replace(async () => result.workspace);
+      setNotice(
+        result.outcome === 'conflict'
+          ? '检测到同步冲突；请明确选择保留本机或远端版本。'
+          : `同步完成：${result.outcome === 'pulled' ? '已拉取远端版本' : result.outcome === 'pushed' ? '已上传本机版本' : result.outcome === 'initialized' ? '已初始化远端' : '内容未变化'}。`
+      );
+    } catch (error) {
+      const current = session.getSnapshot();
+      await commitWorkspaceCommand({
+        type: 'cloud-sync.update',
+        patch: cloudSyncSettingsAfterError(current.cloudSync, error),
+      });
+      setNotice(error instanceof Error ? error.message : '同步失败，请检查 Endpoint、凭据和远端条件写入能力。');
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+
+  async function resolveSyncConflict(conflictId: string, strategy: 'keep-local' | 'keep-remote') {
+    if (syncBusy) return;
+    const credentials = await persistSyncConfiguration();
+    if (!credentials) return;
+    setSyncBusy(true);
+    try {
+      const revision = session.getRevision();
+      const result = await resolveCloudSyncConflict({
+        workspace: session.getSnapshot(),
+        credentials,
+        conflictId,
+        strategy,
+      });
+      if (session.getRevision() !== revision) {
+        throw new Error('冲突处理期间工作区发生了变化；本次选择未应用。');
+      }
+      await session.replace(async () => result.workspace);
+      setNotice(strategy === 'keep-local' ? '已通过条件写入保留本机版本。' : '已验证并导入远端版本。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '冲突处理失败，请刷新远端状态后重试。');
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+
+  async function clearSyncConfiguration() {
+    if (!ensureWorkspaceWritable() || syncBusy) return;
+    setSyncBusy(true);
+    try {
+      const accepted = await commitWorkspaceCommand({
+        type: 'cloud-sync.update',
+        patch: { enabled: false, lastStatus: 'idle', lastError: undefined, conflicts: [] },
+      });
+      if (!accepted) {
+        setNotice('工作区当前不可写，未停用同步。');
+        return;
+      }
+      setSyncUsernameDraft('');
+      setSyncPasswordDraft('');
+      setSyncAccessKeyDraft('');
+      setSyncSecretKeyDraft('');
+      setSyncSessionTokenDraft('');
+      setSyncEncryptionPasswordDraft('');
+      await clearCloudSyncCredentials();
+      setNotice('已停用同步并清除本机保存的同步凭据。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '清除同步凭据失败。');
+    } finally {
+      setSyncBusy(false);
+    }
   }
 
   function applyProjectConversationResult(result: ProjectConversationResult) {
@@ -615,17 +869,142 @@ export function SettingsToolsSectionView(props: {
     }
   }
 
+  async function refreshDiagnostics() {
+    if (diagnosticsBusy) return;
+    setDiagnosticsBusy(true);
+    try {
+      const bundle = await createRedactedDiagnosticBundle(
+        session.getSnapshot(),
+        session.getStatus()
+      );
+      setDiagnostics(bundle);
+      setNotice('诊断状态已在本机刷新；没有发送任何网络请求。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '读取本地诊断状态失败。');
+    } finally {
+      setDiagnosticsBusy(false);
+    }
+  }
+
+  async function checkActiveProviderConnection() {
+    if (!activeProvider || diagnosticsBusy) return;
+    if (!activeProvider.apiKey?.trim()) {
+      setNotice('当前服务商尚未配置 API Key；请先前往供应商设置。');
+      return;
+    }
+    setDiagnosticsBusy(true);
+    setNotice('正在请求模型目录验证网络与鉴权；这不会发送对话，也不能证明具体模型可推理。');
+    try {
+      const result = await chatConfiguration.run('诊断服务商连接', (signal) =>
+        refreshProviderModels(activeProvider, signal)
+      );
+      if (!result.ok) {
+        if (result.reason === 'busy') throw new Error(result.notice);
+        throw result.error;
+      }
+      setNotice(
+        result.value.source === 'remote'
+          ? `模型目录请求成功，共 ${result.value.models.length} 项；真实模型权限、配额和计费仍需以一次明确发送的请求及服务商账单为准。`
+          : '只加载到了本地模型目录，尚未证明当前账号与 Endpoint 可以连接。'
+      );
+      setDiagnostics(
+        await createRedactedDiagnosticBundle(session.getSnapshot(), session.getStatus())
+      );
+    } catch (error) {
+      if (!isAbortError(error)) {
+        const issue = classifyProviderConnectionError(error);
+        setNotice(`${issue.title}：${issue.guidance}\n${issue.detail}`);
+      }
+    } finally {
+      setDiagnosticsBusy(false);
+    }
+  }
+
+  async function cleanupMediaCache() {
+    if (diagnosticsBusy) return;
+    const confirmed = await requestConfirm({
+      title: '清理异常媒体缓存？',
+      description: '只删除 Embezzle Studio 自有目录中未被任何对话引用的文件；仍在工作区中的附件不会删除。',
+      confirmLabel: '检查并清理',
+      cancelLabel: '取消',
+      tone: 'warning',
+    });
+    if (!confirmed) return;
+    setDiagnosticsBusy(true);
+    try {
+      const result = await cleanupOrphanedMediaStorage(referencedAttachments);
+      setNotice(`已清理 ${result.deletedCount} 个未引用文件，释放 ${formatBytes(result.deletedBytes)}。`);
+      setDiagnostics(await createRedactedDiagnosticBundle(session.getSnapshot(), session.getStatus()));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '媒体缓存清理失败。');
+    } finally {
+      setDiagnosticsBusy(false);
+    }
+  }
+
+  async function exportDiagnostics() {
+    if (diagnosticsBusy) return;
+    const confirmed = await requestConfirm({
+      title: '导出脱敏诊断包？',
+      description: '诊断包包含版本、状态、数量、服务商域名和最近错误分类；不包含 API Key、同步凭据、消息正文或附件字节。请仍在分享前自行复核文件。',
+      confirmLabel: '生成并导出',
+      cancelLabel: '取消',
+      tone: 'warning',
+    });
+    if (!confirmed) return;
+    setDiagnosticsBusy(true);
+    try {
+      const bundle = await createRedactedDiagnosticBundle(session.getSnapshot(), session.getStatus());
+      setDiagnostics(bundle);
+      const result = await exportRedactedDiagnosticBundle(bundle);
+      setNotice(result === 'downloaded' ? '脱敏诊断包已下载。' : '已打开系统分享面板。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '诊断包导出失败。');
+    } finally {
+      setDiagnosticsBusy(false);
+    }
+  }
+
   async function exportEncryptedBackup() {
     if (!ensureWorkspaceWritable() || backupBusy) return;
     setBackupBusy(true);
     setNotice('正在本机加密备份…');
     try {
       const serialized = await exportEncryptedWorkspaceBackup(session.getSnapshot(), backupPassword);
+      await verifyEncryptedWorkspaceBackup(serialized, backupPassword);
       const result = await exportWorkspaceBackupFile(serialized);
+      await commitWorkspaceCommand({
+        type: 'backup-preferences.update',
+        patch: { lastExportedAt: Date.now(), lastVerifiedAt: Date.now(), snoozedUntil: undefined },
+      });
       setNotice(result === 'downloaded' ? '加密备份已下载。' : '已打开系统分享面板。');
       setBackupPassword('');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '加密备份导出失败。');
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function verifyEncryptedBackupOnly() {
+    if (!ensureWorkspaceWritable() || backupBusy) return;
+    setBackupBusy(true);
+    setNotice('');
+    try {
+      const serialized = await pickWorkspaceBackupFile();
+      if (serialized === null) {
+        setNotice('已取消选择备份文件。');
+        return;
+      }
+      const envelope = await verifyEncryptedWorkspaceBackup(serialized, backupPassword);
+      await commitWorkspaceCommand({
+        type: 'backup-preferences.update',
+        patch: { lastVerifiedAt: Date.now(), snoozedUntil: undefined },
+      });
+      setNotice(`备份可成功解密并通过结构校验；导出时间 ${new Date(envelope.exportedAt).toLocaleString()}。未替换当前工作区。`);
+      setBackupPassword('');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '备份验证失败。');
     } finally {
       setBackupBusy(false);
     }
@@ -684,6 +1063,10 @@ export function SettingsToolsSectionView(props: {
         return importedWorkspace;
       });
       await flushPendingAttachmentDeletions(importedAttachments);
+      await commitWorkspaceCommand({
+        type: 'backup-preferences.update',
+        patch: { lastVerifiedAt: Date.now(), snoozedUntil: undefined },
+      });
       chatProjectNavigation.resetComposer();
       setBackupPassword('');
       if (replacement.status === 'committed-with-postcommit-error') {
@@ -1413,8 +1796,9 @@ export function SettingsToolsSectionView(props: {
                     <Text style={styles.modelOverrideHint}>{generationTasks.length} 项</Text>
                   </View>
                   <Text style={styles.modelOverrideHint}>
-                    任务直接从本机对话记录派生，不上传到我们的服务器；只在你点击刷新时查询对应服务商。
+                    任务直接从本机对话记录派生，不上传到我们的服务器；前台会自动恢复查询，Android 后台以系统允许的最短周期尽力检查，强制停止或厂商省电可能延迟。
                   </Text>
+                  <GenerationTaskNotificationPermissionButton onNotice={setNotice} />
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.providerRow}>
                     {(['all', 'active', 'completed', 'failed'] as const).map((filter) => {
                       const selected = generationTaskFilter === filter;
@@ -1489,6 +1873,127 @@ export function SettingsToolsSectionView(props: {
 
             </>
           );
+        case 'diagnostics':
+          return (
+            <>
+              <View style={styles.settingsCard} testID="local-diagnostics-card">
+                <View style={styles.settingsCardHeader}>
+                  <View style={styles.mediaTaskInfo}>
+                    <Text style={styles.settingsCardTitle}>本地诊断中心</Text>
+                    <Text style={styles.modelOverrideHint}>只读检查 · 默认不联网</Text>
+                  </View>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    disabled={diagnosticsBusy}
+                    onPress={() => void refreshDiagnostics()}
+                    style={[styles.iconButton, diagnosticsBusy && styles.buttonDisabled]}
+                  >
+                    <RefreshCw size={16} color={palette.text} strokeWidth={2.2} />
+                  </AnimatedPressable>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  检查 Workspace 保存状态、服务商本地配置、媒体缓存、最近失败和草稿。只有“检查当前服务商连接”会请求用户自己的模型目录。
+                </Text>
+
+                <View style={styles.mediaTaskRow}>
+                  <Stethoscope size={18} color={palette.text} strokeWidth={2.1} />
+                  <View style={styles.mediaTaskInfo}>
+                    <Text style={styles.promptTemplateName}>Workspace 保存</Text>
+                    <Text style={styles.modelOverrideHint}>
+                      {status.phase === 'ready'
+                        ? status.dirty ? '存在等待持久化的本机修改' : '当前快照已提交或没有待保存修改'
+                        : status.phase === 'read-only' ? '只读恢复状态' : status.phase === 'replacing' ? '正在替换工作区' : '正在加载'}
+                    </Text>
+                    {status.issue ? <Text style={styles.settingsNotice}>{status.issue}</Text> : null}
+                  </View>
+                </View>
+
+                <View style={styles.mediaTaskRow}>
+                  <KeyRound size={18} color={palette.text} strokeWidth={2.1} />
+                  <View style={styles.mediaTaskInfo}>
+                    <Text style={styles.promptTemplateName}>当前服务商 · {activeProvider.name}</Text>
+                    <Text style={styles.modelOverrideHint}>
+                      {diagnostics?.providers.find((provider) => provider.id === activeProvider.id)?.summary
+                        ?? '点击刷新读取本地配置状态。'}
+                    </Text>
+                  </View>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    disabled={diagnosticsBusy}
+                    onPress={() => void checkActiveProviderConnection()}
+                    style={[styles.providerChip, diagnosticsBusy && styles.buttonDisabled]}
+                  >
+                    <Text style={styles.providerChipText}>检查连接</Text>
+                  </AnimatedPressable>
+                </View>
+
+                <View style={styles.mediaTaskRow}>
+                  <HardDrive size={18} color={palette.text} strokeWidth={2.1} />
+                  <View style={styles.mediaTaskInfo}>
+                    <Text style={styles.promptTemplateName}>媒体存储</Text>
+                    <Text style={styles.modelOverrideHint}>
+                      {diagnostics
+                        ? `${diagnostics.mediaStorage.fileCount} 个文件 · ${formatBytes(diagnostics.mediaStorage.totalBytes)} · ${diagnostics.mediaStorage.orphanCount} 个未引用`
+                        : '点击刷新统计本机自有媒体目录。'}
+                    </Text>
+                  </View>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    disabled={diagnosticsBusy}
+                    onPress={() => void cleanupMediaCache()}
+                    style={[styles.providerChip, diagnosticsBusy && styles.buttonDisabled]}
+                  >
+                    <Text style={styles.providerChipText}>清理异常缓存</Text>
+                  </AnimatedPressable>
+                </View>
+
+                <View style={styles.mediaTaskRow}>
+                  <MessageSquare size={18} color={palette.text} strokeWidth={2.1} />
+                  <View style={styles.mediaTaskInfo}>
+                    <Text style={styles.promptTemplateName}>最近失败</Text>
+                    <Text style={styles.modelOverrideHint}>
+                      {diagnostics ? `诊断包内保留最近 ${diagnostics.recentFailures.length} 条脱敏失败记录` : '尚未刷新'}
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>可恢复草稿 · {workspace.composerDrafts.length}</Text>
+                  {workspace.composerDrafts.slice(0, 8).map((draft) => {
+                    const conversation = workspace.conversations.find((item) => item.id === draft.conversationId);
+                    return (
+                      <AnimatedPressable
+                        key={draft.conversationId}
+                        accessibilityRole="button"
+                        onPress={() => {
+                          void selectConversation(draft.conversationId).then(() => settingsLauncher.close());
+                        }}
+                        style={styles.mediaTaskRow}
+                      >
+                        <View style={styles.mediaTaskInfo}>
+                          <Text numberOfLines={1} style={styles.promptTemplateName}>{conversation?.title ?? '已保留草稿'}</Text>
+                          <Text numberOfLines={2} style={styles.modelOverrideHint}>{draft.text}</Text>
+                        </View>
+                        <MessageSquare size={16} color={palette.text} strokeWidth={2} />
+                      </AnimatedPressable>
+                    );
+                  })}
+                  {!workspace.composerDrafts.length ? <Text style={styles.modelOverrideHint}>没有未发送草稿。</Text> : null}
+                </View>
+
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  disabled={diagnosticsBusy}
+                  onPress={() => void exportDiagnostics()}
+                  style={[styles.primaryButton, diagnosticsBusy && styles.buttonDisabled]}
+                >
+                  <Download size={16} color={palette.textOnAccent} strokeWidth={2.1} />
+                  <Text style={styles.primaryButtonText}>确认并导出脱敏诊断包</Text>
+                </AnimatedPressable>
+              </View>
+              {notice ? <Text accessibilityLiveRegion="assertive" style={styles.settingsNotice}>{notice}</Text> : null}
+            </>
+          );
         case 'backup':
           return (
             <>
@@ -1497,6 +2002,45 @@ export function SettingsToolsSectionView(props: {
                   <Text style={styles.modelOverrideHint}>
                     使用密码在本机完成认证加密。专用 API Key/MCP 授权字段、媒体文件、本机费用账本和 MCP 活动摘要不会导出；普通对话、提示词和错误文字会原样备份，请勿在其中粘贴密钥。
                   </Text>
+                  <Text style={styles.modelOverrideHint}>
+                    {isBackupReminderDue(workspace.backupPreferences)
+                      ? '备份提醒已到期：建议导出并验证一份新备份。'
+                      : `最近导出：${workspace.backupPreferences.lastExportedAt ? new Date(workspace.backupPreferences.lastExportedAt).toLocaleString() : '尚无'} · 最近验证：${workspace.backupPreferences.lastVerifiedAt ? new Date(workspace.backupPreferences.lastVerifiedAt).toLocaleString() : '尚无'}`}
+                  </Text>
+                  <View style={styles.toolSegmentRow}>
+                    {([0, 7, 14, 30] as const).map((days) => {
+                      const selected = workspace.backupPreferences.reminderIntervalDays === days;
+                      return (
+                        <AnimatedPressable
+                          key={`backup-reminder:${days}`}
+                          accessibilityRole="button"
+                          accessibilityState={{ selected }}
+                          disabled={workspaceReadOnly}
+                          onPress={() => void commitWorkspaceCommand({
+                            type: 'backup-preferences.update',
+                            patch: { reminderIntervalDays: days, snoozedUntil: undefined },
+                          })}
+                          style={[styles.toolSegment, selected && styles.toolSegmentActive]}
+                        >
+                          <Text style={[styles.toolSegmentText, selected && styles.toolSegmentTextActive]}>
+                            {days === 0 ? '关闭提醒' : `${days} 天`}
+                          </Text>
+                        </AnimatedPressable>
+                      );
+                    })}
+                  </View>
+                  {isBackupReminderDue(workspace.backupPreferences) ? (
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      onPress={() => void commitWorkspaceCommand({
+                        type: 'backup-preferences.update',
+                        patch: { snoozedUntil: Date.now() + 86_400_000 },
+                      })}
+                      style={styles.providerChip}
+                    >
+                      <Text style={styles.providerChipText}>提醒我明天再处理</Text>
+                    </AnimatedPressable>
+                  ) : null}
                   <View style={styles.fieldGroup}>
                     <Text style={styles.fieldLabel}>备份密码（至少 8 个字符）</Text>
                     <TextInput
@@ -1523,6 +2067,15 @@ export function SettingsToolsSectionView(props: {
                     <AnimatedPressable
                       accessibilityRole="button"
                       disabled={backupBusy || workspaceReadOnly}
+                      onPress={() => void verifyEncryptedBackupOnly()}
+                      style={[styles.secondaryButton, styles.updateActionButton, (backupBusy || workspaceReadOnly) && styles.buttonDisabled]}
+                    >
+                      <ShieldCheck size={16} color={palette.text} strokeWidth={2} />
+                      <Text style={styles.secondaryButtonText}>{backupBusy ? '处理中' : '只验证，不导入'}</Text>
+                    </AnimatedPressable>
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      disabled={backupBusy || workspaceReadOnly}
                       onPress={() => void importEncryptedBackup()}
                       style={[styles.primaryButton, styles.updateActionButton, (backupBusy || workspaceReadOnly) && styles.buttonDisabled]}
                     >
@@ -1532,6 +2085,207 @@ export function SettingsToolsSectionView(props: {
                   </View>
                 </View>
 
+            </>
+          );
+        case 'sync':
+          return (
+            <>
+              <View style={styles.settingsCard} testID="cloud-sync-settings-card">
+                <View style={styles.settingsCardHeader}>
+                  <Text style={styles.settingsCardTitle}>用户自有存储同步</Text>
+                  <Text style={styles.modelOverrideHint}>{workspace.cloudSync.lastStatus}</Text>
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  只同步加密后的文本、配置和项目状态；媒体文件、API Key、同步凭据与费用账本不会上传。同步由你的 WebDAV 或 S3 账户承担，Embezzle Studio 不提供服务器或额度。
+                </Text>
+                <View style={styles.toolSegmentRow}>
+                  {(['webdav', 's3'] as const).map((provider) => (
+                    <AnimatedPressable
+                      key={provider}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected: syncProviderDraft === provider }}
+                      disabled={syncBusy}
+                      onPress={() => setSyncProviderDraft(provider)}
+                      style={[styles.toolSegment, syncProviderDraft === provider && styles.toolSegmentActive]}
+                    >
+                      <Text style={[styles.toolSegmentText, syncProviderDraft === provider && styles.toolSegmentTextActive]}>
+                        {provider === 'webdav' ? 'WebDAV' : 'S3 兼容存储'}
+                      </Text>
+                    </AnimatedPressable>
+                  ))}
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>HTTPS Endpoint</Text>
+                  <TextInput
+                    value={syncEndpointDraft}
+                    editable={!syncBusy && !workspaceReadOnly}
+                    onChangeText={setSyncEndpointDraft}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    placeholder="https://dav.example.com 或 S3 网关"
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>远端目录</Text>
+                  <TextInput
+                    value={syncRemotePathDraft}
+                    editable={!syncBusy && !workspaceReadOnly}
+                    onChangeText={setSyncRemotePathDraft}
+                    autoCapitalize="none"
+                    placeholder="Embezzle-Studio"
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                {syncProviderDraft === 's3' ? (
+                  <View style={styles.updateActionRow}>
+                    <TextInput
+                      value={syncBucketDraft}
+                      editable={!syncBusy && !workspaceReadOnly}
+                      onChangeText={setSyncBucketDraft}
+                      autoCapitalize="none"
+                      placeholder="Bucket"
+                      placeholderTextColor={palette.placeholder}
+                      style={[styles.input, styles.updateActionButton]}
+                    />
+                    <TextInput
+                      value={syncRegionDraft}
+                      editable={!syncBusy && !workspaceReadOnly}
+                      onChangeText={setSyncRegionDraft}
+                      autoCapitalize="none"
+                      placeholder="Region"
+                      placeholderTextColor={palette.placeholder}
+                      style={[styles.input, styles.updateActionButton]}
+                    />
+                  </View>
+                ) : (
+                  <View style={styles.updateActionRow}>
+                    <TextInput
+                      value={syncUsernameDraft}
+                      editable={!syncBusy && !workspaceReadOnly}
+                      onChangeText={setSyncUsernameDraft}
+                      autoCapitalize="none"
+                      placeholder="WebDAV 用户名"
+                      placeholderTextColor={palette.placeholder}
+                      style={[styles.input, styles.updateActionButton]}
+                    />
+                    <TextInput
+                      value={syncPasswordDraft}
+                      editable={!syncBusy && !workspaceReadOnly}
+                      onChangeText={setSyncPasswordDraft}
+                      secureTextEntry
+                      autoCapitalize="none"
+                      placeholder="WebDAV 密码"
+                      placeholderTextColor={palette.placeholder}
+                      style={[styles.input, styles.updateActionButton]}
+                    />
+                  </View>
+                )}
+                {syncProviderDraft === 's3' ? (
+                  <>
+                    <TextInput
+                      value={syncAccessKeyDraft}
+                      editable={!syncBusy && !workspaceReadOnly}
+                      onChangeText={setSyncAccessKeyDraft}
+                      autoCapitalize="none"
+                      placeholder="Access Key ID"
+                      placeholderTextColor={palette.placeholder}
+                      style={styles.input}
+                    />
+                    <TextInput
+                      value={syncSecretKeyDraft}
+                      editable={!syncBusy && !workspaceReadOnly}
+                      onChangeText={setSyncSecretKeyDraft}
+                      secureTextEntry
+                      autoCapitalize="none"
+                      placeholder="Secret Access Key"
+                      placeholderTextColor={palette.placeholder}
+                      style={styles.input}
+                    />
+                    <TextInput
+                      value={syncSessionTokenDraft}
+                      editable={!syncBusy && !workspaceReadOnly}
+                      onChangeText={setSyncSessionTokenDraft}
+                      secureTextEntry
+                      autoCapitalize="none"
+                      placeholder="可选 Session Token"
+                      placeholderTextColor={palette.placeholder}
+                      style={styles.input}
+                    />
+                  </>
+                ) : null}
+                <View style={styles.fieldGroup}>
+                  <Text style={styles.fieldLabel}>同步加密密码（至少 8 个字符）</Text>
+                  <TextInput
+                    value={syncEncryptionPasswordDraft}
+                    editable={!syncBusy && !workspaceReadOnly}
+                    onChangeText={setSyncEncryptionPasswordDraft}
+                    secureTextEntry
+                    autoCapitalize="none"
+                    placeholder="不会上传到远端"
+                    placeholderTextColor={palette.placeholder}
+                    style={styles.input}
+                  />
+                </View>
+                <Text style={styles.modelOverrideHint}>
+                  首次同步会留下一个很小的 CAS 探测对象，用于确认远端真正支持 If-Match / If-None-Match；不支持条件写入时会 fail-closed，不覆盖 manifest。
+                </Text>
+                <View style={styles.updateActionRow}>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    disabled={syncBusy || workspaceReadOnly}
+                    onPress={() => void syncNow()}
+                    style={[styles.primaryButton, styles.updateActionButton, (syncBusy || workspaceReadOnly) && styles.buttonDisabled]}
+                  >
+                    <RefreshCw size={16} color={palette.textOnAccent} strokeWidth={2.1} />
+                    <Text style={styles.primaryButtonText}>{syncBusy ? '同步中' : '保存并同步'}</Text>
+                  </AnimatedPressable>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    disabled={syncBusy || workspaceReadOnly}
+                    onPress={() => void clearSyncConfiguration()}
+                    style={[styles.secondaryButton, styles.updateActionButton, (syncBusy || workspaceReadOnly) && styles.buttonDisabled]}
+                  >
+                    <Trash2 size={16} color={palette.text} strokeWidth={2.1} />
+                    <Text style={styles.secondaryButtonText}>停用并清除凭据</Text>
+                  </AnimatedPressable>
+                </View>
+                {workspace.cloudSync.lastError ? (
+                  <Text accessibilityLiveRegion="assertive" style={styles.settingsNotice}>{workspace.cloudSync.lastError}</Text>
+                ) : null}
+                {workspace.cloudSync.conflicts.length ? (
+                  <View style={styles.fieldGroup}>
+                    <Text style={styles.fieldLabel}>待处理冲突（不会静默覆盖）</Text>
+                    {workspace.cloudSync.conflicts.map((conflict) => (
+                      <View key={conflict.id} style={styles.mediaTaskRow}>
+                        <View style={styles.mediaTaskInfo}>
+                          <Text style={styles.promptTemplateName}>本机 {conflict.localDigest.slice(0, 12)}… / 远端 {conflict.remoteDigest.slice(0, 12)}…</Text>
+                          <Text style={styles.modelOverrideHint}>{new Date(conflict.detectedAt).toLocaleString()}</Text>
+                        </View>
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          disabled={syncBusy || workspaceReadOnly}
+                          onPress={() => void resolveSyncConflict(conflict.id, 'keep-local')}
+                          style={[styles.providerChip, (syncBusy || workspaceReadOnly) && styles.buttonDisabled]}
+                        >
+                          <Text style={styles.providerChipText}>保留本机</Text>
+                        </AnimatedPressable>
+                        <AnimatedPressable
+                          accessibilityRole="button"
+                          disabled={syncBusy || workspaceReadOnly}
+                          onPress={() => void resolveSyncConflict(conflict.id, 'keep-remote')}
+                          style={[styles.providerChip, (syncBusy || workspaceReadOnly) && styles.buttonDisabled]}
+                        >
+                          <Text style={styles.providerChipText}>保留远端</Text>
+                        </AnimatedPressable>
+                      </View>
+                    ))}
+                  </View>
+                ) : null}
+              </View>
+              {notice ? <Text accessibilityLiveRegion="assertive" style={styles.settingsNotice}>{notice}</Text> : null}
             </>
           );
         case 'voice':

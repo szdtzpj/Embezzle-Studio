@@ -41,8 +41,8 @@ const lightColors = Object.freeze({
   divider: 'rgba(0, 0, 0, 0.06)',
   text: '#202020',
   textSecondary: '#646464',
-  textTertiary: '#9A9A9A',
-  textMuted: '#9A9A9A',
+  textTertiary: '#737373',
+  textMuted: '#737373',
   textOnPrimary: '#FFFFFF',
   card: '#FFFFFF',
   surfacePressed: 'rgba(0, 0, 0, 0.05)',
@@ -63,7 +63,7 @@ const lightColors = Object.freeze({
   citationBadge: '#F0F4FF',
   composer: '#FFFFFF',
   composerBorder: 'rgba(0, 0, 0, 0.08)',
-  placeholder: '#9CA3AF',
+  placeholder: '#737373',
 });
 
 export type KelivoColors = Readonly<Record<keyof typeof lightColors, string>>;
@@ -105,8 +105,8 @@ const darkColors: KelivoColors = Object.freeze({
   divider: 'rgba(255, 255, 255, 0.08)',
   text: '#E5E7EF',
   textSecondary: '#B8BBC6',
-  textTertiary: '#878A95',
-  textMuted: '#878A95',
+  textTertiary: '#A7A9B2',
+  textMuted: '#A7A9B2',
   textOnPrimary: '#1E2A5A',
   card: '#1B1D24',
   surfacePressed: 'rgba(255, 255, 255, 0.07)',
@@ -127,7 +127,7 @@ const darkColors: KelivoColors = Object.freeze({
   citationBadge: '#222942',
   composer: '#1B1D24',
   composerBorder: 'rgba(255, 255, 255, 0.11)',
-  placeholder: '#878A95',
+  placeholder: '#A7A9B2',
 });
 
 const radius = Object.freeze({

@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from 'react';
 
-import { useWorkspaceSession } from '../../app/workspace/WorkspaceSessionProvider';
+import { useWorkspaceSession } from '../../app/workspace/internal/WorkspaceSessionContext';
 import type { ChatMessage, GenerationTaskInfo } from '../../domain/types';
 import { canonicalMessageId } from '../../services/conversationBranches';
 import { discardUncommittedAttachments } from '../../services/mediaStorage';

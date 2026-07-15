@@ -1,4 +1,4 @@
-import { BookOpen, Check, Clock3, Download, FilePlus2, FileText, History, Plus, RotateCcw, Save, Search, Trash2, X } from 'lucide-react-native';
+import { BookOpen, Check, Clock3, Download, FilePlus2, FileText, History, MessageCircle, Plus, RotateCcw, Save, Search, Star, Tag, Trash2, X } from 'lucide-react-native';
 import { useEffect, useMemo, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -10,9 +10,10 @@ import type {
   ProjectKnowledgeSource,
   WorkspaceArtifact,
   WorkspaceArtifactFormat,
+  WorkspaceProject,
 } from '../domain/types';
 import {
-  buildProjectKnowledgeIndex,
+  buildWorkspaceKnowledgeIndex,
   searchProjectKnowledgeIndex,
 } from '../services/projectKnowledge';
 import { summarizeWorkspaceArtifactRevisionDiff } from '../services/workspaceArtifacts';
@@ -20,9 +21,11 @@ import { createKnowledgeAndClearDraft } from './workspaceWorkbenchDraft';
 
 interface WorkspaceWorkbenchProps {
   visible: boolean;
+  presentation?: 'modal' | 'screen';
   projectName: string;
   artifacts: readonly WorkspaceArtifact[];
   knowledgeSources: readonly ProjectKnowledgeSource[];
+  projects?: readonly WorkspaceProject[];
   initialArtifactId?: string | null;
   readOnly?: boolean;
   onClose: () => void;
@@ -32,10 +35,14 @@ interface WorkspaceWorkbenchProps {
   onDeleteArtifact: (artifactId: string) => void;
   onExportArtifact: (artifactId: string) => void;
   onSaveArtifactAsKnowledge: (artifactId: string) => void;
+  onSetArtifactFavorite?: (artifactId: string, favorite: boolean) => void;
+  onSetArtifactTags?: (artifactId: string, tags: string[]) => void;
+  onContinueConversation?: (conversationId: string) => void;
   onCreateKnowledge: (title: string, content: string) => boolean | Promise<boolean>;
   onSaveKnowledge: (sourceId: string, title: string, content: string) => void;
   onDeleteKnowledge: (sourceId: string) => void;
   onImportTextKnowledge: () => void;
+  onImportDocumentKnowledge?: () => void;
 }
 
 type WorkbenchTab = 'artifacts' | 'knowledge';
@@ -71,11 +78,17 @@ function formatTime(timestamp: number): string {
   }).format(new Date(timestamp));
 }
 
+function parseArtifactTags(value: string): string[] {
+  return [...new Set(value.split(/[,，\n]/u).map((tag) => tag.normalize('NFKC').trim()).filter(Boolean))].slice(0, 12);
+}
+
 export function WorkspaceWorkbench({
   visible,
+  presentation = 'modal',
   projectName,
   artifacts,
   knowledgeSources,
+  projects = [],
   initialArtifactId,
   readOnly = false,
   onClose,
@@ -85,10 +98,14 @@ export function WorkspaceWorkbench({
   onDeleteArtifact,
   onExportArtifact,
   onSaveArtifactAsKnowledge,
+  onSetArtifactFavorite,
+  onSetArtifactTags,
+  onContinueConversation,
   onCreateKnowledge,
   onSaveKnowledge,
   onDeleteKnowledge,
   onImportTextKnowledge,
+  onImportDocumentKnowledge,
 }: WorkspaceWorkbenchProps) {
   const insets = useSafeAreaInsets();
   const theme = useKelivoTheme();
@@ -99,6 +116,9 @@ export function WorkspaceWorkbench({
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [artifactTitle, setArtifactTitle] = useState('');
   const [artifactContent, setArtifactContent] = useState('');
+  const [artifactTags, setArtifactTags] = useState('');
+  const [artifactQuery, setArtifactQuery] = useState('');
+  const [artifactFilter, setArtifactFilter] = useState<'all' | 'favorite' | WorkspaceArtifactFormat>('all');
   const [selectedKnowledgeId, setSelectedKnowledgeId] = useState<string | null>(null);
   const [knowledgeTitle, setKnowledgeTitle] = useState('');
   const [knowledgeContent, setKnowledgeContent] = useState('');
@@ -124,6 +144,25 @@ export function WorkspaceWorkbench({
       maxLineLength: 180,
     });
   }, [selectedArtifact]);
+  const projectNameById = useMemo(
+    () => new Map(projects.map((project) => [project.id, project.name])),
+    [projects]
+  );
+  const filteredArtifacts = useMemo(() => {
+    const query = artifactQuery.normalize('NFKC').trim().toLocaleLowerCase();
+    return [...artifacts]
+      .filter((artifact) => {
+        if (artifactFilter === 'favorite' && !artifact.favorite) return false;
+        if (artifactFilter !== 'all' && artifactFilter !== 'favorite' && artifact.format !== artifactFilter) return false;
+        if (!query) return true;
+        const content = activeArtifactContent(artifact);
+        return [artifact.title, artifact.tags?.join(' ') ?? '', projectNameById.get(artifact.projectId) ?? '', content]
+          .join('\n')
+          .toLocaleLowerCase()
+          .includes(query);
+      })
+      .sort((left, right) => Number(Boolean(right.favorite)) - Number(Boolean(left.favorite)) || right.updatedAt - left.updatedAt);
+  }, [artifactFilter, artifactQuery, artifacts, projectNameById]);
   useEffect(() => {
     const query = knowledgeQuery.normalize('NFKC').trim();
     if (!query) {
@@ -136,8 +175,7 @@ export function WorkspaceWorkbench({
   const knowledgeSearchEnabled = Boolean(deferredKnowledgeQuery);
   const knowledgeIndex = useMemo(() => {
     if (!knowledgeSearchEnabled) return null;
-    const projectId = knowledgeSources[0]?.projectId;
-    return projectId ? buildProjectKnowledgeIndex(knowledgeSources, projectId) : null;
+    return knowledgeSources.length ? buildWorkspaceKnowledgeIndex(knowledgeSources) : null;
   }, [knowledgeSearchEnabled, knowledgeSources]);
   const filteredKnowledge = useMemo(() => {
     const query = deferredKnowledgeQuery;
@@ -166,6 +204,7 @@ export function WorkspaceWorkbench({
   useEffect(() => {
     setArtifactTitle(selectedArtifact?.title ?? '');
     setArtifactContent(activeArtifactContent(selectedArtifact));
+    setArtifactTags(selectedArtifact?.tags?.join(', ') ?? '');
   }, [selectedArtifact]);
 
   useEffect(() => {
@@ -185,11 +224,22 @@ export function WorkspaceWorkbench({
     selectedArtifact &&
     (artifactTitle.trim() !== selectedArtifact.title || artifactContent !== activeArtifactContent(selectedArtifact))
   );
+  const artifactTagsDirty = Boolean(
+    selectedArtifact &&
+    parseArtifactTags(artifactTags).join('\n') !== (selectedArtifact.tags ?? []).join('\n')
+  );
   const knowledgeDirty = Boolean(
     selectedKnowledge &&
     (knowledgeTitle.trim() !== selectedKnowledge.title || knowledgeContent !== selectedKnowledge.content)
   );
   const newKnowledgeDirty = Boolean(newKnowledgeTitle.trim() || newKnowledgeContent.trim());
+
+  useEffect(() => {
+    if (!visible || artifactDirty || artifactTagsDirty) return;
+    if (!selectedArtifactId || !filteredArtifacts.some((artifact) => artifact.id === selectedArtifactId)) {
+      setSelectedArtifactId(filteredArtifacts[0]?.id ?? null);
+    }
+  }, [artifactDirty, artifactTagsDirty, filteredArtifacts, selectedArtifactId, visible]);
 
   async function confirmDiscard(dirty: boolean, action: () => void) {
     if (!dirty) {
@@ -210,20 +260,12 @@ export function WorkspaceWorkbench({
 
   const requestClose = () => {
     void confirmDiscard(
-      artifactDirty || knowledgeDirty || newKnowledgeDirty,
+      artifactDirty || artifactTagsDirty || knowledgeDirty || newKnowledgeDirty,
       onClose
     );
   };
 
-  return (
-    <Modal
-      visible={visible}
-      animationType="slide"
-      presentationStyle="fullScreen"
-      statusBarTranslucent
-      navigationBarTranslucent
-      onRequestClose={requestClose}
-    >
+  const content = (
       <SafeAreaView style={styles.root}>
         <View style={styles.header}>
           <View style={styles.headerText}>
@@ -262,8 +304,40 @@ export function WorkspaceWorkbench({
             contentContainerStyle={[styles.bodyContent, { paddingBottom: Math.max(28, insets.bottom + 20) }]}
             keyboardShouldPersistTaps="handled"
           >
+            <View style={styles.searchBox}>
+              <Search size={16} color={colors.secondary} strokeWidth={2} />
+              <TextInput
+                value={artifactQuery}
+                onChangeText={setArtifactQuery}
+                placeholder="跨项目搜索成果标题、标签和正文"
+                placeholderTextColor={colors.secondary}
+                style={styles.searchInput}
+              />
+            </View>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
-              {artifacts.map((artifact) => (
+              {([
+                ['all', '全部'],
+                ['favorite', '收藏'],
+                ['markdown', 'Markdown'],
+                ['plain-text', '文本'],
+                ['code', '代码'],
+                ['json', 'JSON'],
+                ['html', 'HTML 文本'],
+              ] as const).map(([filter, label]) => (
+                <Pressable
+                  key={`filter:${filter}`}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: artifactFilter === filter }}
+                  onPress={() => setArtifactFilter(filter)}
+                  style={[styles.filterChip, artifactFilter === filter && styles.filterChipActive]}
+                >
+                  <Text style={[styles.filterChipText, artifactFilter === filter && styles.filterChipTextActive]}>{label}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            <Text style={styles.meta}>按收藏与最近编辑排序 · 显示 {filteredArtifacts.length} / {artifacts.length}</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
+              {filteredArtifacts.map((artifact) => (
                 <Pressable
                   key={artifact.id}
                   accessibilityRole="button"
@@ -273,7 +347,7 @@ export function WorkspaceWorkbench({
                   style={[styles.chip, artifact.id === selectedArtifactId && styles.chipActive]}
                 >
                   <Text numberOfLines={1} style={[styles.chipText, artifact.id === selectedArtifactId && styles.chipTextActive]}>
-                    {artifact.title}
+                    {artifact.favorite ? '★ ' : ''}{artifact.title}
                   </Text>
                 </Pressable>
               ))}
@@ -298,9 +372,22 @@ export function WorkspaceWorkbench({
                   <View style={styles.cardHeader}>
                     <View>
                       <Text style={styles.cardTitle}>编辑成果</Text>
-                      <Text style={styles.meta}>{artifactFormatLabel(selectedArtifact.format)} · 本机版本 {selectedArtifact.revisions.length}</Text>
+                      <Text style={styles.meta}>{projectNameById.get(selectedArtifact.projectId) ?? '当前项目'} · {artifactFormatLabel(selectedArtifact.format)} · 本机版本 {selectedArtifact.revisions.length}</Text>
                     </View>
-                    {artifactDirty ? <Text style={styles.unsavedBadge}>未保存</Text> : <Check size={18} color={colors.secondary} strokeWidth={2.4} />}
+                    <View style={styles.cardHeaderActions}>
+                      {onSetArtifactFavorite ? (
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel={selectedArtifact.favorite ? '取消收藏成果' : '收藏成果'}
+                          disabled={readOnly}
+                          onPress={() => onSetArtifactFavorite(selectedArtifact.id, !selectedArtifact.favorite)}
+                          style={[styles.iconButton, readOnly && styles.disabled]}
+                        >
+                          <Star size={18} color={selectedArtifact.favorite ? colors.warning : colors.secondary} fill={selectedArtifact.favorite ? colors.warning : 'transparent'} strokeWidth={2.2} />
+                        </Pressable>
+                      ) : null}
+                      {artifactDirty || artifactTagsDirty ? <Text style={styles.unsavedBadge}>未保存</Text> : <Check size={18} color={colors.secondary} strokeWidth={2.4} />}
+                    </View>
                   </View>
                   <TextInput
                     value={artifactTitle}
@@ -320,6 +407,27 @@ export function WorkspaceWorkbench({
                     placeholderTextColor={colors.secondary}
                     style={styles.editor}
                   />
+                  {onSetArtifactTags ? (
+                    <View style={styles.tagEditorRow}>
+                      <Tag size={16} color={colors.secondary} strokeWidth={2} />
+                      <TextInput
+                        value={artifactTags}
+                        editable={!readOnly}
+                        onChangeText={setArtifactTags}
+                        placeholder="标签，用逗号分隔"
+                        placeholderTextColor={colors.secondary}
+                        style={styles.tagInput}
+                      />
+                      <Pressable
+                        accessibilityRole="button"
+                        disabled={readOnly || !artifactTagsDirty}
+                        onPress={() => onSetArtifactTags(selectedArtifact.id, parseArtifactTags(artifactTags))}
+                        style={[styles.compactButton, (readOnly || !artifactTagsDirty) && styles.disabled]}
+                      >
+                        <Text style={styles.compactButtonText}>保存标签</Text>
+                      </Pressable>
+                    </View>
+                  ) : null}
                   <Text style={styles.securityHint}>
                     HTML 和代码在 v1.3 中只作为文本保存与导出，不执行脚本、不联网预览。
                   </Text>
@@ -363,6 +471,16 @@ export function WorkspaceWorkbench({
                       <Text style={styles.dangerButtonText}>删除</Text>
                     </Pressable>
                   </View>
+                  {selectedArtifact.sourceConversationId && onContinueConversation ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => onContinueConversation(selectedArtifact.sourceConversationId!)}
+                      style={styles.secondaryButton}
+                    >
+                      <MessageCircle size={16} color={colors.text} strokeWidth={2.1} />
+                      <Text style={styles.secondaryButtonText}>回到来源对话继续</Text>
+                    </Pressable>
+                  ) : null}
                 </View>
 
                 <View style={styles.card}>
@@ -473,17 +591,30 @@ export function WorkspaceWorkbench({
               <View style={styles.cardHeader}>
                 <View>
                   <Text style={styles.cardTitle}>新增本地资料</Text>
-                  <Text style={styles.meta}>首版支持文本、Markdown、JSON 与代码文件</Text>
+                  <Text style={styles.meta}>支持文本、HTML、DOCX、XLSX、PPTX，以及 Android 本机 PDF / 图片 OCR</Text>
                 </View>
-                <Pressable
-                  accessibilityRole="button"
-                  disabled={readOnly}
-                  onPress={onImportTextKnowledge}
-                  style={[styles.compactButton, readOnly && styles.disabled]}
-                >
-                  <FilePlus2 size={15} color={colors.text} strokeWidth={2.1} />
-                  <Text style={styles.compactButtonText}>导入文本文件</Text>
-                </Pressable>
+                <View style={styles.cardHeaderActions}>
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={readOnly}
+                    onPress={onImportTextKnowledge}
+                    style={[styles.compactButton, readOnly && styles.disabled]}
+                  >
+                    <FilePlus2 size={15} color={colors.text} strokeWidth={2.1} />
+                    <Text style={styles.compactButtonText}>文本</Text>
+                  </Pressable>
+                  {onImportDocumentKnowledge ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      disabled={readOnly}
+                      onPress={onImportDocumentKnowledge}
+                      style={[styles.compactButton, readOnly && styles.disabled]}
+                    >
+                      <FileText size={15} color={colors.text} strokeWidth={2.1} />
+                      <Text style={styles.compactButtonText}>文档 / 图片</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
               </View>
               <TextInput
                 value={newKnowledgeTitle}
@@ -576,6 +707,22 @@ export function WorkspaceWorkbench({
           </ScrollView>
         )}
       </SafeAreaView>
+  );
+
+  if (presentation === 'screen') {
+    return visible ? content : null;
+  }
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      presentationStyle="fullScreen"
+      statusBarTranslucent
+      navigationBarTranslucent
+      onRequestClose={requestClose}
+    >
+      {content}
     </Modal>
   );
 }
@@ -588,7 +735,7 @@ function createStyles(theme: KelivoTheme) {
   headerText: { flex: 1, gap: 2 },
   title: { color: colors.text, fontSize: 19, fontWeight: '700' },
   subtitle: { color: colors.secondary, fontSize: 12 },
-  iconButton: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
+  iconButton: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
   tabs: { padding: 10, flexDirection: 'row', gap: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   tab: { flex: 1, minHeight: 42, borderRadius: 13, backgroundColor: colors.surfaceAlt, flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center' },
   tabActive: { backgroundColor: colors.accent },
@@ -597,14 +744,19 @@ function createStyles(theme: KelivoTheme) {
   body: { flex: 1 },
   bodyContent: { padding: 16, gap: 12 },
   chipRow: { gap: 8, paddingRight: 12 },
-  chip: { maxWidth: 180, minHeight: 36, paddingHorizontal: 12, borderRadius: 12, backgroundColor: colors.surfaceAlt, justifyContent: 'center' },
+  chip: { maxWidth: 180, minHeight: 44, paddingHorizontal: 12, borderRadius: 12, backgroundColor: colors.surfaceAlt, justifyContent: 'center' },
   chipActive: { backgroundColor: colors.accent },
   chipText: { color: colors.secondary, fontSize: 12, fontWeight: '600' },
   chipTextActive: { color: colors.onAccent },
-  addChip: { minHeight: 36, paddingHorizontal: 12, borderRadius: 12, backgroundColor: colors.surfaceStrong, flexDirection: 'row', gap: 5, alignItems: 'center' },
+  addChip: { minHeight: 44, paddingHorizontal: 12, borderRadius: 12, backgroundColor: colors.surfaceStrong, flexDirection: 'row', gap: 5, alignItems: 'center' },
+  filterChip: { minHeight: 44, paddingHorizontal: 12, borderRadius: 12, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
+  filterChipActive: { backgroundColor: colors.accent },
+  filterChipText: { color: colors.secondary, fontSize: 11, fontWeight: '700' },
+  filterChipTextActive: { color: colors.onAccent },
   addChipText: { color: colors.text, fontSize: 12, fontWeight: '700' },
   card: { padding: 15, borderRadius: 18, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, gap: 12 },
   cardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  cardHeaderActions: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   cardTitle: { color: colors.text, fontSize: 16, fontWeight: '700' },
   meta: { color: colors.secondary, fontSize: 11, marginTop: 2 },
   unsavedBadge: { color: colors.text, fontSize: 10, backgroundColor: colors.surfaceAlt, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, overflow: 'hidden' },
@@ -612,6 +764,8 @@ function createStyles(theme: KelivoTheme) {
   editor: { minHeight: 260, maxHeight: 520, borderRadius: 13, backgroundColor: colors.background, borderWidth: 1, borderColor: colors.border, padding: 12, color: colors.text, fontSize: 14, lineHeight: 21 },
   knowledgeEditor: { minHeight: 120, maxHeight: 260, borderRadius: 13, backgroundColor: colors.background, borderWidth: 1, borderColor: colors.border, padding: 12, color: colors.text, fontSize: 14, lineHeight: 21 },
   securityHint: { color: colors.secondary, fontSize: 11, lineHeight: 17 },
+  tagEditorRow: { minHeight: 48, borderRadius: 13, backgroundColor: colors.background, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 10, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  tagInput: { flex: 1, minWidth: 0, color: colors.text, fontSize: 13, paddingVertical: 8 },
   actionRow: { flexDirection: 'row', gap: 8 },
   primaryButton: { flex: 1.35, minHeight: 44, borderRadius: 13, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 7 },
   primaryButtonText: { color: colors.onAccent, fontWeight: '700', fontSize: 13 },
@@ -629,14 +783,14 @@ function createStyles(theme: KelivoTheme) {
   versionIcon: { width: 30, height: 30, borderRadius: 10, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
   versionText: { flex: 1 },
   versionTitle: { color: colors.text, fontSize: 12, fontWeight: '600' },
-  restoreButton: { minHeight: 32, paddingHorizontal: 9, borderRadius: 10, backgroundColor: colors.surfaceAlt, flexDirection: 'row', gap: 5, alignItems: 'center' },
+  restoreButton: { minHeight: 44, paddingHorizontal: 10, borderRadius: 12, backgroundColor: colors.surfaceAlt, flexDirection: 'row', gap: 5, alignItems: 'center' },
   restoreText: { color: colors.text, fontSize: 11, fontWeight: '700' },
   emptyCard: { minHeight: 240, borderRadius: 18, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center', gap: 8, padding: 24 },
   emptyTitle: { color: colors.text, fontSize: 16, fontWeight: '700' },
   emptyText: { color: colors.secondary, fontSize: 12, lineHeight: 18, textAlign: 'center' },
   searchBox: { minHeight: 44, borderRadius: 13, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 8 },
   searchInput: { flex: 1, color: colors.text, fontSize: 13 },
-  compactButton: { minHeight: 34, paddingHorizontal: 10, borderRadius: 10, backgroundColor: colors.surfaceAlt, flexDirection: 'row', gap: 5, alignItems: 'center' },
+  compactButton: { minHeight: 44, paddingHorizontal: 10, borderRadius: 10, backgroundColor: colors.surfaceAlt, flexDirection: 'row', gap: 5, alignItems: 'center', justifyContent: 'center' },
   compactButtonText: { color: colors.text, fontSize: 11, fontWeight: '700' },
   disabled: { opacity: 0.42 },
   });

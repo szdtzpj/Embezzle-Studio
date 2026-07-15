@@ -17,6 +17,7 @@ import {
   MAX_PROJECT_KNOWLEDGE_TOTAL_BYTES,
   buildProjectKnowledgeContext,
   buildProjectKnowledgeIndex,
+  buildWorkspaceKnowledgeIndex,
   createImportedTextProjectKnowledgeSource,
   createManualProjectKnowledgeSource,
   createProjectKnowledgeSourceFromArtifact,
@@ -343,6 +344,20 @@ describe('bounded local knowledge index and search', () => {
     expect(searchProjectKnowledgeIndex(index, '[*+?')[0]).toMatchObject({ sourceId: 'literal' });
     expect(() => searchProjectKnowledgeIndex(index, '[*+?')).not.toThrow();
     expect(searchProjectKnowledgeIndex(index, '不存在')).toEqual([]);
+  });
+
+  it('searches a bounded workspace index across every project', () => {
+    const sources = [
+      source({ id: 'project-one-source', projectId: 'project-1', content: 'first project only' }),
+      source({ id: 'project-two-source', projectId: 'project-2', content: 'cross workspace marker' }),
+    ];
+
+    const index = buildWorkspaceKnowledgeIndex(sources);
+    const results = searchProjectKnowledgeIndex(index, 'cross workspace marker');
+
+    expect(results).toEqual([
+      expect.objectContaining({ sourceId: 'project-two-source', projectId: 'project-2' }),
+    ]);
   });
 
   it('uses selected/recent sources first at source and chunk caps', () => {
