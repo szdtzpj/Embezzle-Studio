@@ -83,6 +83,7 @@ P0/P1 的实现范围已经落到当前工作树，目标版本为 `1.8.0` / And
 - P0：workspace schema v7 迁移与故障只读、首次配置向导/简单与高级模式、草稿恢复与备份提醒、项目/成果工作台、收藏与标签、分支/版本历史，以及跨项目有界本地搜索。
 - P1：Android 后台媒体任务与持久 outbox、尽力轮询和本地通知；系统分享文字/链接/图片/视频/PDF/Office 的预览、显式解析与对话/资料/成果落点；受限文本/HTML/DOCX/XLSX/PPTX/PDF/图片导入、Android PDFBox 与 ML Kit 本机 OCR；用户自有 WebDAV/S3 加密同步、ETag/CAS 和显式冲突解决。
 - 成本边界：以上能力不购买或托管 API、服务器、推送、worker、云存储额度或 OCR 配额。服务商调用、WebDAV/S3 存储和任何费用均由用户自己的账号承担。
+- 官方 DeepSeek alias 路由已按官方矩阵收口：直连 `api.deepseek.com` 的 `deepseek-reasoner`/`deepseek-chat` 不接受伪造的可调思考强度；兼容 relay 不被误判为官方端点。
 - P2 生物识别锁：本版本明确延期，不新增 `expo-local-authentication`、指纹/Face ID 流程或相关权限。
 
 `1.8.0` 目前仍是本地未发布开发版本。当前工作树的实现与验证记录以 [1.8.0 P0/P1 continuation checkpoint](./CONTINUATION_CHECKPOINT_2026-07-14_V1.8.md) 为准；未经明确授权不执行 push、tag 或 Release。
@@ -91,7 +92,7 @@ P0/P1 的实现范围已经落到当前工作树，目标版本为 `1.8.0` / And
 
 本机已验证：
 
-- `npm.cmd run check` 通过 76 个测试文件、1,014 项测试，TypeScript 与 ESLint 均干净；`npm.cmd run build:web` 通过（3,483 modules，主 bundle 约 8.2 MB）。
+- `npm.cmd run check` 通过 76 个测试文件、1,018 项测试，TypeScript 与 ESLint 均干净；`npm.cmd run build:web` 通过（3,483 modules，主 bundle 约 8.2 MB）。
 - `npx.cmd expo install --check` 通过，Expo Doctor 20/20；3 份 workflow YAML、36 个 Bash `run` 块、16 个完整 Action SHA、`git diff --check` 及 `expo-sharing` patch 反向检查均通过。
 - 依赖高危审计退出 0；剩余 12 个 moderate `uuid -> xcode -> @expo/config-plugins` 问题未使用会破坏 Expo 工具链的 `npm audit fix --force`。
 - 干净 `npx.cmd expo prebuild --platform android --clean --no-install` 与离线 `assembleRelease` 已完成；Android 清单/工作流门禁确认 `allowBackup=false`、`adjustResize`、无 `CAMERA`/overlay/`REQUEST_INSTALL_PACKAGES`/生物识别权限，并要求 APK v2/v3 签名。

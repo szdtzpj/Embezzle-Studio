@@ -445,6 +445,27 @@ export function isExactOfficialOpenAiProvider(
 }
 
 /**
+ * Returns true only for the official DeepSeek API host. This is intentionally
+ * host-based rather than provider-id-based so a renamed built-in profile still
+ * receives the documented alias safeguards, while compatible relays do not.
+ */
+export function isExactOfficialDeepSeekProvider(
+  provider: Pick<ProviderProfile, 'baseUrl'>
+): boolean {
+  try {
+    const url = new URL(provider.baseUrl.trim());
+    return url.protocol === 'https:' &&
+      url.hostname.toLowerCase() === 'api.deepseek.com' &&
+      !url.username &&
+      !url.password &&
+      !url.port &&
+      (url.pathname === '/' || url.pathname === '/v1' || url.pathname === '/v1/');
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Compares the exact protocol/endpoint binding used for secrets and cached
  * models. Display-name-only edits intentionally do not participate.
  */

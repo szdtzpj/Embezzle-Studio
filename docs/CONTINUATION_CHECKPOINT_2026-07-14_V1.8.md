@@ -32,13 +32,19 @@ discarded. P2 biometric lock is explicitly deferred.
 - Remote `main` PR #25 was integrated before release: the search setup entry
   remains visible, DeepSeek is a built-in BYOK provider, and existing
   workspaces add that built-in profile without replacing user credentials.
+- The final provider audit also hardens the official DeepSeek aliases: on the
+  exact `api.deepseek.com` host, `deepseek-reasoner` is fixed thinking mode and
+  `deepseek-chat` is fixed non-thinking mode; stale effort values are ignored,
+  while compatible relays retain their declared generic behavior.
+  The reviewed sources are the [DeepSeek model list](https://api-docs.deepseek.com/)
+  and [Thinking Mode guide](https://api-docs.deepseek.com/guides/thinking_mode).
 - Android workflow gates now cover `allowBackup=false`, `adjustResize`,
   `REQUEST_INSTALL_PACKAGES`/biometric/fingerprint absence, and both APK v2/v3
   signature schemes. Prebuild uses `CI=1` and `--clean --no-install`.
 
 ## Local verification evidence
 
-- `npm.cmd run check`: 76 test files / 1,014 tests passed; TypeScript and ESLint
+- `npm.cmd run check`: 76 test files / 1,018 tests passed; TypeScript and ESLint
   are clean.
 - Ark wire-protocol tests mock the unrelated media-persistence boundary, whose
   native behavior remains covered by the dedicated media-storage/export tests.
