@@ -1,0 +1,12 @@
+{
+  "name": "@embezzle-studio/document-import",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.ts",
+  "peerDependencies": {
+    "expo": "*",
+    "expo-modules-core": "*",
+    "react": "*",
+    "react-native": "*"
+  }
+}

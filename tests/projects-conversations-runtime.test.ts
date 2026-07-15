@@ -12,7 +12,10 @@ import {
 import { hasConversationHistory } from '../src/features/projects/projectConversationHelpers';
 import { applyProjectConversationChatEffects } from '../src/features/projects/projectConversationResults';
 
-function createRuntime(options: { historyLocked?: boolean } = {}) {
+function createRuntime(options: {
+  historyLocked?: boolean;
+  onConversationDeleted?: (conversationId: string) => Promise<void>;
+} = {}) {
   const ids = new FakeIdGenerator();
   const persistence = new MemoryWorkspacePersistenceAdapter({
     initial: createDefaultWorkspace(),
@@ -27,11 +30,26 @@ function createRuntime(options: { historyLocked?: boolean } = {}) {
     now: () => 1_700_000_000_000,
     createId: (prefix) => ids.createId(prefix),
     isHistoryLocked: () => options.historyLocked === true,
+    onConversationDeleted: options.onConversationDeleted,
   });
   return { session, runtime, persistence };
 }
 
 describe('ProjectsConversationsRuntime', () => {
+  it('runs conversation-delete cleanup only after the required workspace commit', async () => {
+    const onConversationDeleted = vi.fn(async () => undefined);
+    const { session, runtime } = createRuntime({ onConversationDeleted });
+    await session.boot();
+    const conversationId = session.getSnapshot().activeConversationId;
+
+    const result = await runtime.execute({ type: 'conversation.delete', conversationId });
+
+    expect(result.ok).toBe(true);
+    expect(onConversationDeleted).toHaveBeenCalledWith(conversationId);
+    await session.settle();
+    expect(session.getSnapshot().conversations.some((item) => item.id === conversationId)).toBe(false);
+  });
+
   it('applies every cross-feature Chat effect returned by a Projects command', () => {
     const effects = {
       showNotice: vi.fn(),
@@ -246,6 +264,34 @@ describe('ProjectsConversationsRuntime', () => {
     );
   });
 
+  it('rejects request-context changes while history is locked but keeps the snapshot browsable', async () => {
+    const { session, runtime } = createRuntime({ historyLocked: true });
+    await session.boot();
+    const before = session.getSnapshot();
+    const projectId = before.activeProjectId;
+    const conversationId = before.activeConversationId;
+    const commands = [
+      { type: 'project.create' as const, input: { name: 'blocked' } },
+      { type: 'project.update' as const, projectId, patch: { name: 'blocked' } },
+      { type: 'project.activate' as const, projectId },
+      { type: 'project.setDefaultTarget' as const, projectId, providerId: 'missing', modelId: 'missing' },
+      { type: 'conversation.start' as const, projectId },
+      { type: 'conversation.activate' as const, conversationId },
+      { type: 'conversation.move' as const, conversationId, projectId },
+      { type: 'conversation.fork' as const, conversationId, messageId: 'missing' },
+      { type: 'conversation.toggle-knowledge' as const, sourceId: 'missing' },
+    ];
+
+    for (const command of commands) {
+      await expect(runtime.execute(command)).resolves.toMatchObject({
+        ok: false,
+        notice: expect.stringContaining('服务商请求'),
+      });
+    }
+
+    expect(session.getSnapshot()).toEqual(before);
+  });
+
   it('deletes a conversation, reparents children, and reports orphaned attachments', async () => {
     const { session, runtime } = createRuntime();
     await session.boot();
@@ -320,6 +366,36 @@ describe('ProjectsConversationsRuntime', () => {
     expect(remaining.some((item) => item.id === 'conversation-child')).toBe(true);
     const child = remaining.find((item) => item.id === 'conversation-child')!;
     expect(child.parentConversationId).toBeUndefined();
+  });
+
+  it('deletes the conversation draft in the same commit and reports its orphaned attachments', async () => {
+    const { session, runtime } = createRuntime();
+    await session.boot();
+    const conversationId = session.getSnapshot().activeConversationId;
+    await mutateSessionForTest(session, (workspace) => ({
+      ...workspace,
+      composerDrafts: [{
+        conversationId,
+        text: '',
+        updatedAt: 1,
+        attachments: [{
+          id: 'draft-file',
+          kind: 'file' as const,
+          uri: 'file:///documents/draft-file.pdf',
+          name: 'draft-file.pdf',
+          size: 32,
+        }],
+      }],
+    }));
+
+    const result = await runtime.execute({ type: 'conversation.delete', conversationId });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(session.getSnapshot().composerDrafts).toEqual([]);
+    expect(result.orphanedAttachments?.map((attachment) => attachment.uri)).toContain(
+      'file:///documents/draft-file.pdf'
+    );
   });
 
   it('moves a conversation across projects and clears knowledge selection', async () => {
@@ -410,6 +486,81 @@ describe('ProjectsConversationsRuntime', () => {
     );
     expect(session.getSnapshot().messages.some((message) => message.content === 'New instruction'))
       .toBe(true);
+  });
+
+  it('synchronizes every empty conversation in a project when its instruction changes', async () => {
+    const { session, runtime } = createRuntime();
+    await session.boot();
+    const projectId = session.getSnapshot().activeProjectId;
+    const active = session.getSnapshot().conversations.find(
+      (conversation) => conversation.id === session.getSnapshot().activeConversationId
+    )!;
+    await mutateSessionForTest(session, (workspace) => ({
+      ...workspace,
+      conversations: [
+        ...workspace.conversations,
+        {
+          ...active,
+          id: 'empty-project-sibling',
+          updatedAt: active.updatedAt + 1,
+          messages: [],
+        },
+      ],
+    }));
+
+    const result = await runtime.execute({
+      type: 'project.update',
+      projectId,
+      patch: { systemPrompt: 'Latest instruction' },
+    });
+
+    expect(result.ok).toBe(true);
+    const conversations = session
+      .getSnapshot()
+      .conversations.filter((conversation) => conversation.projectId === projectId);
+    expect(conversations).toHaveLength(2);
+    for (const conversation of conversations) {
+      expect(
+        conversation.messages.filter((message) => message.projectInstructionId === projectId)
+      ).toEqual([
+        expect.objectContaining({ content: 'Latest instruction' }),
+      ]);
+    }
+  });
+
+  it('refreshes a stale empty project instruction when activating a conversation', async () => {
+    const { session, runtime } = createRuntime();
+    await session.boot();
+    const projectId = session.getSnapshot().activeProjectId;
+    const active = session.getSnapshot().conversations.find(
+      (conversation) => conversation.id === session.getSnapshot().activeConversationId
+    )!;
+    await mutateSessionForTest(session, (workspace) => ({
+      ...workspace,
+      projects: workspace.projects.map((project) =>
+        project.id === projectId ? { ...project, systemPrompt: 'Current instruction' } : project
+      ),
+      conversations: [
+        ...workspace.conversations.map((conversation) =>
+          conversation.id === active.id ? { ...conversation, messages: [] } : conversation
+        ),
+        { ...active, id: 'stale-empty', messages: [] },
+      ],
+    }));
+
+    const result = await runtime.execute({
+      type: 'conversation.activate',
+      conversationId: 'stale-empty',
+    });
+
+    expect(result.ok).toBe(true);
+    const activated = session.getSnapshot().conversations.find(
+      (conversation) => conversation.id === 'stale-empty'
+    )!;
+    expect(activated.messages).toEqual([
+      expect.objectContaining({ projectInstructionId: projectId, content: 'Current instruction' }),
+    ]);
+    expect(session.getSnapshot().messages).toEqual(activated.messages);
   });
 
   it('deletes a project and migrates conversations, artifacts, and knowledge to fallback', async () => {

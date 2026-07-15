@@ -8,7 +8,7 @@ import React, {
 } from 'react';
 
 import { isWorkspaceCommitRejectedError } from '../../app/workspace/WorkspaceSession';
-import { useWorkspaceSession } from '../../app/workspace/WorkspaceSessionProvider';
+import { useWorkspaceSession } from '../../app/workspace/internal/WorkspaceSessionContext';
 import type { SettingsScreenHandle } from './internal/SettingsScreen';
 import {
   SettingsLifecycleContext,
@@ -62,7 +62,10 @@ export function SettingsProductivityProvider(
   const [isOpen, setIsOpen] = useState(false);
   const [hasMounted, setHasMounted] = useState(false);
   const settingsScreenRef = useRef<SettingsScreenHandle | null>(null);
-  const pendingDestinationRef = useRef<SettingsDestination | null>(null);
+  // State (rather than a ref) is intentional: calling open(destination) while
+  // Settings is already visible must retrigger the navigation effect.
+  const [pendingDestination, setPendingDestination] =
+    useState<SettingsDestination | null>(null);
   const lifecycleCommit = useMemo(
     () => new SettingsWorkspaceRuntime(workspaceSession),
     [workspaceSession]
@@ -71,7 +74,7 @@ export function SettingsProductivityProvider(
   const close = useCallback(() => {
     const wasOpen = isOpen;
     settingsScreenRef.current?.resetNavigation();
-    pendingDestinationRef.current = null;
+    setPendingDestination(null);
     setIsOpen(false);
     if (wasOpen) {
       void attemptSettingsCloseCommit(lifecycleCommit);
@@ -81,9 +84,9 @@ export function SettingsProductivityProvider(
   const open = useCallback(
     (destination?: SettingsDestination) => {
       if (destination && destination.kind !== 'home') {
-        pendingDestinationRef.current = destination;
+        setPendingDestination(destination);
       } else {
-        pendingDestinationRef.current = null;
+        setPendingDestination(null);
       }
       setHasMounted(true);
       setIsOpen(true);
@@ -114,23 +117,25 @@ export function SettingsProductivityProvider(
   );
 
   useEffect(() => {
-    if (!isOpen || !hasMounted || !pendingDestinationRef.current) {
+    if (!isOpen || !hasMounted || !pendingDestination) {
       return;
     }
     const settings = settingsScreenRef.current;
     if (!settings) {
       return;
     }
-    const destination = pendingDestinationRef.current;
-    pendingDestinationRef.current = null;
+    const destination = pendingDestination;
+    setPendingDestination(null);
     if (destination.kind === 'providers') {
       settings.openProviders();
     } else if (destination.kind === 'provider-models') {
-      settings.openActiveProviderModels();
+      void (destination.providerId
+        ? settings.openProviderModels(destination.providerId)
+        : settings.openActiveProviderModels());
     } else if (destination.kind === 'tool') {
       settings.openToolsSection(destination.tool);
     }
-  }, [hasMounted, isOpen]);
+  }, [hasMounted, isOpen, pendingDestination]);
 
   const value = useMemo(
     () => ({

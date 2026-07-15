@@ -3,12 +3,13 @@ import { Linking } from 'react-native';
 
 import {
   useWorkspaceSelector,
-  useWorkspaceSession,
   useWorkspaceStatus,
 } from '../../../app/workspace/WorkspaceSessionProvider';
+import { useWorkspaceSession } from '../../../app/workspace/internal/WorkspaceSessionContext';
 import { appInfo } from '../../../data/appInfo';
 import type {
   Capability,
+  ExperienceMode,
   ModelInfo,
   ModelTask,
   ProviderProfile,
@@ -575,6 +576,11 @@ export function useSettingsScreenModel(onClose: () => void): SettingsScreenModel
     }
   }
 
+  function setExperienceMode(mode: ExperienceMode) {
+    if (!ensureWritable()) return;
+    void execute({ type: 'experience.set-mode', mode });
+  }
+
   function openUpdateTarget(kind: 'release' | 'install') {
     const target =
       kind === 'install'
@@ -596,6 +602,8 @@ export function useSettingsScreenModel(onClose: () => void): SettingsScreenModel
     appearance: {
       colorMode: appearance.colorMode,
       onSetColorMode: appearance.setColorMode,
+      experienceMode: workspace.experienceMode,
+      onSetExperienceMode: setExperienceMode,
     },
     providers: {
       providers: workspace.providers,

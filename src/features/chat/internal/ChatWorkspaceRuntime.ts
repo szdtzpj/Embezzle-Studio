@@ -1,6 +1,7 @@
 import type {
   AppWorkspace,
   ChatMessage,
+  MediaAttachment,
   ModelParameterSettings,
   ProviderUsageEvent,
   ReasoningEffort,
@@ -8,6 +9,7 @@ import type {
 import {
   isWorkspaceCommitRejectedError,
   type WorkspaceCommitPort,
+  type WorkspaceCommitOptions,
 } from '../../../app/workspace/internal/WorkspaceCommitPort';
 import type { WorkspaceSession } from '../../../app/workspace/WorkspaceSession';
 import { defaultParameterSettings } from '../../../data/providerCatalog';
@@ -18,6 +20,11 @@ import {
   upsertConversation,
 } from '../../projects/projectConversationHelpers';
 import { canonicalMessageId } from '../../../services/conversationBranches';
+import { upsertConversationDraft } from '../../../services/workspaceProductState';
+import {
+  cleanupIntentsForMessages,
+  recordGenerationTaskCleanupIntents,
+} from '../../../services/generationTaskCleanupJournal';
 
 export type ChatWorkspaceCommand =
   | { type: 'model.select'; providerId: string; modelId: string; activateProvider?: boolean }
@@ -76,7 +83,14 @@ export type ChatWorkspaceCommand =
   | { type: 'message.toggle-context'; messageId: string; mode: 'excluded' | 'pinned'; now: number }
   | { type: 'message.edit-through'; messageId: string; content: string; now: number }
   | { type: 'message.remove-everywhere'; messageId: string; now: number }
-  | { type: 'message.remove-through'; messageId: string; now: number };
+  | { type: 'message.remove-through'; messageId: string; now: number }
+  | {
+      type: 'draft.set';
+      conversationId: string;
+      text: string;
+      now: number;
+      attachments?: MediaAttachment[];
+    };
 
 function updateMessageCopies(
   workspace: AppWorkspace,
@@ -213,6 +227,20 @@ export function reduceChatWorkspaceCommand(
           parameterSettings: { ...defaultParameterSettings, enabled: true },
         },
       };
+    case 'draft.set':
+      return {
+        result: undefined,
+        workspace: {
+          ...workspace,
+          composerDrafts: upsertConversationDraft(
+            workspace.composerDrafts,
+            command.conversationId,
+            command.text,
+            command.now,
+            command.attachments
+          ),
+        },
+      };
     case 'conversation.set-messages': {
       const conversations = upsertConversation(
         workspace.conversations,
@@ -244,6 +272,12 @@ export function reduceChatWorkspaceCommand(
           ...workspace,
           activeConversationId: command.conversationId,
           messages,
+          // The composer payload is now represented by the committed user
+          // message; clear its durable draft in this same snapshot so a crash
+          // after send cannot restore already-sent attachments.
+          composerDrafts: workspace.composerDrafts.filter(
+            (draft) => draft.conversationId !== command.conversationId
+          ),
           conversations: upsertConversation(
             workspace.conversations,
             command.conversationId,
@@ -425,9 +459,12 @@ export class ChatWorkspaceRuntime {
     this.commit = session.bindCommitPort(reduceChatWorkspaceCommand);
   }
 
-  async execute(command: ChatWorkspaceCommand): Promise<boolean> {
+  async execute(command: ChatWorkspaceCommand, options?: WorkspaceCommitOptions): Promise<boolean> {
     try {
-      await this.commit.execute(command);
+      const before = this.session.getSnapshot();
+      const intents = cleanupIntentsForChatCommand(before, command);
+      if (intents.length) await recordGenerationTaskCleanupIntents(intents);
+      await this.commit.execute(command, options);
       return true;
     } catch (error) {
       if (isWorkspaceCommitRejectedError(error)) return false;
@@ -440,5 +477,52 @@ export class ChatWorkspaceRuntime {
       reason: 'chat',
       propagateFailure: options.propagateFailure,
     });
+  }
+}
+
+function cleanupIntentsForChatCommand(
+  workspace: AppWorkspace,
+  command: ChatWorkspaceCommand
+) {
+  const conversationId = workspace.activeConversationId || 'conversation-default';
+  const byId = (messageId: string) => workspace.messages.find((message) => message.id === messageId);
+  switch (command.type) {
+    case 'message.remove-everywhere': {
+      const messages = [
+        ...workspace.messages.filter((message) => message.id === command.messageId),
+        ...workspace.conversations.flatMap((conversation) =>
+          conversation.messages.filter((message) => message.id === command.messageId)
+        ),
+      ];
+      return cleanupIntentsForMessages(messages, conversationId);
+    }
+    case 'message.remove-through':
+    case 'message.edit-through': {
+      const index = workspace.messages.findIndex((message) => message.id === command.messageId);
+      return index < 0 ? [] : cleanupIntentsForMessages(workspace.messages.slice(index), conversationId);
+    }
+    case 'message.update': {
+      const message = byId(command.messageId);
+      return message && Object.prototype.hasOwnProperty.call(command.patch, 'generationTask') &&
+        command.patch.generationTask === undefined
+        ? cleanupIntentsForMessages([message], command.conversationId ?? conversationId)
+        : [];
+    }
+    case 'message.update-generation-copies':
+      return Object.prototype.hasOwnProperty.call(command.patch, 'generationTask') &&
+        command.patch.generationTask === undefined
+        ? cleanupIntentsForMessages([command.source], conversationId)
+        : [];
+    case 'conversation.set-messages': {
+      const existing = workspace.conversations.find((conversation) => conversation.id === command.conversationId);
+      if (!existing) return [];
+      const nextIds = new Set(command.messages.map((message) => message.id));
+      return cleanupIntentsForMessages(
+        existing.messages.filter((message) => !nextIds.has(message.id)),
+        command.conversationId
+      );
+    }
+    default:
+      return [];
   }
 }

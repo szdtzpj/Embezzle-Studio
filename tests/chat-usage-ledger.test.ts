@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { createDefaultWorkspace } from '../src/data/providerCatalog';
 import { ChatUsageLedger } from '../src/features/chat/internal/requests/ChatUsageLedger';
+import { createStartedProviderUsageEvent } from '../src/services/costGuard';
 
 describe('ChatUsageLedger', () => {
   it('rolls back a newly inserted attempt when required durability fails', async () => {
@@ -67,5 +68,68 @@ describe('ChatUsageLedger', () => {
         operations: [{ kind: 'chat', providerId: 'provider-1', modelId: 'model-1' }],
       })
     ).resolves.toBe(false);
+  });
+
+  it('removes started attempts when visible message append fails', async () => {
+    let workspace = createDefaultWorkspace();
+    workspace = { ...workspace, costGuard: { ...workspace.costGuard, enabled: true } };
+    const replacements: string[][] = [];
+    const ledger = new ChatUsageLedger({
+      readWorkspace: () => workspace,
+      isReplacing: () => false,
+      replaceUsageEvents: async (events) => {
+        replacements.push(events.map((event) => event.id));
+        workspace = { ...workspace, providerUsageEvents: events };
+        return true;
+      },
+      flushRequired: async () => undefined,
+      confirmCost: async () => true,
+      notify: () => undefined,
+      now: () => 1_700_000_000_000,
+    });
+    const started = ledger.createStarted({
+      id: 'append-failed',
+      kind: 'chat',
+      providerId: 'provider-1',
+      modelId: 'model-1',
+      createdAt: 1_700_000_000_000,
+    });
+    const unrelated = ledger.createStarted({
+      id: 'keep-me',
+      kind: 'chat',
+      providerId: 'provider-1',
+      modelId: 'model-1',
+      createdAt: 1_700_000_000_000,
+    });
+    await ledger.persist([started, unrelated]);
+
+    await ledger.rollbackStarted([started]);
+
+    expect(replacements.at(-1)).toEqual(['keep-me']);
+    expect(workspace.providerUsageEvents.map((event) => event.id)).toEqual(['keep-me']);
+  });
+
+  it('fails loudly when the workspace rejects a started-attempt rollback', async () => {
+    const workspace = createDefaultWorkspace();
+    const started = createStartedProviderUsageEvent({
+      id: 'cannot-rollback',
+      kind: 'chat',
+      providerId: 'provider-1',
+      modelId: 'model-1',
+      createdAt: 1_700_000_000_000,
+    });
+    workspace.providerUsageEvents = [started];
+    const ledger = new ChatUsageLedger({
+      readWorkspace: () => workspace,
+      isReplacing: () => true,
+      replaceUsageEvents: async () => false,
+      flushRequired: async () => undefined,
+      confirmCost: async () => true,
+      notify: () => undefined,
+      now: () => 1_700_000_000_000,
+    });
+
+    await expect(ledger.rollbackStarted([started])).rejects.toThrow(/台账回滚失败/);
+    expect(workspace.providerUsageEvents).toEqual([started]);
   });
 });

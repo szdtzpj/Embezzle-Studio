@@ -7,6 +7,8 @@ export type SettingsToolsSection =
   | 'usage'
   | 'media'
   | 'backup'
+  | 'sync'
+  | 'diagnostics'
   | 'voice'
   | 'mcp';
 

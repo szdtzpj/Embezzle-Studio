@@ -31,7 +31,7 @@ export interface WorkspaceSessionOptions {
   lifecycle?: ApplicationLifecyclePort;
   /** Optional test trace. Production omits this. */
   trace?: TraceRecorder;
-  /** When true, boot() must be called explicitly. Default true. */
+  /** When false, the caller must invoke boot() explicitly. Default true. */
   autoBoot?: boolean;
 }
 
@@ -65,22 +65,16 @@ export class WorkspaceSession {
   private readonly persistence: WorkspacePersistenceAdapter;
   private readonly clock: WorkspaceSessionClock;
   private readonly trace?: TraceRecorder;
+  private readonly lifecycle?: ApplicationLifecyclePort;
   private unsubscribeLifecycle: (() => void) | null = null;
 
   constructor(options: WorkspaceSessionOptions) {
     this.persistence = options.persistence;
     this.clock = options.clock ?? productionClock;
     this.trace = options.trace;
+    this.lifecycle = options.lifecycle;
     this.snapshot = createDefaultWorkspace();
     this.cachedStatus = this.buildStatus();
-
-    if (options.lifecycle) {
-      this.unsubscribeLifecycle = options.lifecycle.subscribe((event) => {
-        if (event === 'background') {
-          void this.flush({ reason: 'background' });
-        }
-      });
-    }
 
     if (options.autoBoot !== false) {
       void this.boot();
@@ -149,8 +143,24 @@ export class WorkspaceSession {
     if (this.bootPromise) {
       return this.bootPromise;
     }
+    if (this.disposed) {
+      this.bootPromise = Promise.resolve();
+      return this.bootPromise;
+    }
+    this.ensureLifecycleSubscription();
     this.bootPromise = this.runBoot();
     return this.bootPromise;
+  }
+
+  private ensureLifecycleSubscription(): void {
+    if (this.unsubscribeLifecycle || !this.lifecycle || this.disposed) {
+      return;
+    }
+    this.unsubscribeLifecycle = this.lifecycle.subscribe((event) => {
+      if (event === 'background') {
+        void this.flush({ reason: 'background' });
+      }
+    });
   }
 
   private async runBoot(): Promise<void> {

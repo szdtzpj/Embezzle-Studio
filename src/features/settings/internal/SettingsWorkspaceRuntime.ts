@@ -1,5 +1,8 @@
 import type {
   AppWorkspace,
+  BackupPreferences,
+  CloudSyncSettings,
+  ExperienceMode,
   ExternalSearchProviderKind,
   ModelInfo,
   ModelPricing,
@@ -25,6 +28,13 @@ import {
 } from '../../../services/promptTemplates';
 import { removeProviderFromWorkspace } from '../../../services/providerLifecycle';
 import { isProviderEnabled } from '../../../services/workspaceRuntime';
+import {
+  normalizeBackupPreferences,
+  normalizeCloudSyncSettings,
+  normalizeExperienceMode,
+  normalizeOnboardingState,
+  hasUsableProviderConfiguration,
+} from '../../../services/workspaceProductState';
 
 type ProviderBindingChange = {
   changed: boolean;
@@ -99,7 +109,14 @@ export type SettingsWorkspaceCommand =
       protocol?: 'bailian-compatible' | 'openai-official';
     }
   | { type: 'voice.clear-target'; kind: 'transcription' | 'speech' }
-  | { type: 'voice.update'; patch: Partial<VoiceSettings> };
+  | { type: 'voice.update'; patch: Partial<VoiceSettings> }
+  | { type: 'experience.set-mode'; mode: ExperienceMode }
+  | {
+      type: 'onboarding.update';
+      patch: Partial<AppWorkspace['onboarding']>;
+    }
+  | { type: 'backup-preferences.update'; patch: Partial<BackupPreferences> }
+  | { type: 'cloud-sync.update'; patch: Partial<CloudSyncSettings> };
 
 export function reduceSettingsWorkspaceCommand(
   workspace: AppWorkspace,
@@ -600,6 +617,49 @@ export function reduceSettingsWorkspaceCommand(
       return {
         result: undefined,
         workspace: { ...workspace, voice: { ...workspace.voice, ...command.patch } },
+      };
+    case 'experience.set-mode':
+      return {
+        result: undefined,
+        workspace: { ...workspace, experienceMode: normalizeExperienceMode(command.mode) },
+      };
+    case 'onboarding.update': {
+      const configured = hasUsableProviderConfiguration(
+        workspace.providers,
+        workspace.activeModelIdByProvider
+      );
+      return {
+        result: undefined,
+        workspace: {
+          ...workspace,
+          onboarding: normalizeOnboardingState(
+            { ...workspace.onboarding, ...command.patch },
+            configured
+          ),
+        },
+      };
+    }
+    case 'backup-preferences.update':
+      return {
+        result: undefined,
+        workspace: {
+          ...workspace,
+          backupPreferences: normalizeBackupPreferences({
+            ...workspace.backupPreferences,
+            ...command.patch,
+          }),
+        },
+      };
+    case 'cloud-sync.update':
+      return {
+        result: undefined,
+        workspace: {
+          ...workspace,
+          cloudSync: normalizeCloudSyncSettings(
+            { ...workspace.cloudSync, ...command.patch },
+            workspace.cloudSync.deviceId
+          ),
+        },
       };
     default: {
       const exhaustive: never = command;

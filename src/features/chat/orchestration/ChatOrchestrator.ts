@@ -7,6 +7,8 @@ export type ChatStartResult<Lease> =
       ok: false;
       stage: 'preflight' | 'authorization' | 'revision' | 'lease' | 'ledger' | 'append';
       error?: Error;
+      /** A second failure while compensating an append-stage rejection. */
+      rollbackError?: Error;
     };
 
 export interface ChatStartPlan<Lease> {
@@ -18,6 +20,8 @@ export interface ChatStartPlan<Lease> {
   acquireLease(): Lease | null;
   releaseLease(lease: Lease): void;
   persistStartedLedger(): void | Promise<void>;
+  /** Remove the started attempt when the visible-message commit cannot land. */
+  rollbackStartedLedger(): void | Promise<void>;
   appendVisibleMessages(): void | Promise<void>;
 }
 
@@ -72,8 +76,30 @@ export class ChatOrchestrator {
       this.trace?.record('chat.messages.append', { intent: plan.intent.type });
       await plan.appendVisibleMessages();
     } catch (error) {
-      plan.releaseLease(lease);
-      return { ok: false, stage: 'append', error: asError(error) };
+      let rollbackError: Error | undefined;
+      this.trace?.record('chat.ledger.rollback.start', { intent: plan.intent.type });
+      try {
+        await plan.rollbackStartedLedger();
+        this.trace?.record('chat.ledger.rollback.done', { intent: plan.intent.type });
+      } catch (caughtRollbackError) {
+        // Preserve the original append failure as the request-start result, but
+        // expose the compensation failure as well. A workspace phase change can
+        // reject both the append and its rollback, so callers must not claim the
+        // local started attempt was definitely removed.
+        rollbackError = asError(caughtRollbackError);
+        this.trace?.record('chat.ledger.rollback.failed', {
+          intent: plan.intent.type,
+          error: rollbackError.message,
+        });
+      } finally {
+        plan.releaseLease(lease);
+      }
+      return {
+        ok: false,
+        stage: 'append',
+        error: asError(error),
+        ...(rollbackError ? { rollbackError } : {}),
+      };
     }
 
     return { ok: true, lease, revision };

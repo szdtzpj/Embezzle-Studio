@@ -111,6 +111,43 @@ export class ChatUsageLedger {
     }
   }
 
+  /**
+   * Removes started attempts that were committed before the visible request
+   * messages. A rejected append must not leave a phantom billable attempt in
+   * the local ledger. Only matching events that are still `started` are
+   * removed, so a concurrent terminal update cannot be erased accidentally.
+   */
+  async rollbackStarted(events: readonly ProviderUsageEvent[]): Promise<void> {
+    const ids = new Set(
+      events.filter((event) => event.status === 'started').map((event) => event.id)
+    );
+    if (!ids.size) return;
+
+    const current = this.host.readWorkspace();
+    const rollbackEvents = current.providerUsageEvents.filter(
+      (event) => !(ids.has(event.id) && event.status === 'started')
+    );
+    if (rollbackEvents.length === current.providerUsageEvents.length) return;
+
+    const accepted = await this.host.replaceUsageEvents(rollbackEvents);
+    if (!accepted) {
+      throw new Error('工作区当前不可写，已发起请求的台账回滚失败。');
+    }
+
+    try {
+      await this.host.flushRequired();
+    } catch (error) {
+      if (current.costGuard.enabled) {
+        throw new Error(
+          `费用保险丝台账回滚无法持久化：${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+      this.host.notify('本机请求台账回滚暂时无法持久化；当前内存状态已移除未发出的请求。');
+    }
+  }
+
   async finish(
     event: ProviderUsageEvent,
     status: 'succeeded' | 'failed' | 'cancelled',

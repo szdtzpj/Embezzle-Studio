@@ -12,3 +12,7 @@ export {
 } from './SettingsProductivityProvider';
 export { useSettingsLauncher, type SettingsLauncher } from './useSettingsLauncher';
 export { SettingsPane } from './SettingsPane';
+export {
+  FirstRunSetupWizard,
+  type FirstRunSetupWizardProps,
+} from './FirstRunSetupWizard';

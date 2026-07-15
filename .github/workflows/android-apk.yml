@@ -210,7 +210,26 @@ jobs:
       - name: Prebuild Android project
         env:
           CI: 1
-        run: npx expo prebuild --platform android --clean --non-interactive
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Verify generated Android manifest contract
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          manifest="android/app/src/main/AndroidManifest.xml"
+          if [[ ! -f "$manifest" ]]; then
+            echo "::error::Generated AndroidManifest.xml is missing."
+            exit 1
+          fi
+          if ! grep -Eq 'android:allowBackup="false"' "$manifest"; then
+            echo "::error::Generated Android manifest must set android:allowBackup=\"false\"."
+            exit 1
+          fi
+          if ! grep -Eq 'android:windowSoftInputMode="adjustResize"' "$manifest"; then
+            echo "::error::Generated Android activity must use windowSoftInputMode=\"adjustResize\"."
+            exit 1
+          fi
 
       - name: Disable generated debug signing for release
         shell: bash
@@ -283,7 +302,10 @@ jobs:
 
           for forbidden_permission in \
             android.permission.SYSTEM_ALERT_WINDOW \
-            android.permission.CAMERA; do
+            android.permission.CAMERA \
+            android.permission.USE_BIOMETRIC \
+            android.permission.USE_FINGERPRINT \
+            android.permission.REQUEST_INSTALL_PACKAGES; do
             if grep -Fq "$forbidden_permission" <<<"$permissions"; then
               echo "::error::Forbidden permission $forbidden_permission is present in the packaged manifest."
               exit 1
@@ -443,6 +465,10 @@ jobs:
           fi
           if ! grep -Fq 'Verified using v2 scheme (APK Signature Scheme v2): true' "$report"; then
             echo "::error::The release APK must verify with APK Signature Scheme v2."
+            exit 1
+          fi
+          if ! grep -Fq 'Verified using v3 scheme (APK Signature Scheme v3): true' "$report"; then
+            echo "::error::The release APK must verify with APK Signature Scheme v3."
             exit 1
           fi
 

@@ -12,6 +12,17 @@ import { getSupportedReasoningEfforts, normalizeReasoningEffort } from '../src/s
 const platform = vi.hoisted(() => ({ OS: 'android' }));
 vi.mock('react-native', () => ({ Platform: platform }));
 
+// These protocol tests must not initialize the native file-system runtime just
+// to persist a provider-returned video URL. The real persistence boundary is
+// covered by media-storage/media-export tests; keeping it mocked here also
+// prevents full-suite worker contention from turning the two Ark task tests
+// into 5-second native-module import timeouts.
+const mediaStorageMocks = vi.hoisted(() => ({
+  materializeAttachment: vi.fn(async (attachment: MediaAttachment) => attachment),
+  persistAttachment: vi.fn(async (attachment: MediaAttachment) => attachment),
+}));
+vi.mock('../src/services/mediaStorage', () => mediaStorageMocks);
+
 const ark: ProviderProfile = {
   id: 'ark',
   name: 'Volcengine Ark',

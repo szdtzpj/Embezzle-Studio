@@ -219,7 +219,7 @@ function createChatPaneStyles(palette: AppPalette) {
     gap: 10,
   },
   modelPickerPill: {
-    height: 40,
+    minHeight: 44,
     borderRadius: radii.pill,
     backgroundColor: palette.surface,
     borderWidth: 1,
@@ -231,6 +231,10 @@ function createChatPaneStyles(palette: AppPalette) {
     minWidth: 0,
     paddingHorizontal: 14,
     gap: 6,
+  },
+  modelPickerPillAttention: {
+    backgroundColor: palette.accentSoft,
+    borderColor: palette.accentBorder,
   },
   modelPickerPillText: {
     flexShrink: 1,
@@ -292,9 +296,9 @@ function createChatPaneStyles(palette: AppPalette) {
     fontSize: 14,
   },
   iconButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 46,
+    height: 46,
+    borderRadius: 23,
     borderWidth: 1,
     borderColor: palette.borderStrong,
     alignItems: 'center',

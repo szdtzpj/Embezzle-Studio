@@ -37,4 +37,23 @@ describe('Settings public seam', () => {
     expect(barrel).not.toContain('renderToolsSection');
     expect(barrel).not.toContain('renderToolsHeaderRight');
   });
+
+  it('re-runs an already-open destination and forwards a provider model target', async () => {
+    const provider = await readFile(
+      path.resolve('src/features/settings/SettingsProductivityProvider.tsx'),
+      'utf8'
+    );
+    expect(provider).toContain('const [pendingDestination, setPendingDestination]');
+    expect(provider).toContain('[hasMounted, isOpen, pendingDestination]');
+    expect(provider).toContain('settings.openProviderModels(destination.providerId)');
+    expect(provider).toContain('settings.openActiveProviderModels()');
+  });
+
+  it('removes closed Settings from the web layout while retaining native mounted state', async () => {
+    const pane = await readFile(path.resolve('src/features/settings/SettingsPane.tsx'), 'utf8');
+    expect(pane).toContain("Platform.OS === 'web' ? styles.webHidden : styles.nativeHidden");
+    expect(pane).toContain("webHidden: { display: 'none' }");
+    expect(pane).toContain('nativeHidden: { opacity: 0 }');
+    expect(pane).toContain('accessibilityElementsHidden={!props.isOpen}');
+  });
 });

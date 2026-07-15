@@ -20,6 +20,7 @@ import {
   deleteWorkspaceArtifact,
   getActiveWorkspaceArtifactRevision,
   migrateWorkspaceArtifactsProject,
+  moveWorkspaceArtifactToProject,
   renameWorkspaceArtifact,
   restoreWorkspaceArtifactRevision,
 } from '../../../services/workspaceArtifacts';
@@ -30,7 +31,11 @@ import {
   resolveProjectDefaultTarget,
   updateWorkspaceProject,
 } from '../../../services/workspaceProjects';
-import type { ProjectConversationCommand } from '../projectConversationCommands';
+import {
+  changesProjectConversationRequestContext,
+  PROJECT_CONVERSATION_HISTORY_LOCK_NOTICE,
+  type ProjectConversationCommand,
+} from '../projectConversationCommands';
 import type { ProjectConversationResult } from '../projectConversationResults';
 import {
   clearWorkspaceSourceLineage,
@@ -41,6 +46,7 @@ import {
   sortConversations,
   syncProjectInstructionSnapshot,
 } from '../projectConversationHelpers';
+import { normalizeArtifactTags } from '../../../services/workspaceProductState';
 
 export interface ProjectConversationReduceContext {
   now: number;
@@ -95,6 +101,10 @@ export function reduceProjectConversationCommand(
   context: ProjectConversationReduceContext
 ): ProjectConversationReduceOutput {
   const { now, createId, historyLocked } = context;
+
+  if (historyLocked && changesProjectConversationRequestContext(command)) {
+    return fail(PROJECT_CONVERSATION_HISTORY_LOCK_NOTICE, workspace);
+  }
 
   switch (command.type) {
     case 'project.create': {
@@ -152,47 +162,50 @@ export function reduceProjectConversationCommand(
           now
         );
         const savedProject = projects.find((project) => project.id === command.projectId);
-        if (!savedProject) {
-          return fail('找不到要保存的项目。', workspace);
-        }
-        const conversation = workspace.conversations.find(
-          (candidate) =>
-            candidate.id === workspace.activeConversationId &&
-            candidate.projectId === command.projectId &&
-            !hasConversationHistory(candidate)
-        );
-        if (!conversation) {
+        if (savedProject) {
+          // Keep every empty conversation in the project aligned with the
+          // latest instruction. Only the active empty chat was refreshed
+          // before, so another empty chat could later expose a stale snapshot.
+          const refreshedIds = new Set(
+            workspace.conversations
+              .filter(
+                (candidate) =>
+                  candidate.projectId === command.projectId && !hasConversationHistory(candidate)
+              )
+              .map((candidate) => candidate.id)
+          );
+          const conversations = workspace.conversations.map((candidate) => {
+            if (!refreshedIds.has(candidate.id)) return candidate;
+            return {
+              ...candidate,
+              messages: syncProjectInstructionSnapshot(
+                candidate.messages,
+                savedProject,
+                now,
+                createId
+              ),
+              updatedAt: now,
+            };
+          });
+          const activeConversation = conversations.find(
+            (candidate) => candidate.id === workspace.activeConversationId
+          );
           return ok(
-            { ...workspace, projects },
+            {
+              ...workspace,
+              projects,
+              conversations,
+              ...(activeConversation && refreshedIds.has(activeConversation.id)
+                ? { messages: activeConversation.messages }
+                : {}),
+            },
             {
               notice:
                 '项目设置已保存在本机；系统提示只会随你之后主动发送的请求交给服务商。',
             }
           );
         }
-        const messages = syncProjectInstructionSnapshot(
-          conversation.messages,
-          savedProject,
-          now,
-          createId
-        );
-        return okAfterActiveContextChange(
-          workspace,
-          {
-            ...workspace,
-            projects,
-            messages,
-            conversations: workspace.conversations.map((candidate) =>
-              candidate.id === conversation.id
-                ? { ...candidate, messages, updatedAt: now }
-                : candidate
-            ),
-          },
-          {
-            notice:
-              '项目设置已保存在本机；系统提示只会随你之后主动发送的请求交给服务商。',
-          }
-        );
+        return fail('找不到要保存的项目。', workspace);
       } catch (error) {
         return fail(error instanceof Error ? error.message : '项目保存失败。', workspace);
       }
@@ -321,6 +334,10 @@ export function reduceProjectConversationCommand(
         );
       }
       const project = workspace.projects.find((candidate) => candidate.id === command.projectId);
+      const activatedMessages =
+        project && !hasConversationHistory(conversation)
+          ? syncProjectInstructionSnapshot(conversation.messages, project, now, createId)
+          : conversation.messages;
       const defaultTarget = !hasConversationHistory(conversation)
         ? resolveProjectDefaultTarget(project, workspace.providers)
         : undefined;
@@ -330,7 +347,15 @@ export function reduceProjectConversationCommand(
           ...workspace,
           activeProjectId: command.projectId,
           activeConversationId: conversation.id,
-          messages: conversation.messages,
+          messages: activatedMessages,
+          conversations:
+            activatedMessages === conversation.messages
+              ? workspace.conversations
+              : workspace.conversations.map((candidate) =>
+                  candidate.id === conversation.id
+                    ? { ...candidate, messages: activatedMessages, updatedAt: now }
+                    : candidate
+                ),
           ...(defaultTarget
             ? {
                 activeProviderId: defaultTarget.providerId,
@@ -448,6 +473,10 @@ export function reduceProjectConversationCommand(
       const project = workspace.projects.find(
         (candidate) => candidate.id === conversation.projectId
       );
+      const activatedMessages =
+        project && !hasConversationHistory(conversation)
+          ? syncProjectInstructionSnapshot(conversation.messages, project, now, createId)
+          : conversation.messages;
       const defaultTarget = !hasConversationHistory(conversation)
         ? resolveProjectDefaultTarget(project, workspace.providers)
         : undefined;
@@ -457,7 +486,15 @@ export function reduceProjectConversationCommand(
           ...workspace,
           activeProjectId: conversation.projectId ?? workspace.projects[0].id,
           activeConversationId: conversation.id,
-          messages: conversation.messages,
+          messages: activatedMessages,
+          conversations:
+            activatedMessages === conversation.messages
+              ? workspace.conversations
+              : workspace.conversations.map((candidate) =>
+                  candidate.id === conversation.id
+                    ? { ...candidate, messages: activatedMessages, updatedAt: now }
+                    : candidate
+                ),
           ...(defaultTarget
             ? {
                 activeProviderId: defaultTarget.providerId,
@@ -608,22 +645,32 @@ export function reduceProjectConversationCommand(
     }
 
     case 'conversation.delete': {
-      if (historyLocked) {
-        return fail('当前仍有服务商请求进行中；本次删除未执行。', workspace);
-      }
       const deletedConversation = workspace.conversations.find(
         (conversation) => conversation.id === command.conversationId
       );
+      const deletedDraft = workspace.composerDrafts.find(
+        (draft) => draft.conversationId === command.conversationId
+      );
       let orphanedAttachments: MediaAttachment[] | undefined;
-      if (deletedConversation) {
+      if (deletedConversation || deletedDraft) {
         const retainedUris = new Set(
           workspace.conversations
             .filter((conversation) => conversation.id !== command.conversationId)
             .flatMap((conversation) => messageAttachments(conversation.messages))
             .map((attachment) => attachment.uri)
         );
-        orphanedAttachments = messageAttachments(deletedConversation.messages).filter(
-          (attachment) => !retainedUris.has(attachment.uri)
+        for (const draft of workspace.composerDrafts) {
+          if (draft.conversationId === command.conversationId) continue;
+          for (const attachment of draft.attachments ?? []) retainedUris.add(attachment.uri);
+        }
+        orphanedAttachments = [
+          ...(deletedConversation
+            ? messageAttachments(deletedConversation.messages)
+            : []),
+          ...(deletedDraft?.attachments ?? []),
+        ].filter((attachment, index, attachments) =>
+          !retainedUris.has(attachment.uri) &&
+          attachments.findIndex((candidate) => candidate.uri === attachment.uri) === index
         );
       }
       const deletingActiveConversation =
@@ -653,6 +700,9 @@ export function reduceProjectConversationCommand(
           conversations,
           activeProjectId: nextActive?.projectId ?? workspace.projects[0].id,
           activeConversationId: nextActive?.id ?? 'conversation-default',
+          composerDrafts: workspace.composerDrafts.filter(
+            (draft) => draft.conversationId !== command.conversationId
+          ),
           messages: deletingActiveConversation
             ? nextActive?.messages ?? []
             : workspace.messages,
@@ -799,6 +849,46 @@ export function reduceProjectConversationCommand(
           command.artifactId,
           command.sourceRevisionId,
           { revisionId: createId('artifact-revision'), now }
+        ),
+      });
+
+    case 'artifact.set-favorite':
+      return ok({
+        ...workspace,
+        artifacts: workspace.artifacts.map((artifact) =>
+          artifact.id === command.artifactId
+            ? {
+                ...artifact,
+                ...(command.favorite ? { favorite: true } : { favorite: undefined }),
+                updatedAt: now,
+              }
+            : artifact
+        ),
+      });
+
+    case 'artifact.set-tags': {
+      const tags = normalizeArtifactTags(command.tags);
+      return ok({
+        ...workspace,
+        artifacts: workspace.artifacts.map((artifact) =>
+          artifact.id === command.artifactId
+            ? { ...artifact, ...(tags ? { tags } : { tags: undefined }), updatedAt: now }
+            : artifact
+        ),
+      });
+    }
+
+    case 'artifact.move':
+      if (!workspace.projects.some((project) => project.id === command.projectId)) {
+        return fail('找不到目标项目。', workspace);
+      }
+      return ok({
+        ...workspace,
+        artifacts: moveWorkspaceArtifactToProject(
+          workspace.artifacts,
+          command.artifactId,
+          command.projectId,
+          now
         ),
       });
 

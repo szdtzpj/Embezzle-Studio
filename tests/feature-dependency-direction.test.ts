@@ -44,4 +44,14 @@ describe('feature dependency direction', () => {
     expect(projectCommands).toContain("type: 'artifact.create'");
     expect(projectCommands).toContain("type: 'conversation.fork'");
   });
+
+  it('exposes Projects capabilities through a small public barrel', async () => {
+    const barrel = await source('src/features/projects/index.ts');
+    const settingsTools = await source('src/features/settings/internal/SettingsToolsSectionView.tsx');
+
+    expect(barrel).toContain('ProjectsConversationsProvider');
+    expect(barrel).toContain('applyProjectConversationChatEffects');
+    expect(settingsTools).toContain("from '../../projects'");
+    expect(settingsTools).not.toContain("from '../../projects/ProjectsConversationsProvider'");
+  });
 });

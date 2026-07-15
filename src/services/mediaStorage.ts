@@ -10,6 +10,19 @@ const pendingAttachmentDeletions = new Map<string, MediaAttachment>();
 const maxDownloadedImageBytes = 40 * 1024 * 1024;
 const maxDownloadedVideoBytes = 500 * 1024 * 1024;
 
+export interface MediaStorageDiagnostics {
+  fileCount: number;
+  totalBytes: number;
+  orphanCount: number;
+  orphanBytes: number;
+  missingReferencedCount: number;
+}
+
+export interface MediaStorageCleanupResult extends MediaStorageDiagnostics {
+  deletedCount: number;
+  deletedBytes: number;
+}
+
 function sanitizedFileStem(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '') || 'attachment';
 }
@@ -178,7 +191,7 @@ export async function persistAttachment(
     return {
       ...attachment,
       uri: webAttachmentUri(attachment.id),
-      size: attachment.size ?? blob.size,
+      size: blob.size,
       mimeType: attachment.mimeType ?? blob.type ?? undefined,
       base64: null,
     };
@@ -217,10 +230,13 @@ export async function persistAttachment(
     await source.copy(destination, { overwrite: true });
   }
 
+  const destinationSize = destination.size;
   return {
     ...attachment,
     uri: destination.uri,
-    size: attachment.size ?? destination.size ?? undefined,
+    // The bytes written to app-owned storage are authoritative. Upstream
+    // picker/ContentProvider metadata can be stale or deliberately understated.
+    size: typeof destinationSize === 'number' ? destinationSize : attachment.size,
     base64: null,
   };
 }
@@ -372,6 +388,109 @@ export async function flushPendingAttachmentDeletions(
       // Keep the candidate queued for the next successful save.
     }
   }
+}
+
+/** Inspects app-owned media without opening or uploading any attachment bytes. */
+export async function inspectMediaStorage(
+  referencedAttachments: readonly MediaAttachment[]
+): Promise<MediaStorageDiagnostics> {
+  if (Platform.OS === 'web') {
+    const keys = await withWebAttachmentStore<IDBValidKey[]>('readonly', (store) => store.getAllKeys());
+    const keyStrings = keys.map(String);
+    const referencedKeys = new Set(
+      referencedAttachments
+        .filter((attachment) => isWebAttachmentUri(attachment.uri))
+        .map((attachment) => webAttachmentKey(attachment.uri))
+    );
+    let totalBytes = 0;
+    let orphanBytes = 0;
+    for (const key of keyStrings) {
+      const blob = await readWebAttachment(key);
+      const size = blob?.size ?? 0;
+      totalBytes += size;
+      if (!referencedKeys.has(key)) orphanBytes += size;
+    }
+    const stored = new Set(keyStrings);
+    return {
+      fileCount: keyStrings.length,
+      totalBytes,
+      orphanCount: keyStrings.filter((key) => !referencedKeys.has(key)).length,
+      orphanBytes,
+      missingReferencedCount: [...referencedKeys].filter((key) => !stored.has(key)).length,
+    };
+  }
+
+  const { Directory, File, Paths } = await import('expo-file-system');
+  const directory = new Directory(Paths.document, attachmentDirectoryName);
+  const referencedUris = new Set(referencedAttachments.map((attachment) => attachment.uri));
+  if (!directory.exists) {
+    return {
+      fileCount: 0,
+      totalBytes: 0,
+      orphanCount: 0,
+      orphanBytes: 0,
+      missingReferencedCount: referencedAttachments.filter((attachment) =>
+        attachment.uri.includes(`/${attachmentDirectoryName}/`)
+      ).length,
+    };
+  }
+  const files = directory.list().filter((entry): entry is InstanceType<typeof File> => entry instanceof File);
+  let totalBytes = 0;
+  let orphanBytes = 0;
+  for (const file of files) {
+    const size = file.size ?? 0;
+    totalBytes += size;
+    if (!referencedUris.has(file.uri)) orphanBytes += size;
+  }
+  const storedUris = new Set(files.map((file) => file.uri));
+  return {
+    fileCount: files.length,
+    totalBytes,
+    orphanCount: files.filter((file) => !referencedUris.has(file.uri)).length,
+    orphanBytes,
+    missingReferencedCount: [...referencedUris].filter((uri) =>
+      uri.includes(`/${attachmentDirectoryName}/`) && !storedUris.has(uri)
+    ).length,
+  };
+}
+
+/** Deletes only app-owned files that are not referenced by the supplied workspace snapshot. */
+export async function cleanupOrphanedMediaStorage(
+  referencedAttachments: readonly MediaAttachment[]
+): Promise<MediaStorageCleanupResult> {
+  let deletedCount = 0;
+  let deletedBytes = 0;
+  if (Platform.OS === 'web') {
+    const referencedKeys = new Set(
+      referencedAttachments
+        .filter((attachment) => isWebAttachmentUri(attachment.uri))
+        .map((attachment) => webAttachmentKey(attachment.uri))
+    );
+    const keys = await withWebAttachmentStore<IDBValidKey[]>('readonly', (store) => store.getAllKeys());
+    for (const rawKey of keys) {
+      const key = String(rawKey);
+      if (referencedKeys.has(key)) continue;
+      const blob = await readWebAttachment(key);
+      await deleteWebAttachment(key);
+      deletedCount += 1;
+      deletedBytes += blob?.size ?? 0;
+    }
+  } else {
+    const { Directory, File, Paths } = await import('expo-file-system');
+    const directory = new Directory(Paths.document, attachmentDirectoryName);
+    if (directory.exists) {
+      const referencedUris = new Set(referencedAttachments.map((attachment) => attachment.uri));
+      for (const entry of directory.list()) {
+        if (!(entry instanceof File) || referencedUris.has(entry.uri)) continue;
+        const size = entry.size ?? 0;
+        entry.delete();
+        deletedCount += 1;
+        deletedBytes += size;
+      }
+    }
+  }
+  const after = await inspectMediaStorage(referencedAttachments);
+  return { ...after, deletedCount, deletedBytes };
 }
 
 export function attachmentForPersistence(attachment: MediaAttachment): MediaAttachment {

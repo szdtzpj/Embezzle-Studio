@@ -32,9 +32,9 @@ const V3_WORKSPACE_KEY = '@embezzle-studio/workspace-v3';
 const V4_WORKSPACE_KEY = '@embezzle-studio/workspace-v4';
 const V5_WORKSPACE_KEY = '@embezzle-studio/workspace-v5';
 const V5_WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v5.backup';
-const WORKSPACE_KEY = '@embezzle-studio/workspace-v6';
-const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v6.backup';
-const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v6';
+const WORKSPACE_KEY = '@embezzle-studio/workspace-v7';
+const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v7.backup';
+const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v7';
 const COLOR_MODE_KEY = '@embezzle-studio/color-mode-v1';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
 const PLUGIN_SECRET_PREFIX = 'embezzle-studio.plugin-authorization';
@@ -239,6 +239,32 @@ beforeEach(() => {
 });
 
 describe('workspace save commit-stage signaling', () => {
+  it('persists composer draft attachments without serializing base64 bytes', async () => {
+    const workspace = createDefaultWorkspace();
+    workspace.composerDrafts = [{
+      conversationId: workspace.activeConversationId,
+      text: '',
+      updatedAt: 10,
+      attachments: [{
+        id: 'draft-attachment',
+        kind: 'image',
+        uri: 'file:///documents/draft.png',
+        name: 'draft.png',
+        mimeType: 'image/png',
+        size: 12,
+        base64: 'must-not-be-written',
+      }],
+    }];
+    const storage = await subject();
+
+    await storage.saveWorkspace(workspace);
+
+    const envelope = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
+    const savedDraft = envelope.workspace.composerDrafts[0];
+    expect(savedDraft.attachments[0].uri).toBe('file:///documents/draft.png');
+    expect(savedDraft.attachments[0].base64).toBeNull();
+  });
+
   it('marks a SecureStore failure after the AsyncStorage primary snapshot has committed', async () => {
     mocks.platform.OS = 'android';
     const workspace = workspaceWithTitle('public snapshot committed');
@@ -292,7 +318,7 @@ describe('workspace save commit-stage signaling', () => {
 });
 
 describe('workspace storage migrations and recovery', () => {
-  it('loads a v2 envelope from the previous key and writes the next save as v6', async () => {
+  it('loads a v2 envelope from the previous key and writes the next save as v7', async () => {
     const workspace = workspaceWithTitle('v2 migration');
     mocks.values.set(V2_WORKSPACE_KEY, JSON.stringify(v2Envelope(workspace, 4)));
     const { loadWorkspace, saveWorkspace } = await subject();
@@ -301,13 +327,13 @@ describe('workspace storage migrations and recovery', () => {
     expect(loaded?.conversations[0].title).toBe('v2 migration');
     await saveWorkspace(loaded!);
 
-    const v6 = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
-    expect(v6.schemaVersion).toBe(6);
-    expect(v6.revision).toBe(5);
+    const v7 = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
+    expect(v7.schemaVersion).toBe(7);
+    expect(v7.revision).toBe(5);
     expect(mocks.values.has(V2_WORKSPACE_KEY)).toBe(true);
   });
 
-  it('loads a v3 envelope, creates the default project, and writes the next save as v6', async () => {
+  it('loads a v3 envelope, creates the default project, and writes the next save as v7', async () => {
     const workspace = workspaceWithTitle('v3 migration');
     const legacy = v3Envelope(workspace, 9);
     delete (legacy.workspace as Partial<AppWorkspace>).projects;
@@ -334,9 +360,9 @@ describe('workspace storage migrations and recovery', () => {
     expect(loaded?.providerUsageEvents).toEqual([]);
 
     await saveWorkspace(loaded!);
-    const v6 = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
-    expect(v6).toMatchObject({ schemaVersion: 6, revision: 10 });
-    expect(v6.workspace.projects).toHaveLength(1);
+    const v7 = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
+    expect(v7).toMatchObject({ schemaVersion: 7, revision: 10 });
+    expect(v7.workspace.projects).toHaveLength(1);
     expect(mocks.values.has(V3_WORKSPACE_KEY)).toBe(true);
   });
 
@@ -356,14 +382,14 @@ describe('workspace storage migrations and recovery', () => {
     await saveWorkspace(loaded!);
 
     expect(JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}')).toMatchObject({
-      schemaVersion: 6,
+      schemaVersion: 7,
       revision: 15,
       workspace: { artifacts: [], knowledgeSources: [] },
     });
     expect(mocks.values.get(V4_WORKSPACE_KEY)).toBe(JSON.stringify(legacy));
   });
 
-  it('loads the previous v5 key, writes v6, and preserves the v5 snapshot', async () => {
+  it('loads the previous v5 key, writes v7, and preserves the v5 snapshot', async () => {
     const workspace = workspaceWithTitle('v5 migration');
     const legacy = v5Envelope(workspace, 20);
     const legacyRaw = JSON.stringify(legacy);
@@ -375,7 +401,7 @@ describe('workspace storage migrations and recovery', () => {
     await saveWorkspace(loaded!);
 
     expect(JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}')).toMatchObject({
-      schemaVersion: 6,
+      schemaVersion: 7,
       revision: 21,
     });
     expect(mocks.values.get(V5_WORKSPACE_KEY)).toBe(legacyRaw);
@@ -1647,7 +1673,7 @@ describe('versioned and ordered saves', () => {
     expect(mocks.values.has(WORKSPACE_KEY)).toBe(false);
   });
 
-  it('writes a v6 envelope without a duplicate top-level messages field or provider secrets', async () => {
+  it('writes a v7 envelope without a duplicate top-level messages field or provider secrets', async () => {
     const workspace = createDefaultWorkspace();
     workspace.providers[0] = { ...workspace.providers[0], apiKey: 'web-only-test-key' };
     const { saveWorkspace } = await subject();
@@ -1655,7 +1681,7 @@ describe('versioned and ordered saves', () => {
     await saveWorkspace(workspace);
 
     const envelope = JSON.parse(mocks.values.get(WORKSPACE_KEY) ?? '{}');
-    expect(envelope.schemaVersion).toBe(6);
+    expect(envelope.schemaVersion).toBe(7);
     expect(envelope.revision).toBe(1);
     expect(envelope.workspace.messages).toBeUndefined();
     expect(envelope.workspace.conversations[0].messages).toEqual(workspace.messages);
@@ -2003,7 +2029,7 @@ describe('versioned and ordered saves', () => {
     workspace.plugins = [enabledRemoteMcp(firstProvider.id)];
     mocks.values.set(WORKSPACE_KEY, JSON.stringify({
       ...v4Envelope(workspace),
-      schemaVersion: 6,
+      schemaVersion: 7,
     }));
     const { loadWorkspace } = await subject();
 
@@ -2069,7 +2095,7 @@ describe('versioned and ordered saves', () => {
     workspace.plugins = [enabledRemoteMcp(disabledProvider.id)];
     mocks.values.set(WORKSPACE_KEY, JSON.stringify({
       ...v4Envelope(workspace),
-      schemaVersion: 6,
+      schemaVersion: 7,
     }));
     const { loadWorkspace } = await subject();
 

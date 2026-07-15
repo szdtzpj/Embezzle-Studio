@@ -66,6 +66,10 @@ import {
   MAX_WORKSPACE_PROJECT_SYSTEM_PROMPT_LENGTH,
   MAX_WORKSPACE_PROJECTS,
 } from './workspaceProjects';
+import {
+  MAX_ARTIFACT_TAG_CHARACTERS,
+  MAX_ARTIFACT_TAGS,
+} from './workspaceProductState';
 
 export const MAX_ENCRYPTED_BACKUP_BYTES = 10 * 1024 * 1024;
 export const MIN_BACKUP_PASSWORD_LENGTH = 8;
@@ -474,12 +478,27 @@ function validateTokenUsage(value: unknown, path: string): void {
 
 function validateGenerationTask(value: unknown, path: string): void {
   const task = requireRecord(value, path);
-  requireExactKeysWithOptional(task, ['providerId', 'modelId', 'taskId', 'kind'], ['status'], path);
+  requireExactKeysWithOptional(
+    task,
+    ['providerId', 'modelId', 'taskId', 'kind'],
+    ['status', 'lastCheckedAt', 'nextCheckAt', 'attemptCount', 'notifiedStatus'],
+    path
+  );
   requireLegacyId(task.providerId, `${path}.providerId`);
   requireString(task.modelId, `${path}.modelId`, { nonEmpty: true, max: 512 });
   requireString(task.taskId, `${path}.taskId`, { nonEmpty: true, max: 512 });
   if (task.kind !== 'video') invalidFormat(`${path}.kind 无效。`);
   requireOptionalString(task.status, `${path}.status`);
+  for (const key of ['lastCheckedAt', 'nextCheckAt', 'attemptCount'] as const) {
+    if (task[key] !== undefined) requireFiniteNumber(task[key], `${path}.${key}`);
+  }
+  if (
+    task.notifiedStatus !== undefined &&
+    task.notifiedStatus !== 'completed' &&
+    task.notifiedStatus !== 'failed'
+  ) {
+    invalidFormat(`${path}.notifiedStatus 无效。`);
+  }
 }
 
 function validateMessage(value: unknown, path: string): string {
@@ -874,7 +893,7 @@ function validateArtifact(value: unknown, path: string): string {
   requireExactKeysWithOptional(
     artifact,
     ['id', 'projectId', 'title', 'format', 'revisions', 'activeRevisionId', 'createdAt', 'updatedAt'],
-    ['language', 'sourceConversationId', 'sourceMessageId'],
+    ['language', 'sourceConversationId', 'sourceMessageId', 'favorite', 'tags'],
     path
   );
   const id = requireId(artifact.id, `${path}.id`);
@@ -915,6 +934,21 @@ function validateArtifact(value: unknown, path: string): string {
   }
   if (artifact.sourceMessageId !== undefined) {
     requireId(artifact.sourceMessageId, `${path}.sourceMessageId`);
+  }
+  if (artifact.favorite !== undefined && typeof artifact.favorite !== 'boolean') {
+    invalidFormat(`${path}.favorite 必须是布尔值。`);
+  }
+  if (artifact.tags !== undefined) {
+    const tags = requireArray(artifact.tags, `${path}.tags`, MAX_ARTIFACT_TAGS);
+    const seenTags = new Set<string>();
+    tags.forEach((tag, index) => {
+      const normalized = requireString(tag, `${path}.tags[${index}]`, {
+        nonEmpty: true,
+        max: MAX_ARTIFACT_TAG_CHARACTERS,
+      });
+      if (seenTags.has(normalized)) invalidFormat(`${path}.tags 不能包含重复标签。`);
+      seenTags.add(normalized);
+    });
   }
   requireFiniteNumber(artifact.createdAt, `${path}.createdAt`);
   requireFiniteNumber(artifact.updatedAt, `${path}.updatedAt`);
@@ -2046,15 +2080,35 @@ function mergeImportedWorkspace(
       speechVoice: imported.voice.speechVoice,
       speechFormat: imported.voice.speechFormat,
     },
+    // Device-local product state is intentionally not replaced by a portable
+    // backup. This preserves onboarding/mode preferences, unsent drafts,
+    // reminder history and the current device's sync binding/credentials.
+    experienceMode: currentWorkspace.experienceMode,
+    onboarding: { ...currentWorkspace.onboarding },
+    composerDrafts: currentWorkspace.composerDrafts.map((draft) => ({
+      ...draft,
+      ...(draft.attachments?.length
+        ? {
+            attachments: draft.attachments.map((attachment) => ({
+              ...attachment,
+              base64: null,
+            })),
+          }
+        : {}),
+    })),
+    backupPreferences: { ...currentWorkspace.backupPreferences },
+    cloudSync: {
+      ...currentWorkspace.cloudSync,
+      conflicts: currentWorkspace.cloudSync.conflicts.map((conflict) => ({ ...conflict })),
+    },
   };
 }
 
-/** Decrypts, authenticates, validates, then inherits secrets only for the same ID, protocol, and endpoint. */
-export async function importEncryptedWorkspaceBackup(
+/** Decrypts, authenticates and validates an encrypted backup without replacing a workspace. */
+export async function verifyEncryptedWorkspaceBackup(
   serialized: string,
-  password: string,
-  currentWorkspace: AppWorkspace
-): Promise<AppWorkspace> {
+  password: string
+): Promise<WorkspaceBackupEnvelope> {
   validatePassword(password);
   requireEncryptedBackupInputSize(serialized);
   const outer = parseEncryptedEnvelope(serialized);
@@ -2092,10 +2146,33 @@ export async function importEncryptedWorkspaceBackup(
     } catch {
       invalidFormat('解密后的数据不是有效 JSON。');
     }
-    const envelope = validateWorkspaceBackupEnvelope(parsed);
-    return mergeImportedWorkspace(envelope.workspace, currentWorkspace);
+    return validateWorkspaceBackupEnvelope(parsed);
   } finally {
     plaintext.fill(0);
     ciphertext.fill(0);
   }
+}
+
+/** Decrypts, authenticates, validates, then inherits secrets only for the same ID, protocol, and endpoint. */
+export async function importEncryptedWorkspaceBackup(
+  serialized: string,
+  password: string,
+  currentWorkspace: AppWorkspace
+): Promise<AppWorkspace> {
+  const envelope = await verifyEncryptedWorkspaceBackup(serialized, password);
+  return mergeValidatedWorkspaceBackupEnvelope(envelope, currentWorkspace);
+}
+
+/**
+ * Applies the device-local import rules to an envelope that has already been
+ * authenticated and strictly validated. The defensive validation is cheap and
+ * keeps this helper safe if a caller accidentally passes an untrusted object;
+ * importantly, it does not repeat password-based decryption.
+ */
+export function mergeValidatedWorkspaceBackupEnvelope(
+  envelope: WorkspaceBackupEnvelope,
+  currentWorkspace: AppWorkspace
+): AppWorkspace {
+  const validated = validateWorkspaceBackupEnvelope(envelope);
+  return mergeImportedWorkspace(validated.workspace, currentWorkspace);
 }

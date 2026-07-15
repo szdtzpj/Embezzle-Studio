@@ -4,16 +4,15 @@ import {
   SunMoon,
   Boxes,
   BadgeInfo,
-  Folder,
-  Columns3,
-  BookOpen,
-  Video,
   Globe2,
   Wrench,
   Mic,
   ShieldCheck,
   ChartColumn,
   Download,
+  Cloud,
+  SlidersHorizontal,
+  Stethoscope,
 } from 'lucide-react-native';
 import {
   type NativeScrollEvent,
@@ -27,17 +26,19 @@ import { AnimatedPressable } from '../../components/AnimatedPressable';
 import { MotionItem } from '../../components/Motion';
 import { SectionHeader, SectionCard, TactileRow, RowDivider } from '../../components/settings/SettingsList';
 import { useKelivoTheme, type KelivoTheme } from '../../theme';
-import type { ProviderProfile } from '../../../domain/types';
+import type { ExperienceMode, ProviderProfile } from '../../../domain/types';
 import type { SettingsToolsSection } from './toolsSections';
 
 export interface SettingsMainScreenProps {
   colorMode: 'system' | 'light' | 'dark';
+  experienceMode: ExperienceMode;
   activeProvider: ProviderProfile;
   /** Restored when this screen remounts after a sub-page pop. */
   scrollOffsetY?: number;
   onScrollOffsetChange?: (offsetY: number) => void;
   onBack: () => void;
   onColorMode: () => void;
+  onExperienceMode: (mode: ExperienceMode) => void;
   onProviders: () => void;
   onToolsSection: (section: SettingsToolsSection) => void;
   onAbout: () => void;
@@ -57,11 +58,13 @@ function colorModeLabel(mode: 'system' | 'light' | 'dark') {
 
 export function SettingsMainScreen({
   colorMode,
+  experienceMode,
   activeProvider,
   scrollOffsetY = 0,
   onScrollOffsetChange,
   onBack,
   onColorMode,
+  onExperienceMode,
   onProviders,
   onToolsSection,
   onAbout,
@@ -117,6 +120,13 @@ export function SettingsMainScreen({
               detail={colorModeLabel(colorMode)}
               onPress={onColorMode}
             />
+            <RowDivider />
+            <TactileRow
+              icon={<SlidersHorizontal size={20} color={iconColor} strokeWidth={2} />}
+              label="使用模式"
+              detail={experienceMode === 'advanced' ? '高级模式' : '简单模式'}
+              onPress={() => onExperienceMode(experienceMode === 'advanced' ? 'simple' : 'advanced')}
+            />
           </SectionCard>
         </MotionItem>
 
@@ -135,12 +145,16 @@ export function SettingsMainScreen({
               label="搜索服务"
               onPress={() => onToolsSection('webSearch')}
             />
-            <RowDivider />
-            <TactileRow
-              icon={<Wrench size={20} color={iconColor} strokeWidth={2} />}
-              label="MCP 工具"
-              onPress={() => onToolsSection('mcp')}
-            />
+            {experienceMode === 'advanced' ? (
+              <>
+                <RowDivider />
+                <TactileRow
+                  icon={<Wrench size={20} color={iconColor} strokeWidth={2} />}
+                  label="MCP 工具"
+                  onPress={() => onToolsSection('mcp')}
+                />
+              </>
+            ) : null}
             <RowDivider />
             <TactileRow
               icon={<Mic size={20} color={iconColor} strokeWidth={2} />}
@@ -151,36 +165,7 @@ export function SettingsMainScreen({
         </MotionItem>
 
         <MotionItem index={2}>
-          <SectionHeader title="工作区" />
-          <SectionCard>
-            <TactileRow
-              icon={<Folder size={20} color={iconColor} strokeWidth={2} />}
-              label="项目工作台"
-              onPress={() => onToolsSection('workspace')}
-            />
-            <RowDivider />
-            <TactileRow
-              icon={<Columns3 size={20} color={iconColor} strokeWidth={2} />}
-              label="多模型对比"
-              onPress={() => onToolsSection('comparison')}
-            />
-            <RowDivider />
-            <TactileRow
-              icon={<BookOpen size={20} color={iconColor} strokeWidth={2} />}
-              label="提示词与角色模板"
-              onPress={() => onToolsSection('prompts')}
-            />
-            <RowDivider />
-            <TactileRow
-              icon={<Video size={20} color={iconColor} strokeWidth={2} />}
-              label="媒体任务中心"
-              onPress={() => onToolsSection('media')}
-            />
-          </SectionCard>
-        </MotionItem>
-
-        <MotionItem index={3}>
-          <SectionHeader title="用量与安全" />
+          <SectionHeader title="安全与诊断" />
           <SectionCard>
             <TactileRow
               icon={<ShieldCheck size={20} color={iconColor} strokeWidth={2} />}
@@ -195,9 +180,26 @@ export function SettingsMainScreen({
             />
             <RowDivider />
             <TactileRow
+              icon={<Stethoscope size={20} color={iconColor} strokeWidth={2} />}
+              label="本地诊断中心"
+              onPress={() => onToolsSection('diagnostics')}
+            />
+          </SectionCard>
+        </MotionItem>
+
+        <MotionItem index={3}>
+          <SectionHeader title="备份与同步" />
+          <SectionCard>
+            <TactileRow
               icon={<Download size={20} color={iconColor} strokeWidth={2} />}
               label="本地加密备份"
               onPress={() => onToolsSection('backup')}
+            />
+            <RowDivider />
+            <TactileRow
+              icon={<Cloud size={20} color={iconColor} strokeWidth={2} />}
+              label="用户自有存储同步"
+              onPress={() => onToolsSection('sync')}
             />
           </SectionCard>
         </MotionItem>

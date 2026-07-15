@@ -42,14 +42,18 @@ describe('Android mobile UI regressions', () => {
 
     expect(settingsModelSource).toContain('const candidateModelPageSize = 60;');
     expect(settingsModelSource).toContain('filteredModelCandidates.slice(0, candidateModelRenderLimit)');
-    expect(mobileSource).toContain('<ChatPane settings={settings} />');
+    expect(mobileSource).toContain('<ChatPane settings={settings}');
     expect(mobileSource).toContain('<SettingsPane />');
     expect(settingsPaneSource).toContain('if (!hasMounted)');
     expect(settingsPaneSource).toContain("pointerEvents={props.isOpen ? 'auto' : 'none'}");
+    expect(settingsPaneSource).toContain("Platform.OS === 'web' ? styles.webHidden : styles.nativeHidden");
+    expect(settingsPaneSource).toContain("webHidden: { display: 'none' }");
     expect(settingsPaneSource.indexOf('if (!hasMounted)')).toBeLessThan(
       settingsPaneSource.indexOf('useSettingsScreenModel(props.close)')
     );
     expect(appSource).toContain('const settingsOpen = settings.isOpen;');
+    expect(appSource).toContain("workspaceStatus.phase === 'ready' && workspaceStatus.dirty");
+    expect(appSource).toContain('本机工作区尚未保存：{persistenceSaveError}');
     expect(await source('src/features/settings/SettingsProductivityProvider.tsx')).toContain(
       'hasMounted'
     );
@@ -568,6 +572,9 @@ describe('Android mobile UI regressions', () => {
     expect(branchSource).toContain("source.messages[branchPointIndex].status === 'pending'");
     expect(appSource).toContain('userAlreadySelected');
     expect(projectDrawerSource).toContain('InteractionManager.runAfterInteractions');
+    expect(projectDrawerSource).toContain('workspace.conversations,');
+    expect(projectDrawerSource).toContain('workspace.projects,');
+    expect(projectDrawerSource).toContain('workspace.promptTemplates,');
     expect(projectDrawerSource).toContain('searchWorkspaceIndex(searchIndex');
     expect(appSource).toContain('scrollToSearchMessage');
     expect(appSource).toContain('highlightedSearchMessageId === message.id');

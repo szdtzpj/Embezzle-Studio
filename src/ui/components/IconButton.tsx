@@ -26,9 +26,10 @@ export function IconButton({
 }: IconButtonProps) {
   const theme = useKelivoTheme();
   const styles = getStyles(theme);
+  const touchSize = Math.max(44, (size ?? 20) + 20);
   const buttonStyles = [
     styles.base,
-    { width: (size ?? 20) + 20, height: (size ?? 20) + 20 },
+    { width: touchSize, height: touchSize },
     variant === 'default' && styles.default,
     variant === 'ghost' && styles.ghost,
     variant === 'filled' && styles.filled,

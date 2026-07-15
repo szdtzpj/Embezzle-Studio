@@ -110,6 +110,15 @@ import {
   providerModelIdentityKey,
 } from './workspaceEntityIds';
 import { toWorkspaceSaveError } from './workspaceSaveError';
+import {
+  normalizeArtifactTags,
+  normalizeBackupPreferences,
+  normalizeCloudSyncSettings,
+  normalizeConversationDrafts,
+  normalizeExperienceMode,
+  normalizeOnboardingState,
+  hasUsableProviderConfiguration,
+} from './workspaceProductState';
 
 export {
   WorkspaceSaveError,
@@ -118,6 +127,7 @@ export {
 } from './workspaceSaveError';
 
 const LEGACY_WORKSPACE_KEYS = [
+  '@embezzle-studio/workspace-v6',
   '@embezzle-studio/workspace-v5',
   '@embezzle-studio/workspace-v4',
   '@embezzle-studio/workspace-v3',
@@ -125,20 +135,21 @@ const LEGACY_WORKSPACE_KEYS = [
   '@embezzle-studio/workspace-v1',
 ] as const;
 const LEGACY_WORKSPACE_BACKUPS: Partial<Record<(typeof LEGACY_WORKSPACE_KEYS)[number], string>> = {
+  '@embezzle-studio/workspace-v6': '@embezzle-studio/workspace-v6.backup',
   '@embezzle-studio/workspace-v5': '@embezzle-studio/workspace-v5.backup',
   '@embezzle-studio/workspace-v4': '@embezzle-studio/workspace-v4.backup',
   '@embezzle-studio/workspace-v3': '@embezzle-studio/workspace-v3.backup',
   '@embezzle-studio/workspace-v2': '@embezzle-studio/workspace-v2.backup',
 };
-const WORKSPACE_KEY = '@embezzle-studio/workspace-v6';
-const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v6.backup';
-const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v6';
+const WORKSPACE_KEY = '@embezzle-studio/workspace-v7';
+const WORKSPACE_BACKUP_KEY = '@embezzle-studio/workspace-v7.backup';
+const WORKSPACE_RECOVERY_KEY = '@embezzle-studio/workspace-recovery-v7';
 const COLOR_MODE_KEY = '@embezzle-studio/color-mode-v1';
 const SECRET_PREFIX = 'embezzle-studio.provider-key';
 const PLUGIN_SECRET_PREFIX = 'embezzle-studio.plugin-authorization';
 const EXTERNAL_SEARCH_SECRET_PREFIX = 'embezzle-studio.external-search';
 const BOUND_SECRET_SCHEMA_VERSION = 1;
-const STORAGE_SCHEMA_VERSION = 6;
+const STORAGE_SCHEMA_VERSION = 7;
 const INTERRUPTED_MESSAGE = '上次请求在应用退出前未完成，已标记为中断。';
 
 const providerKinds = new Set<ProviderKind>([
@@ -472,12 +483,27 @@ function normalizeGenerationTask(value: unknown, label: string): ChatMessage['ge
   if (!providerId || !modelId || !taskId || value.kind !== 'video') {
     throw shapeError(`${label} 缺少有效的 providerId、modelId、taskId 或 kind。`);
   }
+  const lastCheckedAt = nonNegativeFiniteNumber(value.lastCheckedAt);
+  const nextCheckAt = nonNegativeFiniteNumber(value.nextCheckAt);
+  const attemptCount = nonNegativeFiniteNumber(value.attemptCount);
   return {
     providerId,
     modelId,
     taskId,
     kind: 'video',
     ...(nonEmptyString(value.status) ? { status: nonEmptyString(value.status) } : {}),
+    ...(lastCheckedAt !== undefined
+      ? { lastCheckedAt: Math.trunc(lastCheckedAt) }
+      : {}),
+    ...(nextCheckAt !== undefined
+      ? { nextCheckAt: Math.trunc(nextCheckAt) }
+      : {}),
+    ...(attemptCount !== undefined
+      ? { attemptCount: Math.trunc(attemptCount) }
+      : {}),
+    ...(value.notifiedStatus === 'completed' || value.notifiedStatus === 'failed'
+      ? { notifiedStatus: value.notifiedStatus }
+      : {}),
   };
 }
 
@@ -1286,6 +1312,7 @@ function normalizeArtifacts(
     )
       ? requestedMessageId
       : undefined;
+    const tags = normalizeArtifactTags(candidate.tags);
     seenArtifactIds.add(id);
     return [{
       id,
@@ -1301,6 +1328,8 @@ function normalizeArtifacts(
       activeRevisionId,
       ...(sourceConversationId ? { sourceConversationId } : {}),
       ...(sourceMessageId ? { sourceMessageId } : {}),
+      ...(candidate.favorite === true ? { favorite: true } : {}),
+      ...(tags ? { tags } : {}),
       createdAt,
       updatedAt: finiteNumber(candidate.updatedAt, createdAt),
     }];
@@ -1796,11 +1825,21 @@ function normalizeWorkspace(snapshot: Record<string, unknown>, providers: Provid
       (provider) => provider.id === target.providerId && provider.enabled !== false
     )
   );
+  const activeModelIdByProvider = normalizeActiveModels(
+    snapshot.activeModelIdByProvider,
+    normalizedProviders
+  );
+  const configured = hasUsableProviderConfiguration(
+    normalizedProviders,
+    activeModelIdByProvider
+  );
+  const conversationIds = new Set(conversations.map((conversation) => conversation.id));
+  const fallbackDeviceId = createDefaultWorkspace().cloudSync.deviceId;
 
   return {
     providers: normalizedProviders,
     activeProviderId,
-    activeModelIdByProvider: normalizeActiveModels(snapshot.activeModelIdByProvider, normalizedProviders),
+    activeModelIdByProvider,
     reasoningEffortByModel: normalizeReasoningMap(snapshot.reasoningEffortByModel),
     parameterSettings: normalizeParameterSettings(snapshot.parameterSettings),
     modelCandidatesByProvider,
@@ -1827,6 +1866,11 @@ function normalizeWorkspace(snapshot: Record<string, unknown>, providers: Provid
       (snapshot as { externalSearch?: unknown }).externalSearch
     ),
     voice: normalizeVoiceSettings(snapshot.voice, normalizedProviders),
+    experienceMode: normalizeExperienceMode(snapshot.experienceMode),
+    onboarding: normalizeOnboardingState(snapshot.onboarding, configured),
+    composerDrafts: normalizeConversationDrafts(snapshot.composerDrafts, conversationIds),
+    backupPreferences: normalizeBackupPreferences(snapshot.backupPreferences),
+    cloudSync: normalizeCloudSyncSettings(snapshot.cloudSync, fallbackDeviceId),
   };
 }
 
@@ -2149,7 +2193,7 @@ function decodeWorkspace(raw: string): DecodedWorkspace {
   }
 
   if (parsed.schemaVersion !== undefined) {
-    if (![2, 3, 4, 5, STORAGE_SCHEMA_VERSION].includes(parsed.schemaVersion as number)) {
+    if (![2, 3, 4, 5, 6, STORAGE_SCHEMA_VERSION].includes(parsed.schemaVersion as number)) {
       throw shapeError(`不支持 schemaVersion=${String(parsed.schemaVersion)}。`);
     }
     if (!isRecord(parsed.workspace)) {
@@ -2421,6 +2465,20 @@ function createEnvelope(
           : {}),
         ...(workspace.voice.speechTarget ? { speechTarget: { ...workspace.voice.speechTarget } } : {}),
       },
+      experienceMode: normalizeExperienceMode(workspace.experienceMode),
+      onboarding: normalizeOnboardingState(
+        workspace.onboarding,
+        hasUsableProviderConfiguration(providers, workspace.activeModelIdByProvider)
+      ),
+      composerDrafts: normalizeConversationDrafts(
+        workspace.composerDrafts,
+        new Set(conversations.map((conversation) => conversation.id))
+      ),
+      backupPreferences: normalizeBackupPreferences(workspace.backupPreferences),
+      cloudSync: normalizeCloudSyncSettings(
+        workspace.cloudSync,
+        createDefaultWorkspace().cloudSync.deviceId
+      ),
     },
   };
 }
@@ -2556,9 +2614,12 @@ export function saveWorkspace(workspace: AppWorkspace): Promise<void> {
         // still rejects, while binding fingerprints prevent the newly committed
         // configuration from hydrating a stale credential on restart.
         await persistSecrets(providers, plugins, workspace.externalSearch);
-        const referencedAttachments = persistedConversations(workspace).flatMap((conversation) =>
-          conversation.messages.flatMap((message) => message.attachments ?? [])
-        );
+        const referencedAttachments = [
+          ...persistedConversations(workspace).flatMap((conversation) =>
+            conversation.messages.flatMap((message) => message.attachments ?? [])
+          ),
+          ...workspace.composerDrafts.flatMap((draft) => draft.attachments ?? []),
+        ];
         await flushPendingAttachmentDeletions(referencedAttachments);
       } catch (error) {
         throw toWorkspaceSaveError(

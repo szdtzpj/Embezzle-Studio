@@ -142,7 +142,12 @@ export function ProjectDrawer(props: { chat: ProjectDrawerChatPort }): React.Rea
       cancelled = true;
       task.cancel();
     };
-  }, [navigation.drawerOpen]);
+  }, [
+    navigation.drawerOpen,
+    workspace.conversations,
+    workspace.projects,
+    workspace.promptTemplates,
+  ]);
 
   useEffect(() => {
     if (deleteConversationId && renamingConversationId) {

@@ -178,6 +178,9 @@ describe('Android production release workflow', () => {
 
     expect(permissionCheck).toContain('android.permission.SYSTEM_ALERT_WINDOW');
     expect(permissionCheck).toContain('android.permission.CAMERA');
+    expect(permissionCheck).toContain('android.permission.USE_BIOMETRIC');
+    expect(permissionCheck).toContain('android.permission.USE_FINGERPRINT');
+    expect(permissionCheck).toContain('android.permission.REQUEST_INSTALL_PACKAGES');
     expect(permissionCheck).toContain('if ! grep -Fq "android.permission.RECORD_AUDIO"');
     expect(permissionCheck).not.toMatch(
       /for forbidden_permission in[\s\S]*android\.permission\.RECORD_AUDIO[\s\S]*; do/
@@ -192,6 +195,16 @@ describe('Android production release workflow', () => {
     expect(sign.environment).toBe('android-release');
     expect(ownerGate).toContain('if [[ "$GITHUB_REF" != "refs/heads/main" ]]');
     expect(signing).toContain('Verified using v2 scheme (APK Signature Scheme v2): true');
+    expect(signing).toContain('Verified using v3 scheme (APK Signature Scheme v3): true');
+  });
+
+  it('keeps the generated Android window and backup contract explicit', () => {
+    const prebuild = runScript('build', 'Prebuild Android project');
+    const manifest = runScript('build', 'Verify generated Android manifest contract');
+    expect(prebuild).toContain('npx expo prebuild --platform android --clean --no-install');
+    expect(prebuild).not.toContain('--non-interactive');
+    expect(manifest).toContain('android:allowBackup="false"');
+    expect(manifest).toContain('android:windowSoftInputMode="adjustResize"');
   });
 
   it('carries both validated refs through all three publication checks', () => {

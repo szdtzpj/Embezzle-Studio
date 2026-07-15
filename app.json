@@ -3,7 +3,7 @@
     "name": "Embezzle Studio",
     "slug": "embezzle-studio",
     "scheme": "embezzlestudio",
-    "version": "1.7.0",
+    "version": "1.8.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "backgroundColor": "#F4F4F4",
@@ -13,11 +13,14 @@
     },
     "android": {
       "package": "com.szdtzpj.embezzlestudio",
-      "versionCode": 13,
+      "versionCode": 14,
       "allowBackup": false,
       "softwareKeyboardLayoutMode": "resize",
       "blockedPermissions": [
-        "android.permission.SYSTEM_ALERT_WINDOW"
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT",
+        "android.permission.REQUEST_INSTALL_PACKAGES"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#F4F4F4",
@@ -41,8 +44,52 @@
           "cameraPermission": false
         }
       ],
-      "expo-secure-store",
-      "expo-sharing",
+      [
+        "expo-secure-store",
+        {
+          "faceIDPermission": false
+        }
+      ],
+      "expo-notifications",
+      [
+        "expo-sharing",
+        {
+          "android": {
+            "enabled": true,
+            "singleShareMimeTypes": [
+              "text/plain",
+              "text/html",
+              "text/csv",
+              "text/markdown",
+              "image/*",
+              "video/*",
+              "application/pdf",
+              "application/rtf",
+              "application/json",
+              "application/msword",
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+              "application/vnd.ms-excel",
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+              "application/vnd.ms-powerpoint",
+              "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            ],
+            "multipleShareMimeTypes": [
+              "image/*",
+              "video/*",
+              "application/pdf",
+              "application/msword",
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+              "application/vnd.ms-excel",
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+              "application/vnd.ms-powerpoint",
+              "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            ]
+          },
+          "ios": {
+            "enabled": false
+          }
+        }
+      ],
       "expo-video",
       [
         "expo-splash-screen",
@@ -61,7 +108,8 @@
           "enableBackgroundPlayback": false
         }
       ],
-      "expo-asset"
+      "expo-asset",
+      "expo-background-task"
     ]
   }
 }
