@@ -71,11 +71,13 @@
 
 ## 仍在完善
 
-当前稳定 Latest 仍是 [`v1.7.0`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.7.0) / Android versionCode 13。正式安装包来自受保护 Actions 构建与生产签名流程，并通过 immutable Release、GitHub attestation、SHA-256 校验文件及公共 Pages 下载闭环复核。
+当前稳定 Latest 是 [`v1.8.0`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.8.0) / Android versionCode 14。正式安装包来自受保护 Actions 构建与生产签名流程，并通过 immutable Release、GitHub attestation、SHA-256 校验文件及公共 Pages 下载闭环复核。
 
-`1.7.0` 的官方协议核对、安全修正、本机质量门和候选 APK 证据见 [`1.7.0` 发布源续作断点](./docs/CONTINUATION_CHECKPOINT_2026-07-13_V1.7.md)。
+`1.8.0` 的 P0/P1 范围、官方协议核对、本机质量门、候选 APK 与正式发布证据见 [`1.8.0` 发布续作断点](./docs/CONTINUATION_CHECKPOINT_2026-07-14_V1.8.md)。
 
-当前工作树包含尚未发布的 `1.8.0` / Android versionCode 14 P0/P1 开发版本：工作区 v7 迁移、首次配置向导、项目/成果工作台、文档导入与显式 OCR、Android 后台媒体任务、系统分享入口，以及用户自有 WebDAV/S3 加密同步。它已经过本机源码与离线协议验证，但尚未创建 tag、GitHub Release 或 Actions 正式 APK；不要把本机构建包当作公开稳定版。
+`1.8.0` / Android versionCode 14 已正式发布：工作区 v7 迁移、首次配置向导、项目/成果工作台、文档导入与显式 OCR、Android 后台媒体任务、系统分享入口，以及用户自有 WebDAV/S3 加密同步均已进入公开版本。精确 `main` / tag 提交为 `cafecfdbc74bc314239802ee121a938d4fa2c113`；受保护 [Android run `29384863423`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29384863423) 与发布后 [Pages run `29385766421`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29385766421) 均成功。
+
+Actions 正式 APK 为 152,673,746 字节，SHA-256 `d4164aec039e5d827fcab09f9805d760ca06c4e285d1720ef874a31c32391e0e`；包名/版本/code 为 `com.szdtzpj.embezzlestudio` / 1.8.0 / 14，min/target SDK 24/36，单一正式签名者、v2/v3 与 zipalign 均通过。公开 [`release.html`](https://szdtzpj.github.io/Embezzle-Studio/release.html)、[`release-manifest.json`](https://szdtzpj.github.io/Embezzle-Studio/release-manifest.json) 和 [APK 下载](https://szdtzpj.github.io/Embezzle-Studio/downloads/Embezzle-Studio-v1.8.0-release.apk) 已完成匿名 HTTP 200 与完整字节摘要复核。
 
 Embezzle Studio 不购买、转售、补贴或代理模型、搜索、语音、媒体或 MCP 能力，也不运行生产 API、MCP 网关、审批服务器、汇率服务、遥测后端或任务 worker。应用没有自有同步服务器；若启用同步，连接的是用户自己的 WebDAV/S3 存储，存储费用与权限由用户承担。所有服务商与工具调用及费用都由用户配置的账号承担；本地费用护栏不做汇率换算，且其估算/尝试账本不能替代服务商账单。
 
@@ -258,8 +260,8 @@ GitHub Release 的多个资产上传不是事务操作。工作流仅在 owner-a
 - [User-owned Cloud Sync](./docs/cloud-sync.md)
 - [Native background tasks and Android share intake](./docs/NATIVE_BACKGROUND_AND_SHARE.md)
 - [Roadmap](./docs/roadmap.md)
-- [1.8.0 P0/P1 continuation checkpoint](./docs/CONTINUATION_CHECKPOINT_2026-07-14_V1.8.md)
+- [1.8.0 P0/P1 formal release checkpoint](./docs/CONTINUATION_CHECKPOINT_2026-07-14_V1.8.md)
 
-### 1.8.0 P0/P1 当前验证边界
+### 1.8.0 P0/P1 正式发布与剩余验证边界
 
-当前工作树的 P0/P1 已完成本机实现与验证：`npm.cmd run check` 通过 76 个测试文件 / 1,018 项测试，Web export、Expo Doctor 20/20、依赖一致性、workflow/YAML/Bash/SHA/diff 检查均通过；本机 production-signed Android 1.8.0/code 14 candidate 位于 `D:\EmbezzleStudio-Releases\v1.8.0-candidate`，它只早于最后一项仅影响 iOS 的 Face ID 元数据硬化，且仍不是 GitHub Release。当前树已重新完成 Android 干净构建和 Manifest 复核，但该重建包由 Android Debug 证书签名；精确当前树的 production APK 仍需受保护签名环境。P2 生物识别锁明确延期；真机、真实 WebDAV/S3、真实服务商计费/媒体长任务和 GitHub Actions 发布仍是外部边界。完整证据见 [checkpoint](./docs/CONTINUATION_CHECKPOINT_2026-07-14_V1.8.md)。
+P0/P1 已完成本机实现与验证：`npm.cmd run check` 通过 76 个测试文件 / 1,018 项测试，Web export、Expo Doctor 20/20、依赖一致性、workflow/YAML/Bash/SHA/diff 检查均通过。本机 production-signed candidate 与后续 debug-signed 重建包仅保留为发布前历史证据；公开分发必须使用受保护 Actions 从精确 `main` / `v1.8.0` 提交重建并签名的正式 APK。正式三项资产已下载到 `D:\EmbezzleStudio-Releases\v1.8.0`，Release/asset attestation、checksum、GitHub digest/uploader、aapt、单正式签名者、v2/v3、zipalign 和 Pages 完整下载均已复核。P2 生物识别锁明确延期；真机、真实 WebDAV/S3、真实服务商计费与媒体长任务仍是外部边界。完整证据见 [checkpoint](./docs/CONTINUATION_CHECKPOINT_2026-07-14_V1.8.md)。

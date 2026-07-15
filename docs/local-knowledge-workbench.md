@@ -48,9 +48,9 @@
 
 ## Verification boundary
 
-### Current `1.8.0` P0/P1 local evidence
+### Current `1.8.0` P0/P1 local and formal release evidence
 
-The active local truth is [the v1.8.0 continuation checkpoint](./CONTINUATION_CHECKPOINT_2026-07-14_V1.8.md). It records the completed P0/P1 implementation and the release boundary; this document does not imply a GitHub tag, Release, Actions APK, or production publication.
+The active truth is [the v1.8.0 formal release checkpoint](./CONTINUATION_CHECKPOINT_2026-07-14_V1.8.md). It records the completed P0/P1 implementation, the pre-release local evidence, and the subsequent GitHub/Pages publication. The exact tag/main commit is `cafecfdbc74bc314239802ee121a938d4fa2c113`.
 
 `npm.cmd run check` passes 76 test files / 1,018 tests with clean TypeScript and ESLint. The Web export contains 3,483 modules and an approximately 8.2 MB main bundle. `npx.cmd expo install --check` passes and Expo Doctor is 20/20.
 
@@ -60,7 +60,9 @@ In-app Browser smoke passes at desktop and true 390x844 viewports for first-run 
 
 The P0/P1 work covered schema-v7 setup/recovery, artifact/source lifecycle, stable PDF import and explicit OCR placeholders, Android background media outbox/notifications, cleanup journaling and orphan-media reclamation, atomic system-share intake, and optional fail-closed user-owned WebDAV/S3 sync. P2 biometric lock remains deferred.
 
-Clean prebuild and offline Release assembly pass. The local production-signed candidate is `D:\EmbezzleStudio-Releases\v1.8.0-candidate\Embezzle-Studio-v1.8.0-candidate-release.apk`, 152,673,746 bytes, SHA-256 `0DCB06FE4D8D2D018B78E1F6A7A684BCD66BB525682B622DA0399B289DFD3143`. It identifies as `com.szdtzpj.embezzlestudio` version `1.8.0`/code `14`, minSdk `24`/targetSdk `36`, `allowBackup=false`, `adjustResize`, intentional `RECORD_AUDIO`, and no camera, overlay, install-packages, biometric, or fingerprint permissions. Exactly one production signer is present (`F5746B0DC5BD3F6E640F693FDE171BD0CD87A919998CD6CA3F8F26748ABE6C02`); v2/v3 and zipalign pass. The candidate predates only the final iOS-only Face ID metadata hardening. The current tree was rebuilt cleanly for Android and its manifest rechecked, but that rebuild is debug-signed; exact current-tree production signing remains a protected-environment boundary.
+Clean prebuild and offline Release assembly pass. The local production-signed candidate is `D:\EmbezzleStudio-Releases\v1.8.0-candidate\Embezzle-Studio-v1.8.0-candidate-release.apk`, 152,673,746 bytes, SHA-256 `0DCB06FE4D8D2D018B78E1F6A7A684BCD66BB525682B622DA0399B289DFD3143`; it remains pre-release evidence only. The protected Android run `29384863423` rebuilt the exact tag and published the formal `D:\EmbezzleStudio-Releases\v1.8.0\Embezzle-Studio-v1.8.0-release.apk`, also 152,673,746 bytes, SHA-256 `d4164aec039e5d827fcab09f9805d760ca06c4e285d1720ef874a31c32391e0e`. The formal APK identifies as `com.szdtzpj.embezzlestudio` version `1.8.0`/code `14`, minSdk `24`/targetSdk `36`, `allowBackup=false`, `adjustResize`, intentional `RECORD_AUDIO`, and no camera, overlay, install-packages, biometric, or fingerprint permissions; exactly one production signer, v2/v3, and zipalign pass. Release attestation and all three asset checks passed.
+
+The post-release Pages run `29385766421` succeeded. Anonymous `release-manifest.json`, `release.html`, and the managed APK at `https://szdtzpj.github.io/Embezzle-Studio/` return HTTP 200; the complete Pages APK under `D:\EmbezzleStudio-Releases\v1.8.0-github-public-verify-20260715-110848` matches the immutable Release byte-for-byte.
 
 `adb devices -l` is empty for this run. Real-device install/launch, native keyboard/system-bar variants, native picker/filesystem and SAF cancellation/low-space behavior, background-task survival, performance/stress, live WebDAV/S3 CAS/conflict behavior, broad real-provider entitlement/billing, and long-running media acceptance remain external. No P2 biometric API or flow was added.
 
