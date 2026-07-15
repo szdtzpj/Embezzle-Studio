@@ -52,7 +52,7 @@
 
 The active local truth is [the v1.8.0 continuation checkpoint](./CONTINUATION_CHECKPOINT_2026-07-14_V1.8.md). It records the completed P0/P1 implementation and the release boundary; this document does not imply a GitHub tag, Release, Actions APK, or production publication.
 
-`npm.cmd run check` passes 76 test files / 1,014 tests with clean TypeScript and ESLint. The Web export contains 3,483 modules and an approximately 8.2 MB main bundle. `npx.cmd expo install --check` passes and Expo Doctor is 20/20.
+`npm.cmd run check` passes 76 test files / 1,018 tests with clean TypeScript and ESLint. The Web export contains 3,483 modules and an approximately 8.2 MB main bundle. `npx.cmd expo install --check` passes and Expo Doctor is 20/20.
 
 Three workflow YAML files parse, 36 Bash run blocks pass `bash -n`, all 16 action references are full SHA pins, `git diff --check` passes, and the reverse `expo-sharing` patch check passes. High-severity dependency audit exits 0; twelve moderate `uuid -> xcode -> @expo/config-plugins` findings remain and no force-upgrade was applied.
 

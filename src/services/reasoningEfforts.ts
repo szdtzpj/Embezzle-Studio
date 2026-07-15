@@ -1,6 +1,7 @@
 import type { ModelInfo, ProviderProfile, ReasoningEffort } from '../domain/types';
 import { isVolcengineArkProvider } from '../data/arkModels';
 import { getBailianThinkingProfile, inferModelTask, isReasoningModel } from './modelCapabilities';
+import { isExactOfficialDeepSeekProvider } from './providerSetup';
 
 export interface ReasoningEffortOption {
   key: ReasoningEffort;
@@ -97,6 +98,10 @@ function isDeepSeekV4Model(text: string): boolean {
   return text.includes('deepseek-v4');
 }
 
+function isDeepSeekReasonerAlias(modelId: string): boolean {
+  return normalizedText(modelId) === 'deepseek-reasoner';
+}
+
 function isArkThinkingModel(text: string): boolean {
   return (
     isDoubaoSeedModel(text) ||
@@ -183,6 +188,12 @@ export function getSupportedReasoningEfforts(
       return ['default', 'off', 'minimal', 'low', 'medium', 'high'];
     }
     return isReasoningModel(model) ? ['default', 'off'] : [];
+  }
+
+  if (isExactOfficialDeepSeekProvider(provider)) {
+    // The compatibility alias is fixed thinking mode until its deprecation;
+    // it is not an independently configurable reasoning family.
+    if (isDeepSeekReasonerAlias(model.id)) return ['default'];
   }
 
   if (isOpenAiBaseUrl(provider) || isOpenAiReasoningModel(text)) {

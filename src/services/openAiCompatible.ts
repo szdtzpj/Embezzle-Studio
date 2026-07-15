@@ -62,7 +62,7 @@ import {
   upsertToolActivity,
 } from './messageActivity';
 import { getRemoteMcpExecutableReadiness } from '../plugins/contracts';
-import { isExactOfficialOpenAiProvider } from './providerSetup';
+import { isExactOfficialDeepSeekProvider, isExactOfficialOpenAiProvider } from './providerSetup';
 import {
   providerMcpLimits,
   runOpenAiProviderMcp,
@@ -1244,6 +1244,10 @@ function isDeepSeekV4Model(modelId: string): boolean {
   return text.includes('deepseek-v4');
 }
 
+function isDeepSeekReasonerAlias(modelId: string): boolean {
+  return modelId.trim().toLowerCase() === 'deepseek-reasoner';
+}
+
 function bailianThinkingBudget(effort: ReasoningEffort): number | undefined {
   if (effort === 'low') {
     return 1024;
@@ -1622,6 +1626,15 @@ function applyReasoningOptions(
     if (value) {
       body.reasoning_effort = value;
     }
+    return;
+  }
+
+  if (
+    isExactOfficialDeepSeekProvider(provider) &&
+    isDeepSeekReasonerAlias(modelId)
+  ) {
+    // Ignore stale effort values saved before the alias-specific matrix was
+    // introduced rather than sending an unsupported toggle or invented field.
     return;
   }
 

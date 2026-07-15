@@ -43,6 +43,23 @@ const openai: ProviderProfile = {
   models: [],
 };
 
+const deepseek: ProviderProfile = {
+  id: 'deepseek',
+  name: 'DeepSeek',
+  kind: 'custom',
+  baseUrl: 'https://api.deepseek.com/v1',
+  apiKey: 'test',
+  capabilities: ['text', 'reasoning'],
+  models: [],
+};
+
+const deepseekRelay: ProviderProfile = {
+  ...deepseek,
+  id: 'deepseek-relay',
+  name: 'DeepSeek relay',
+  baseUrl: 'https://relay.example.com/v1',
+};
+
 const customArk: ProviderProfile = {
   ...ark,
   id: 'custom-ark',
@@ -74,6 +91,9 @@ describe('documented reasoning effort matrices', () => {
     [openai, 'gpt-5.6-sol', ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max']],
     [openai, 'gpt-5.6-pro', ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max']],
     [openai, 'gpt-5.4-pro', ['default', 'medium', 'high', 'xhigh']],
+    [deepseek, 'deepseek-v4-pro', ['default', 'off', 'high', 'max']],
+    [deepseek, 'deepseek-reasoner', ['default']],
+    [deepseekRelay, 'deepseek-reasoner', ['default', 'off', 'low', 'medium', 'high', 'max']],
   ] as const)('%s / %s', (provider, modelId, expected) => {
     const model = createModelInfoFromId(provider, modelId, 'manual');
     expect(getSupportedReasoningEfforts(provider, model)).toEqual(expected);
@@ -87,6 +107,8 @@ describe('documented reasoning effort matrices', () => {
     expect(normalizeReasoningEffort(openai, gpt52, 'max')).toBe('xhigh');
     expect(normalizeReasoningEffort(ark, arkGlm, 'off')).toBe('off');
     expect(normalizeReasoningEffort(ark, arkGlm, 'max')).toBe('max');
+    const deepseekReasoner = createModelInfoFromId(deepseek, 'deepseek-reasoner', 'manual');
+    expect(normalizeReasoningEffort(deepseek, deepseekReasoner, 'off')).toBe('default');
   });
 });
 
@@ -167,6 +189,19 @@ describe('reasoning and sampling wire parameters', () => {
     expect(await requestBody(openai, 'gpt-5.6-sol', 'max')).toMatchObject({
       reasoning_effort: 'max',
     });
+  });
+
+  it('keeps the official DeepSeek legacy reasoner alias fixed and leaves relays generic', async () => {
+    const official = await requestBody(deepseek, 'deepseek-reasoner', 'off');
+    expect(official).not.toHaveProperty('thinking');
+    expect(official).not.toHaveProperty('reasoning_effort');
+
+    const staleHigh = await requestBody(deepseek, 'deepseek-reasoner', 'high');
+    expect(staleHigh).not.toHaveProperty('thinking');
+    expect(staleHigh).not.toHaveProperty('reasoning_effort');
+
+    const relay = await requestBody(deepseekRelay, 'deepseek-reasoner', 'off');
+    expect(relay.reasoning_effort).toBe('minimal');
   });
 });
 
