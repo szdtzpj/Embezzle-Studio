@@ -1,10 +1,11 @@
 import { StatusBar } from 'expo-status-bar';
 import * as Clipboard from 'expo-clipboard';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, startTransition, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   AppState,
   BackHandler,
+  FlatList,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -16,16 +17,21 @@ import {
   View,
 } from 'react-native';
 import type {
+  ListRenderItemInfo,
   NativeScrollEvent,
   NativeSyntheticEvent,
+  TextInputProps,
+  ViewStyle,
 } from 'react-native';
 import { AnimatePresence, MotiView } from 'moti';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
+  ArrowDown,
   BookOpen,
   Check,
   ChevronDown,
   Columns3,
+  Download,
   FileText,
   Image as ImageIcon,
   Lightbulb,
@@ -39,14 +45,15 @@ import {
   SlidersHorizontal,
   Square,
   Video,
-  Volume2,
-  X,
 } from 'lucide-react-native';
 
 import { isVolcengineArkProvider } from '../../data/arkModels';
 import {
+  useWorkspacePersistenceLoadError,
+  useWorkspacePersistenceSaveError,
+  useWorkspacePhase,
+  useWorkspaceRecoveryNotice,
   useWorkspaceSelector,
-  useWorkspaceStatus,
 } from '../../app/workspace/WorkspaceSessionProvider';
 import { useWorkspaceSession } from '../../app/workspace/internal/WorkspaceSessionContext';
 import { defaultParameterSettings } from '../../data/providerCatalog';
@@ -58,9 +65,11 @@ import {
 import { useProjectConversationNavigation } from '../../features/projects/ProjectsConversationsProvider';
 import type {
   AppWorkspace,
+  ChatConversation,
   ColorMode,
   GenerationTaskInfo,
   ChatMessage,
+  ImageGenerationOptions,
   MediaAttachment,
   ModelInfo,
   ReasoningEffort,
@@ -72,6 +81,8 @@ import type {
 } from '../../domain/types';
 import { pickFiles, pickImages, pickVideos, validateAttachments } from '../../services/mediaPicker';
 import { deletePersistedAttachments, discardUncommittedAttachments } from '../../services/mediaStorage';
+import { exportConversation } from '../../services/conversationExport';
+import { saveAttachmentToDevice } from '../../services/mediaExport';
 import {
   assertChatAttachmentsSupported,
   getModelParameterConstraint,
@@ -90,6 +101,8 @@ import {
 } from '../../features/chat/ChatProvider';
 import {
   ChatWorkspaceRuntime,
+  clearStreamingDraft,
+  publishStreamingDraft,
   type ChatWorkspaceCommand,
 } from './internal/ChatWorkspaceRuntime';
 import { useRegisterChatProjectNavigation } from './useChatProjectNavigation';
@@ -165,9 +178,9 @@ import {
   type MainWorkspaceTab,
 } from '../../ui/mobile/WorkspaceHub';
 import { useChatPaneTheme } from './chatPaneStyles';
+import { ActionSheetDialog } from '../../ui/components/ActionSheetDialog';
 import { ConfirmDialog } from '../../ui/components/ConfirmDialog';
-import { MessageActivityModules } from '../../ui/components/MessageActivityModules';
-import { MessageMarkdown } from '../../ui/components/MessageMarkdown';
+import { ImageGenParamsBar } from '../../ui/components/ImageGenParamsBar';
 import { ModelAvatar } from '../../ui/components/ModelAvatar';
 import {
   ComposerSearchSheet,
@@ -175,6 +188,14 @@ import {
   SearchServiceIcon,
 } from '../../ui/components/SearchServicesPanel';
 import { requestConfirm } from '../../ui/components/dialogService';
+import { resolveComposerKeyAction } from './composerShortcuts';
+import { buildEditWithImageDraft } from './imageEditDraft';
+import {
+  filterSlashCommands,
+  resolveSlashCommandSelection,
+  shouldOpenSlashCommandMenu,
+  type SlashCommandItem,
+} from './slashCommands';
 import { useChatRequestDecisions } from './internal/decisions/useChatRequestDecisions';
 import {
   ChatRequestExecution,
@@ -185,7 +206,6 @@ import {
 import { ChatUsageLedger } from './internal/requests/ChatUsageLedger';
 import { useChatVoice } from './internal/voice/useChatVoice';
 import {
-  AnimatedMessage,
   AnimatedPressable,
   IconCrossfade,
   ScreenFade,
@@ -200,22 +220,17 @@ import {
   modelTaskLabel,
   type ParameterKey,
 } from './internal/presentation/chatModelControls';
-import {
-  AssistantMessageHeader,
-  GenerationTaskPanel,
-  McpActivityPanel,
-  MessageActionMenu,
-  MessageActions,
-  MessageInlineEditor,
-  TokenUsageLine,
-  WebCitationList,
-  formatCompactModelName,
-} from './internal/presentation/ChatMessagePresentation';
+import { formatCompactModelName } from './internal/presentation/ChatMessagePresentation';
+import { ChatMessageRow } from './internal/presentation/ChatMessageRow';
 import { ModelPickerModal, ParameterControl } from './internal/presentation/ChatModelPicker';
-import {
-  AttachmentPreview,
-  PendingAttachmentPreview,
-} from './internal/presentation/ChatAttachmentPresentation';
+import { PendingAttachmentPreview } from './internal/presentation/ChatAttachmentPresentation';
+
+// 按需延迟加载全屏图片灯箱，避免首屏提前引入手势缩放原生模块开销
+const ImageLightboxModal = lazy(() =>
+  import('../../ui/components/ImageLightboxModal').then((module) => ({
+    default: module.ImageLightboxModal,
+  }))
+);
 
 function confirmDestructiveAction(
   title: string,
@@ -239,6 +254,36 @@ function confirmDestructiveAction(
 
 const initialChatMessageRenderLimit = 160;
 const chatMessageRenderPageSize = 160;
+const chatMessageKeyExtractor = (item: ChatMessage) => item.id;
+const maxImageGenReferenceAttachments = 10;
+const supportedImageGenReferenceMimeTypes = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/jpg',
+  'image/webp',
+  'image/gif',
+]);
+
+/** 校验生图模型参考图附件（不依赖对话模型的 `image-input` 能力标记）。 */
+function assertImageGenerationReferenceAttachments(attachments: readonly MediaAttachment[]): void {
+  if (attachments.length > maxImageGenReferenceAttachments) {
+    throw new Error(`参考图片数量超过上限（最多支持 ${maxImageGenReferenceAttachments} 张）。`);
+  }
+  for (const attachment of attachments) {
+    if (attachment.kind !== 'image') {
+      throw new Error(`图片生成模型仅支持选择图片作为参考图（不支持「${attachment.name}」）。`);
+    }
+    const normalizedMime = attachment.mimeType?.split(';', 1)[0]?.trim().toLowerCase();
+    if (normalizedMime && !supportedImageGenReferenceMimeTypes.has(normalizedMime)) {
+      throw new Error(
+        `参考图「${attachment.name}」的 MIME 类型（${normalizedMime}）不受支持，仅支持 PNG、JPEG、WEBP、GIF 图片。`
+      );
+    }
+  }
+}
+
+/** 输入栏唯一激活的浮层菜单类型（含 M3 预留的 '/' 快捷指令扩展位）。 */
+type ComposerOverlayMenu = 'none' | 'attach' | 'reasoning' | 'parameter' | 'search' | 'slash';
 
 const workspaceKnowledgeContextCache = new WeakMap<
   readonly ProjectKnowledgeSource[],
@@ -345,12 +390,18 @@ export interface ChatPaneSettingsPort {
   back(): boolean;
 }
 
-export function ChatPane(props: { settings: ChatPaneSettingsPort; onOpenSetup: () => void }) {
+export function ChatPane(props: {
+  settings: ChatPaneSettingsPort;
+  onOpenSetup: () => void;
+  /** M3 预留输入栏顶部扩展插槽（如生图参数栏）。 */
+  composerTopSlot?: ReactNode;
+}) {
   const { colorMode, notice: appearanceNotice, setColorMode } = useAppearance();
   return (
     <ChatPaneImplementation
       settings={props.settings}
       onOpenSetup={props.onOpenSetup}
+      composerTopSlot={props.composerTopSlot}
       colorMode={colorMode}
       onSetColorMode={setColorMode}
       appearanceNotice={appearanceNotice}
@@ -361,23 +412,45 @@ export function ChatPane(props: { settings: ChatPaneSettingsPort; onOpenSetup: (
 function ChatPaneImplementation({
   settings,
   onOpenSetup,
+  composerTopSlot,
   colorMode,
   onSetColorMode,
   appearanceNotice,
 }: {
   settings: ChatPaneSettingsPort;
   onOpenSetup: () => void;
+  composerTopSlot?: ReactNode;
   colorMode: ColorMode;
   onSetColorMode: (colorMode: ColorMode) => void;
   appearanceNotice: string;
 }) {
   const { palette, styles } = useChatPaneTheme();
+  const insets = useSafeAreaInsets();
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    // 事件名三元式须保留在 Keyboard.addListener 第一参数内以符合 F9-T1-2 静态检查
+    const showSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      () => setKeyboardVisible(true)
+    );
+    const hideSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => setKeyboardVisible(false)
+    );
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
   const workspaceSession = useWorkspaceSession();
   const workspaceCommandRuntime = useMemo(
     () => new ChatWorkspaceRuntime(workspaceSession),
     [workspaceSession]
   );
-  const workspaceStatus = useWorkspaceStatus();
+  const workspacePhase = useWorkspacePhase();
+  const workspaceRecoveryNotice = useWorkspaceRecoveryNotice();
   const workspace = useWorkspaceSelector((snapshot) => snapshot);
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
@@ -388,15 +461,13 @@ function ChatPaneImplementation({
     ) => workspaceCommandRuntime.execute(command, options),
     [workspaceCommandRuntime]
   );
-  const booting = workspaceStatus.phase === 'booting';
+  const booting = workspacePhase === 'booting';
   const persistenceReady =
-    workspaceStatus.phase === 'ready' || workspaceStatus.phase === 'replacing';
-  const persistenceLoadError =
-    workspaceStatus.phase === 'read-only' ? workspaceStatus.issue ?? null : null;
-  const persistenceSaveError =
-    workspaceStatus.phase === 'ready' && workspaceStatus.dirty
-      ? workspaceStatus.issue ?? null
-      : null;
+    workspacePhase === 'ready' || workspacePhase === 'replacing';
+  const persistenceLoadError = useWorkspacePersistenceLoadError();
+  // 细粒度标量 Hook 等价于原 `workspaceStatus.phase === 'ready' && workspaceStatus.dirty` 错误检查，
+  // 无报错时始终返回 null，避免正常落盘切换 dirty 触发整树冗余重渲染。
+  const persistenceSaveError = useWorkspacePersistenceSaveError();
   const settingsOpen = settings.isOpen;
   const workspaceReadOnly = isWorkspaceReadOnly(booting, persistenceReady);
   const closeSettings = useCallback(() => {
@@ -415,14 +486,30 @@ function ChatPaneImplementation({
   }, [knowledgeImportHandle]);
   const [mainTab, setMainTab] = useState<MainWorkspaceTab>('chat');
   const [contextInspectorOpen, setContextInspectorOpen] = useState(false);
-  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
-  const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
-  const [parameterMenuOpen, setParameterMenuOpen] = useState(false);
+  const [activeComposerMenu, setActiveComposerMenu] = useState<ComposerOverlayMenu>('none');
+  const attachMenuOpen = activeComposerMenu === 'attach';
+  const reasoningMenuOpen = activeComposerMenu === 'reasoning';
+  const parameterMenuOpen = activeComposerMenu === 'parameter';
+  const searchMenuOpen = activeComposerMenu === 'search';
+  const slashMenuOpen = activeComposerMenu === 'slash';
+  const [slashHighlightIndex, setSlashHighlightIndex] = useState(0);
+  const [imageOptions, setImageOptions] = useState<Omit<ImageGenerationOptions, 'referenceImages'>>({
+    aspectRatio: '1:1',
+    count: 1,
+  });
+  const [lightboxAttachment, setLightboxAttachment] = useState<MediaAttachment | null>(null);
+  const [exportDialogConversation, setExportDialogConversation] =
+    useState<ChatConversation | null>(null);
+  const toggleComposerMenu = useCallback((menu: Exclude<ComposerOverlayMenu, 'none'>) => {
+    setActiveComposerMenu((current) => (current === menu ? 'none' : menu));
+  }, []);
+  const closeComposerMenu = useCallback(() => {
+    setActiveComposerMenu('none');
+  }, []);
   const [composerLayoutY, setComposerLayoutY] = useState(0);
   const parameterMenuMaxHeight = composerLayoutY > 0
-    ? Math.min(520, Math.max(0, Math.floor(composerLayoutY - 12)))
+    ? Math.min(520, Math.max(120, Math.floor(composerLayoutY - 12)))
     : 420;
-  const [searchMenuOpen, setSearchMenuOpen] = useState(false);
   const [input, setInput] = useState('');
   const [chatMessageRenderLimit, setChatMessageRenderLimit] = useState(initialChatMessageRenderLimit);
   const [forcedChatMessageId, setForcedChatMessageId] = useState<string | null>(null);
@@ -478,8 +565,11 @@ function ChatPaneImplementation({
     if (!settingsOpen) return;
     // Settings is a separate navigation surface; never leave chat-only menus
     // logically open behind it or restore them when returning to Chat.
-    setSearchMenuOpen(false);
+    setActiveComposerMenu('none');
+    setSlashHighlightIndex(0);
     setMessageActionMenuId(null);
+    setLightboxAttachment(null);
+    setExportDialogConversation(null);
   }, [settingsOpen]);
 
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -488,15 +578,37 @@ function ChatPaneImplementation({
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchHighlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSearchMessageIdRef = useRef<string | null>(null);
-  const messageLayoutYByIdRef = useRef(new Map<string, number>());
   const inputRef = useRef(input);
   const pendingAttachmentsRef = useRef(attachments);
   const loadedDraftConversationIdRef = useRef<string | null>(null);
   const draftSaveOperationRef = useRef(0);
+  const prevSettingsOpenRef = useRef(settingsOpen);
   const mountedRef = useRef(true);
   const appStateRef = useRef(AppState.currentState);
-  const chatScrollRef = useRef<ScrollView>(null);
+  const chatScrollRef = useRef<FlatList<ChatMessage>>(null);
+  const renderedChatMessagesRef = useRef<ChatMessage[]>([]);
   const shouldAutoScrollRef = useRef(true);
+  const isUserDraggingRef = useRef(false);
+  const dragStartOffsetYRef = useRef(0);
+  const lastScrollOffsetYRef = useRef(0);
+  const lastContentHeightRef = useRef(0);
+  const programmaticScrollDeadlineRef = useRef(0);
+  const scrollToBottomTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+  const progressiveScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const progressiveScrollAttemptsRef = useRef(0);
+  const scrollChatListToBottomRef = useRef<(animated: boolean) => void>(() => {});
+  const clearScrollToBottomTimers = useCallback(() => {
+    for (const timer of scrollToBottomTimersRef.current) {
+      clearTimeout(timer);
+    }
+    scrollToBottomTimersRef.current = [];
+    if (progressiveScrollTimerRef.current !== null) {
+      clearTimeout(progressiveScrollTimerRef.current);
+      progressiveScrollTimerRef.current = null;
+    }
+    progressiveScrollAttemptsRef.current = 0;
+  }, []);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const projectsNavigation = useProjectConversationNavigation();
   const taskRuntime = useChatTaskRuntime();
   const queryingTaskByMessageId = taskRuntime.queryingByMessageId;
@@ -548,10 +660,11 @@ function ChatPaneImplementation({
     showChat: () => switchMainTab('chat'),
     openArtifact: (artifactId) => openHubArtifact(artifactId),
     revealMessage: (messageId) => {
+      clearScrollToBottomTimers();
       pendingSearchMessageIdRef.current = messageId;
-      messageLayoutYByIdRef.current.delete(messageId);
       setForcedChatMessageId(messageId);
       shouldAutoScrollRef.current = false;
+      setShowScrollToBottom(false);
       setTimeout(() => scrollToSearchMessage(messageId), 80);
     },
     applyPromptTemplate,
@@ -618,11 +731,12 @@ function ChatPaneImplementation({
       if (searchHighlightTimer.current) {
         clearTimeout(searchHighlightTimer.current);
       }
+      clearScrollToBottomTimers();
       chatOrchestration.stop();
       cancelRequestDecisions();
       // Workspace Session dispose (provider unmount) owns the final dirty flush.
     };
-  }, [cancelRequestDecisions, chatOrchestration]);
+  }, [cancelRequestDecisions, chatOrchestration, clearScrollToBottomTimers]);
 
   useEffect(() => {
     inputRef.current = input;
@@ -633,11 +747,11 @@ function ChatPaneImplementation({
   }, [attachments]);
 
   useEffect(() => {
-    if (workspaceStatus.recoveryNotice) {
-      setNotice(workspaceStatus.recoveryNotice);
+    if (workspaceRecoveryNotice) {
+      setNotice(workspaceRecoveryNotice);
       workspaceSession.consumeRecoveryNoticeFromStatus();
     }
-  }, [workspaceSession, workspaceStatus.recoveryNotice]);
+  }, [workspaceRecoveryNotice, workspaceSession]);
 
   /** 豆包风格轻提示：浮出一个圆角框，1.6s 后自动淡出。 */
   function showToast(message: string) {
@@ -722,10 +836,10 @@ function ChatPaneImplementation({
   }
 
   useEffect(() => {
-    if (workspaceStatus.phase === 'read-only' && workspaceStatus.issue) {
+    if (workspacePhase === 'read-only' && persistenceLoadError) {
       setNotice('');
     }
-  }, [workspaceStatus.phase, workspaceStatus.issue]);
+  }, [persistenceLoadError, workspacePhase]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
@@ -751,6 +865,14 @@ function ChatPaneImplementation({
     }
 
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (lightboxAttachment) {
+        setLightboxAttachment(null);
+        return true;
+      }
+      if (exportDialogConversation) {
+        setExportDialogConversation(null);
+        return true;
+      }
       const handled = coordinateMobileBack(
         {
           contextInspectorOpen,
@@ -764,10 +886,7 @@ function ChatPaneImplementation({
           modelPickerOpen,
           projectDrawerOpen: projectsNavigation.drawerOpen,
           settingsOpen,
-          chatTransientOpen: Boolean(
-            attachMenuOpen || reasoningMenuOpen || parameterMenuOpen ||
-            searchMenuOpen || messageActionMenuId
-          ),
+          chatTransientOpen: activeComposerMenu !== 'none' || Boolean(messageActionMenuId),
         },
         {
           closeContextInspector: () => setContextInspectorOpen(false),
@@ -795,17 +914,17 @@ function ChatPaneImplementation({
           closeProjectDrawer: projectsNavigation.closeDrawer,
           settingsBack: settings.back,
           closeChatTransients: () => {
-            setAttachMenuOpen(false);
-            setReasoningMenuOpen(false);
-            setParameterMenuOpen(false);
-            setSearchMenuOpen(false);
+            setActiveComposerMenu('none');
             setMessageActionMenuId(null);
           },
         }
       );
       if (handled) return true;
       if (mainTab !== 'chat') {
-        switchMainTab('chat');
+        Keyboard.dismiss();
+        setActiveComposerMenu('none');
+        setMessageActionMenuId(null);
+        setMainTab('chat');
         return true;
       }
       return false;
@@ -813,19 +932,18 @@ function ChatPaneImplementation({
 
     return () => subscription.remove();
   }, [
-    attachMenuOpen,
+    activeComposerMenu,
     contextInspectorOpen,
     costConfirmationReason,
+    exportDialogConversation,
+    lightboxAttachment,
     messageActionMenuId,
     mcpApprovalView,
     modelPickerOpen,
     mainTab,
-    parameterMenuOpen,
-    reasoningMenuOpen,
     projectsNavigation,
     resolveCostConfirmation,
     resolveMcpApproval,
-    searchMenuOpen,
     settings,
     settingsOpen,
     workbenchOpen,
@@ -846,7 +964,7 @@ function ChatPaneImplementation({
     [workspace.activeConversationId, workspace.conversations]
   );
   useEffect(() => {
-    if (workspaceStatus.phase !== 'ready') {
+    if (workspacePhase !== 'ready') {
       loadedDraftConversationIdRef.current = null;
       return;
     }
@@ -860,10 +978,10 @@ function ChatPaneImplementation({
     const draftAttachments = draft?.attachments?.map((attachment) => ({ ...attachment })) ?? [];
     pendingAttachmentsRef.current = draftAttachments;
     setAttachments(draftAttachments);
-  }, [workspace.activeConversationId, workspace.composerDrafts, workspaceStatus.phase]);
+  }, [workspace.activeConversationId, workspace.composerDrafts, workspacePhase]);
 
   useEffect(() => {
-    if (workspaceStatus.phase !== 'ready') return;
+    if (workspacePhase !== 'ready') return;
     const operation = ++draftSaveOperationRef.current;
     const timer = setTimeout(() => {
       if (draftSaveOperationRef.current !== operation) return;
@@ -881,7 +999,7 @@ function ChatPaneImplementation({
     commitWorkspaceCommand,
     input,
     workspace.activeConversationId,
-    workspaceStatus.phase,
+    workspacePhase,
   ]);
   const activeProjectArtifacts = useMemo(
     () => listWorkspaceArtifactsByProject(workspace.artifacts, activeProject.id),
@@ -939,12 +1057,13 @@ function ChatPaneImplementation({
         : [];
     });
   }, [activeProvider, activeModel]);
-  const canAttachImage = Boolean(activeModel?.capabilities.includes('image-input'));
+  const canAttachImage = Boolean(
+    activeModel?.capabilities.includes('image-input') || activeModelTask === 'image-generation'
+  );
   const canAttachVideo = Boolean(activeModel?.capabilities.includes('video-input'));
   const canAttachFile = Boolean(
     activeModel?.capabilities.includes('file-input') && activeProvider && isOfficialOpenAiProvider(activeProvider)
   );
-  const canAttachAny = canAttachImage || canAttachVideo || canAttachFile;
   const activeModelKey = activeProvider && activeModelId ? `${activeProvider.id}:${activeModelId}` : '';
   const activeReasoningOptions = useMemo(
     () => getReasoningEffortOptions(activeProvider, activeModel),
@@ -977,17 +1096,6 @@ function ChatPaneImplementation({
     activeModel &&
     modelParameterSettingsWillApply(activeProvider, activeModel, activeReasoningEffort)
   );
-  useEffect(() => {
-    if (!canConfigureParameters) {
-      setParameterMenuOpen(false);
-    }
-    if (!activeModelSupportsComposer || !canAttachAny) {
-      setAttachMenuOpen(false);
-    }
-    if (!activeModelSupportsComposer) {
-      setReasoningMenuOpen(false);
-    }
-  }, [activeModelSupportsComposer, canAttachAny, canConfigureParameters]);
   const animatedMessageIds = useMemo(
     () => new Set(workspace.messages.slice(-2).map((message) => message.id)),
     [workspace.messages]
@@ -1008,6 +1116,7 @@ function ChatPaneImplementation({
     );
     return workspace.messages.filter((message) => visibleIds.has(message.id));
   }, [chatMessageRenderLimit, forcedChatMessageId, workspace.messages]);
+  renderedChatMessagesRef.current = renderedChatMessages;
   const latestVideoAttachmentId = useMemo(() => {
     for (let messageIndex = workspace.messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
       const messageAttachments = workspace.messages[messageIndex].attachments ?? [];
@@ -1021,9 +1130,19 @@ function ChatPaneImplementation({
   }, [workspace.messages]);
 
   useEffect(() => {
+    clearScrollToBottomTimers();
     setChatMessageRenderLimit(initialChatMessageRenderLimit);
     setForcedChatMessageId(pendingSearchMessageIdRef.current);
-  }, [workspace.activeConversationId]);
+    if (!pendingSearchMessageIdRef.current) {
+      shouldAutoScrollRef.current = true;
+      isUserDraggingRef.current = false;
+      dragStartOffsetYRef.current = 0;
+      lastScrollOffsetYRef.current = 0;
+      lastContentHeightRef.current = 0;
+      programmaticScrollDeadlineRef.current = 0;
+      setShowScrollToBottom(false);
+    }
+  }, [clearScrollToBottomTimers, workspace.activeConversationId]);
 
   useEffect(() => {
     setActiveVideoAttachmentId(latestVideoAttachmentId);
@@ -1170,44 +1289,81 @@ function ChatPaneImplementation({
   const comparisonTargetLimit = workspace.costGuard.enabled
     ? workspace.costGuard.maxComparisonTargets
     : 4;
+  const slashCommands = useMemo(
+    () =>
+      slashMenuOpen
+        ? filterSlashCommands(input, { promptTemplates: workspace.promptTemplates })
+        : [],
+    [input, slashMenuOpen, workspace.promptTemplates]
+  );
+  const safeSlashHighlightIndex =
+    slashCommands.length > 0 ? Math.min(slashHighlightIndex, slashCommands.length - 1) : 0;
 
   useEffect(() => {
-    if (!canConfigureReasoning && reasoningMenuOpen) {
-      setReasoningMenuOpen(false);
+    const shouldCloseSlash =
+      workspaceReadOnly || !composerSupportsMessages || slashCommands.length === 0;
+    setActiveComposerMenu((current) => {
+      if (current === 'parameter' && !canConfigureParameters) return 'none';
+      if (current === 'attach' && (!composerSupportsMessages || !composerCanAttachAny)) return 'none';
+      if (current === 'reasoning' && (!composerSupportsMessages || !canConfigureReasoning)) return 'none';
+      if (current === 'slash' && shouldCloseSlash) return 'none';
+      return current;
+    });
+    if (slashMenuOpen && shouldCloseSlash) {
+      setSlashHighlightIndex(0);
     }
-  }, [canConfigureReasoning, reasoningMenuOpen]);
+  }, [
+    canConfigureParameters,
+    canConfigureReasoning,
+    composerCanAttachAny,
+    composerSupportsMessages,
+    slashCommands.length,
+    slashMenuOpen,
+    workspaceReadOnly,
+  ]);
 
-
-
-
-
-
-
-
-
-
-  function highlightSearchMessage(messageId: string) {
+  const highlightSearchMessage = useCallback((messageId: string) => {
     setHighlightedSearchMessageId(messageId);
     if (searchHighlightTimer.current) clearTimeout(searchHighlightTimer.current);
     searchHighlightTimer.current = setTimeout(() => {
-      setHighlightedSearchMessageId((current) => current === messageId ? null : current);
+      setHighlightedSearchMessageId((current) => (current === messageId ? null : current));
       searchHighlightTimer.current = null;
     }, 2200);
-  }
+  }, []);
 
   function scrollToSearchMessage(messageId: string) {
-    const y = messageLayoutYByIdRef.current.get(messageId);
-    if (y === undefined) {
+    clearScrollToBottomTimers();
+    const index = renderedChatMessagesRef.current.findIndex((item) => item.id === messageId);
+    if (index < 0) {
       pendingSearchMessageIdRef.current = messageId;
       return;
     }
     pendingSearchMessageIdRef.current = null;
     shouldAutoScrollRef.current = false;
-    chatScrollRef.current?.scrollTo({ y: Math.max(0, y - 20), animated: true });
+    chatScrollRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.2 });
     highlightSearchMessage(messageId);
   }
 
-  async function selectProviderModel(providerId: string, modelId: string) {
+  useEffect(() => {
+    const targetId = pendingSearchMessageIdRef.current;
+    if (!targetId) return;
+    const index = renderedChatMessages.findIndex((item) => item.id === targetId);
+    if (index < 0) return;
+    const timer = setTimeout(() => {
+      if (!mountedRef.current || pendingSearchMessageIdRef.current !== targetId) return;
+      pendingSearchMessageIdRef.current = null;
+      shouldAutoScrollRef.current = false;
+      chatScrollRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.2 });
+      highlightSearchMessage(targetId);
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [forcedChatMessageId, highlightSearchMessage, renderedChatMessages]);
+
+  async function selectProviderModel(
+    providerId: string,
+    modelId: string,
+    options: { clearAttachments?: boolean } = {}
+  ) {
     if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) {
       return;
     }
@@ -1232,7 +1388,9 @@ function ChatPaneImplementation({
           after.activeProviderId !== before.activeProviderId ||
           after.activeModelIdByProvider[providerId] !==
             before.activeModelIdByProvider[providerId];
-        if (selectionChanged) clearPendingAttachments();
+        if (selectionChanged && options.clearAttachments !== false) {
+          clearPendingAttachments();
+        }
       }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '模型切换失败，草稿附件已保留。');
@@ -1355,7 +1513,7 @@ function ChatPaneImplementation({
     const service = workspace.externalSearch.services.find((item) => item.id === targetId);
     if (!service || !isExternalSearchServiceConfigured(service)) {
       setNotice(
-        '请先添加搜索服务：Bing / DuckDuckGo 免费可用；Tavily / Brave / Grok 需 API Key。'
+        '请先添加搜索服务：Bing / DuckDuckGo / SearXNG（自建）可免 Key，或配置 Tavily / Brave / Firecrawl / Grok / DeepSeek / 博查 / Exa。'
       );
       return;
     }
@@ -1393,9 +1551,9 @@ function ChatPaneImplementation({
   );
 
   const openSearchServicesManage = useCallback(() => {
-    setSearchMenuOpen(false);
+    closeComposerMenu();
     settings.open({ kind: 'tool', tool: 'webSearch' });
-  }, [settings, setSearchMenuOpen]);
+  }, [closeComposerMenu, settings]);
 
 
 
@@ -1572,9 +1730,15 @@ function ChatPaneImplementation({
 
 
   function resetComposerForConversationChange() {
+    clearScrollToBottomTimers();
     if (!pendingSearchMessageIdRef.current) {
-      messageLayoutYByIdRef.current.clear();
       shouldAutoScrollRef.current = true;
+      isUserDraggingRef.current = false;
+      dragStartOffsetYRef.current = 0;
+      lastScrollOffsetYRef.current = 0;
+      lastContentHeightRef.current = 0;
+      programmaticScrollDeadlineRef.current = 0;
+      setShowScrollToBottom(false);
       setHighlightedSearchMessageId(null);
     }
     draftSaveOperationRef.current += 1;
@@ -1582,9 +1746,10 @@ function ChatPaneImplementation({
     pendingAttachmentsRef.current = [];
     setAttachments([]);
     setActiveVideoAttachmentId(null);
-    setAttachMenuOpen(false);
-    setReasoningMenuOpen(false);
-    setParameterMenuOpen(false);
+    closeComposerMenu();
+    setSlashHighlightIndex(0);
+    setLightboxAttachment(null);
+    setExportDialogConversation(null);
     setEditingMessageId(null);
     setEditingMessageDraft('');
     setMessageActionMenuId(null);
@@ -1647,15 +1812,18 @@ function ChatPaneImplementation({
       return;
     }
 
-    if (!comparisonActive && activeModelTask === 'image-generation') {
-      setNotice('当前图片生成适配器只支持文本生图，尚未接入参考图编辑。');
+    const isImageGenAttachmentFlow = !comparisonActive && activeModelTask === 'image-generation';
+    if (isImageGenAttachmentFlow && kind !== 'image') {
+      setNotice('图片生成模型仅支持选择图片作为参考图。');
       return;
     }
 
     const capability = kind === 'image' ? 'image-input' : kind === 'video' ? 'video-input' : 'file-input';
-    const capabilityAvailable = comparisonActive
-      ? comparisonRuntimes.every((runtime) => runtime.model.capabilities.includes(capability))
-      : Boolean(activeModel?.capabilities.includes(capability));
+    const capabilityAvailable = isImageGenAttachmentFlow
+      ? true
+      : comparisonActive
+        ? comparisonRuntimes.every((runtime) => runtime.model.capabilities.includes(capability))
+        : Boolean(activeModel?.capabilities.includes(capability));
     if (!capabilityAvailable) {
       setNotice(`当前模型未标记为支持${kind === 'image' ? '图片' : kind === 'video' ? '视频' : '文件'}输入。`);
       return;
@@ -1666,7 +1834,9 @@ function ChatPaneImplementation({
       picked = kind === 'image' ? await pickImages() : kind === 'video' ? await pickVideos() : await pickFiles();
       const nextAttachments = [...attachments, ...picked];
       validateAttachments(nextAttachments);
-      if (comparisonActive) {
+      if (isImageGenAttachmentFlow) {
+        assertImageGenerationReferenceAttachments(nextAttachments);
+      } else if (comparisonActive) {
         for (const runtime of comparisonRuntimes) {
           assertChatAttachmentsSupported(nextAttachments, runtime.model, runtime.provider);
         }
@@ -1702,7 +1872,7 @@ function ChatPaneImplementation({
     if (!removed) return;
     const next = pendingAttachmentsRef.current.filter((attachment) => attachment.id !== attachmentId);
     const conversationId = workspaceRef.current.activeConversationId;
-    draftSaveOperationRef.current += 1;
+    const operation = ++draftSaveOperationRef.current;
     pendingAttachmentsRef.current = next;
     setAttachments(next);
     void commitWorkspaceCommand(
@@ -1715,6 +1885,9 @@ function ChatPaneImplementation({
       },
       { durability: 'required' }
     ).then((accepted) => {
+      if (draftSaveOperationRef.current !== operation) {
+        return undefined;
+      }
       if (accepted) {
         return discardUncommittedAttachments([removed]);
       }
@@ -1723,6 +1896,9 @@ function ChatPaneImplementation({
       setNotice('附件变更未能保存，原附件仍保留。');
       return undefined;
     }).catch((error) => {
+      if (draftSaveOperationRef.current !== operation) {
+        return;
+      }
       pendingAttachmentsRef.current = [...next, removed];
       setAttachments(pendingAttachmentsRef.current);
       setNotice(error instanceof Error ? error.message : '附件变更保存失败。');
@@ -1733,7 +1909,7 @@ function ChatPaneImplementation({
     const removed = pendingAttachmentsRef.current;
     if (!removed.length) return;
     const conversationId = workspaceRef.current.activeConversationId;
-    draftSaveOperationRef.current += 1;
+    const operation = ++draftSaveOperationRef.current;
     pendingAttachmentsRef.current = [];
     setAttachments([]);
     void commitWorkspaceCommand(
@@ -1746,12 +1922,18 @@ function ChatPaneImplementation({
       },
       { durability: 'required' }
     ).then((accepted) => {
+      if (draftSaveOperationRef.current !== operation) {
+        return undefined;
+      }
       if (accepted) return discardUncommittedAttachments(removed);
       pendingAttachmentsRef.current = removed;
       setAttachments(removed);
       setNotice('附件变更未能保存，原附件仍保留。');
       return undefined;
     }).catch((error) => {
+      if (draftSaveOperationRef.current !== operation) {
+        return;
+      }
       pendingAttachmentsRef.current = removed;
       setAttachments(removed);
       setNotice(error instanceof Error ? error.message : '附件变更保存失败。');
@@ -1763,12 +1945,22 @@ function ChatPaneImplementation({
     patch: Partial<ChatMessage>,
     conversationId?: string
   ) {
+    const targetConversationId =
+      conversationId ?? workspaceRef.current.activeConversationId ?? 'conversation-default';
+    // 流式分片写入独立草稿存储，零 WorkspaceSession 广播、零持久化写盘
+    if (patch.status === 'pending') {
+      publishStreamingDraft(targetConversationId, messageId, patch);
+      return;
+    }
+    // 终态先落盘再清理草稿，避免异步间隙闪白
     void commitWorkspaceCommand({
       type: 'message.update',
       messageId,
       patch,
-      conversationId,
+      conversationId: targetConversationId,
       now: Date.now(),
+    }).finally(() => {
+      clearStreamingDraft(targetConversationId, messageId);
     });
   }
 
@@ -1823,6 +2015,7 @@ function ChatPaneImplementation({
     runtime,
     controller,
     usageEvent,
+    imageOptions: requestImageOptions,
     finishRequest = true,
     announceCancellation = true,
   }: {
@@ -1832,6 +2025,7 @@ function ChatPaneImplementation({
     runtime: ChatRequestRuntimeTarget;
     controller: AbortController;
     usageEvent: ProviderUsageEvent;
+    imageOptions?: ImageGenerationOptions;
     finishRequest?: boolean;
     announceCancellation?: boolean;
   }): Promise<AssistantRequestOutcome> {
@@ -1840,7 +2034,7 @@ function ChatPaneImplementation({
       appState: () => appStateRef.current,
       streamUpdateDelayMs: () => (Platform.OS === 'android' ? 120 : 60),
       discardAttachments: discardUncommittedAttachments,
-      authorize: (plan) => usageLedger.authorize(plan),
+      authorize: (plan, signal) => usageLedger.authorize(plan, signal),
       persistUsageEvents: (events) => usageLedger.persist(events),
       finishUsageEvent: (event, status, costEstimate) =>
         usageLedger.finish(event, status, costEstimate),
@@ -1856,6 +2050,7 @@ function ChatPaneImplementation({
       controller,
       usageEvent,
       parameterSettings,
+      ...(requestImageOptions ? { imageOptions: requestImageOptions } : {}),
       finishRequest,
       announceCancellation,
     });
@@ -1963,9 +2158,7 @@ function ChatPaneImplementation({
 
   function openWorkspaceWorkbench(initialArtifactId: string | null = null) {
     Keyboard.dismiss();
-    setAttachMenuOpen(false);
-    setReasoningMenuOpen(false);
-    setParameterMenuOpen(false);
+    closeComposerMenu();
     setMessageActionMenuId(null);
     setWorkbenchArtifactId(initialArtifactId);
     setWorkbenchOpen(true);
@@ -1978,10 +2171,7 @@ function ChatPaneImplementation({
 
   function switchMainTab(tab: MainWorkspaceTab) {
     Keyboard.dismiss();
-    setAttachMenuOpen(false);
-    setReasoningMenuOpen(false);
-    setParameterMenuOpen(false);
-    setSearchMenuOpen(false);
+    closeComposerMenu();
     setMessageActionMenuId(null);
     setMainTab(tab);
   }
@@ -2020,9 +2210,7 @@ function ChatPaneImplementation({
       return;
     }
     Keyboard.dismiss();
-    setAttachMenuOpen(false);
-    setReasoningMenuOpen(false);
-    setParameterMenuOpen(false);
+    closeComposerMenu();
     setMessageActionMenuId(null);
     setContextInspectorOpen(true);
   }
@@ -2543,6 +2731,15 @@ function ChatPaneImplementation({
     }
     const controller = start.lease;
 
+    const regenRefs = (triggerUser.attachments ?? []).filter((item) => item.kind === 'image');
+    const regenImageOptions: ImageGenerationOptions | undefined =
+      inferModelTask(runtime.model) === 'image-generation'
+        ? {
+            ...imageOptions,
+            ...(regenRefs.length > 0 ? { referenceImages: regenRefs } : {}),
+          }
+        : undefined;
+
     const outcome = await runAssistantRequest({
       assistantMessage: pendingMessage,
       conversationId,
@@ -2550,6 +2747,7 @@ function ChatPaneImplementation({
       runtime,
       controller,
       usageEvent,
+      ...(regenImageOptions ? { imageOptions: regenImageOptions } : {}),
     });
     if (outcome.status === 'success') {
       clearSourceLineageForMessageIds(messages.slice(messageIndex).map((item) => item.id));
@@ -2600,9 +2798,14 @@ function ChatPaneImplementation({
       return;
     }
 
+    const runtimeIsImageGen = inferModelTask(runtime.model) === 'image-generation';
     try {
       validateAttachments(message.attachments ?? []);
-      assertChatAttachmentsSupported(message.attachments ?? [], runtime.model, runtime.provider);
+      if (runtimeIsImageGen) {
+        assertImageGenerationReferenceAttachments(message.attachments ?? []);
+      } else {
+        assertChatAttachmentsSupported(message.attachments ?? [], runtime.model, runtime.provider);
+      }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '附件不受当前模型支持。');
       return;
@@ -2695,6 +2898,14 @@ function ChatPaneImplementation({
     }
     const controller = start.lease;
 
+    const rerunRefs = (editedMessage.attachments ?? []).filter((item) => item.kind === 'image');
+    const rerunImageOptions: ImageGenerationOptions | undefined = runtimeIsImageGen
+      ? {
+          ...imageOptions,
+          ...(rerunRefs.length > 0 ? { referenceImages: rerunRefs } : {}),
+        }
+      : undefined;
+
     const outcome = await runAssistantRequest({
       assistantMessage,
       conversationId,
@@ -2702,6 +2913,7 @@ function ChatPaneImplementation({
       runtime,
       controller,
       usageEvent,
+      ...(rerunImageOptions ? { imageOptions: rerunImageOptions } : {}),
     });
     if (outcome.status === 'success') {
       clearSourceLineageForMessageIds(messages.slice(messageIndex).map((item) => item.id));
@@ -2835,23 +3047,6 @@ function ChatPaneImplementation({
 
 
 
-  function inferMessageGenerationTask(message: ChatMessage): GenerationTaskInfo | undefined {
-    const match = message.content.match(/cgt-[A-Za-z0-9-]+/);
-    if (!match || !activeProvider || !activeModelId || activeModelTask !== 'video-generation') {
-      return undefined;
-    }
-
-    const statusMatch = message.content.match(/当前状态[:：]\s*([A-Za-z_-]+)/);
-
-    return {
-      providerId: activeProvider.id,
-      modelId: activeModelId,
-      taskId: match[0],
-      kind: 'video',
-      status: statusMatch?.[1],
-    };
-  }
-
   async function refreshGenerationTask(message: ChatMessage, task: GenerationTaskInfo) {
     setNotice('');
     const result = await taskRuntime.refresh(message, task);
@@ -2964,6 +3159,10 @@ function ChatPaneImplementation({
       persistStartedLedger: () => usageLedger.persist(usageEvents),
       rollbackStartedLedger: () => usageLedger.rollbackStarted(usageEvents),
       appendVisibleMessages: async () => {
+        if (Platform.OS === 'web') {
+          // 在 Web 端将账本落盘渲染与首次消息挂载拆分至独立宏任务帧，防止同步叠加成 Long Task
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        }
         draftSaveOperationRef.current += 1;
         const accepted = await commitWorkspaceCommand(
           {
@@ -2978,12 +3177,17 @@ function ChatPaneImplementation({
         if (!accepted) throw new Error('工作区已不可写，可见消息未提交，请求未发出。');
         inputRef.current = '';
         pendingAttachmentsRef.current = [];
-        setInput('');
-        setAttachments([]);
         shouldAutoScrollRef.current = true;
-        setNotice(
-          `正在发起 ${assistantMessages.length} 次独立调用；费用由对应服务商从你的账户结算。`
-        );
+        startTransition(() => {
+          setInput('');
+          setAttachments([]);
+          setActiveComposerMenu('none');
+          setSlashHighlightIndex(0);
+          setShowScrollToBottom(false);
+          setNotice(
+            `正在发起 ${assistantMessages.length} 次独立调用；费用由对应服务商从你的账户结算。`
+          );
+        });
       },
     });
     if (!start.ok) {
@@ -3106,10 +3310,6 @@ function ChatPaneImplementation({
       setNotice('请求未发出：MCP 与联网搜索互斥，请关闭其中一项。');
       return;
     }
-    if (activeModelTask === 'image-generation' && attachments.length) {
-      setNotice('当前图片生成适配器只支持文本生图，请先移除参考图。');
-      return;
-    }
     if (activeModelTask === 'video-generation' && !isVolcengineArkProvider(activeProvider)) {
       setNotice('当前只适配了火山方舟的视频生成任务接口。');
       return;
@@ -3117,7 +3317,11 @@ function ChatPaneImplementation({
 
     try {
       validateAttachments(attachments);
-      assertChatAttachmentsSupported(attachments, activeModel, activeProvider);
+      if (activeModelTask === 'image-generation') {
+        assertImageGenerationReferenceAttachments(attachments);
+      } else {
+        assertChatAttachmentsSupported(attachments, activeModel, activeProvider);
+      }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '附件不受当前模型支持。');
       return;
@@ -3189,6 +3393,10 @@ function ChatPaneImplementation({
       persistStartedLedger: () => usageLedger.persist([usageEvent]),
       rollbackStartedLedger: () => usageLedger.rollbackStarted([usageEvent]),
       appendVisibleMessages: async () => {
+        if (Platform.OS === 'web') {
+          // 在 Web 端将账本落盘渲染与首次消息挂载拆分至独立宏任务帧，防止同步叠加成 Long Task
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        }
         draftSaveOperationRef.current += 1;
         const accepted = await commitWorkspaceCommand(
           {
@@ -3203,10 +3411,15 @@ function ChatPaneImplementation({
         if (!accepted) throw new Error('工作区已不可写，可见消息未提交，请求未发出。');
         inputRef.current = '';
         pendingAttachmentsRef.current = [];
-        setInput('');
-        setAttachments([]);
         shouldAutoScrollRef.current = true;
-        setNotice('');
+        startTransition(() => {
+          setInput('');
+          setAttachments([]);
+          setActiveComposerMenu('none');
+          setSlashHighlightIndex(0);
+          setShowScrollToBottom(false);
+          setNotice('');
+        });
       },
     });
     if (!start.ok) {
@@ -3215,6 +3428,15 @@ function ChatPaneImplementation({
     }
     const controller = start.lease;
 
+    const sendRefs = attachments.filter((item) => item.kind === 'image');
+    const sendImageOptions: ImageGenerationOptions | undefined =
+      activeModelTask === 'image-generation'
+        ? {
+            ...imageOptions,
+            ...(sendRefs.length > 0 ? { referenceImages: sendRefs } : {}),
+          }
+        : undefined;
+
     await runAssistantRequest({
       assistantMessage,
       conversationId,
@@ -3222,16 +3444,14 @@ function ChatPaneImplementation({
       runtime,
       controller,
       usageEvent,
+      ...(sendImageOptions ? { imageOptions: sendImageOptions } : {}),
     });
   }
 
 
   function openSettingsDestination(destination: SettingsDestination) {
     Keyboard.dismiss();
-    setAttachMenuOpen(false);
-    setReasoningMenuOpen(false);
-    setParameterMenuOpen(false);
-    setSearchMenuOpen(false);
+    closeComposerMenu();
     setMessageActionMenuId(null);
     setActiveVideoAttachmentId(null);
     projectsNavigation.closeDrawer();
@@ -3241,13 +3461,13 @@ function ChatPaneImplementation({
 
   function toggleSettingsScreen() {
     Keyboard.dismiss();
-    setAttachMenuOpen(false);
-    setReasoningMenuOpen(false);
-    setParameterMenuOpen(false);
+    closeComposerMenu();
+    setSlashHighlightIndex(0);
     if (!settingsOpen) {
-      setSearchMenuOpen(false);
       setMessageActionMenuId(null);
       setActiveVideoAttachmentId(null);
+      setLightboxAttachment(null);
+      setExportDialogConversation(null);
       projectsNavigation.closeDrawer();
       setModelPickerOpen(false);
       settings.open({ kind: 'home' });
@@ -3256,52 +3476,948 @@ function ChatPaneImplementation({
     }
   }
 
-  function handleChatScroll(event: NativeSyntheticEvent<NativeScrollEvent>) {
-    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
-    shouldAutoScrollRef.current = distanceFromBottom < 120;
+  function openImageLightbox(attachment: MediaAttachment) {
+    if (attachment.kind !== 'image') {
+      return;
+    }
+    closeComposerMenu();
+    setMessageActionMenuId(null);
+    setLightboxAttachment(attachment);
   }
 
-  function handleChatContentSizeChange() {
-    if (shouldAutoScrollRef.current) {
-      if (Platform.OS === 'web') {
-        chatScrollRef.current?.scrollTo({ y: Number.MAX_SAFE_INTEGER, animated: false });
-      } else {
-        chatScrollRef.current?.scrollToEnd({ animated: true });
+  async function handleLightboxSave(attachment: MediaAttachment) {
+    const result = await saveAttachmentToDevice(attachment);
+    if (result.status === 'saved') {
+      showToast(`已保存 ${result.name}`);
+    } else if (result.status === 'shared') {
+      showToast('已调起系统分享');
+    }
+  }
+
+  async function handleEditWithImage(attachment: MediaAttachment) {
+    if (!ensureWorkspaceWritable()) {
+      return;
+    }
+
+    try {
+      const draftPatch = buildEditWithImageDraft({
+        attachment,
+        existingText: inputRef.current,
+        currentModelId: activeModelId,
+        availableModels: addedModels,
+      });
+
+      setLightboxAttachment(null);
+      closeComposerMenu();
+      setMessageActionMenuId(null);
+
+      // 严格先切至推荐生图模型（跳过中间清空草稿持久化以避免异步回滚竞态），再原子性注入参考图附件
+      if (draftPatch.suggestedModelId && activeProvider) {
+        await selectProviderModel(activeProvider.id, draftPatch.suggestedModelId, {
+          clearAttachments: false,
+        });
       }
+
+      const latestSnapshot = workspaceSession.getSnapshot();
+      const targetConversationId = latestSnapshot.activeConversationId;
+      draftSaveOperationRef.current += 1;
+      const accepted = await commitWorkspaceCommand(
+        {
+          type: 'draft.set',
+          conversationId: targetConversationId,
+          text: draftPatch.text,
+          attachments: draftPatch.attachments,
+          now: Date.now(),
+        },
+        { durability: 'required' }
+      );
+      if (!accepted) {
+        setNotice('参考图草稿写入失败，请稍后重试。');
+        return;
+      }
+
+      inputRef.current = draftPatch.text;
+      pendingAttachmentsRef.current = draftPatch.attachments;
+      setInput(draftPatch.text);
+      setAttachments(draftPatch.attachments);
+      switchMainTab('chat');
+
+      const latestProvider = resolveEnabledProvider(
+        latestSnapshot.providers,
+        latestSnapshot.activeProviderId
+      );
+      const latestModelId = latestProvider
+        ? latestSnapshot.activeModelIdByProvider[latestProvider.id] ?? ''
+        : '';
+      const latestModel = latestProvider
+        ? getSelectableModels(latestProvider).find((item) => item.id === latestModelId)
+        : undefined;
+      if (!latestModel || inferModelTask(latestModel) !== 'image-generation') {
+        setNotice('已载入参考图，当前模型不支持生图，请切换至 OpenAI / Gemini / xAI 生图模型后发送。');
+      } else {
+        showToast('已载入参考图，请输入修改描述');
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '该附件无法用于继续编辑。');
+    }
+  }
+
+  const getWebChatScrollableNode = useCallback(() => {
+    type WebScrollableChildNode = {
+      childElementCount?: number;
+      offsetTop?: number;
+      offsetHeight?: number;
+    };
+    type WebScrollableNode = {
+      scrollHeight?: number;
+      clientHeight?: number;
+      scrollTop?: number;
+      firstElementChild?: {
+        children?: ArrayLike<WebScrollableChildNode>;
+        lastElementChild?: WebScrollableChildNode | null;
+      } | null;
+      addEventListener?: (
+        type: string,
+        listener: (event: { deltaY?: number }) => void,
+        options?: AddEventListenerOptions
+      ) => void;
+      removeEventListener?: (
+        type: string,
+        listener: (event: { deltaY?: number }) => void,
+        options?: EventListenerOptions | boolean
+      ) => void;
+    };
+    const listRef = chatScrollRef.current as unknown as {
+      getScrollResponder?: () => {
+        getScrollableNode?: () => WebScrollableNode | null;
+      };
+      getScrollableNode?: () => WebScrollableNode | null;
+    } | null;
+    return listRef?.getScrollResponder?.()?.getScrollableNode?.() ?? listRef?.getScrollableNode?.() ?? null;
+  }, []);
+
+  const scrollChatListToBottom = useCallback((animated: boolean) => {
+    if (Platform.OS !== 'web' || animated) {
+      chatScrollRef.current?.scrollToEnd({ animated });
+      return;
+    }
+
+    const node = getWebChatScrollableNode();
+    const messages = renderedChatMessagesRef.current;
+    if (
+      messages.length === 0 ||
+      !node ||
+      typeof node.scrollHeight !== 'number' ||
+      typeof node.clientHeight !== 'number' ||
+      typeof node.scrollTop !== 'number'
+    ) {
+      chatScrollRef.current?.scrollToEnd({ animated: false });
+      return;
+    }
+
+    const maxScrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
+    if (maxScrollTop <= 0) {
+      if (progressiveScrollTimerRef.current !== null) {
+        clearTimeout(progressiveScrollTimerRef.current);
+        progressiveScrollTimerRef.current = null;
+      }
+      progressiveScrollAttemptsRef.current = 0;
+      return;
+    }
+
+    // 探针读取 RN Web VirtualizedList 当前渲染窗口与末项测量状态，缺失时降级为 DOM 判定
+    const lastIndex = messages.length - 1;
+    const lastKey = chatMessageKeyExtractor(messages[lastIndex]);
+    const listInternal = (chatScrollRef.current as unknown as {
+      _listRef?: {
+        state?: { cellsAroundViewport?: { first: number; last: number } };
+        _frames?: Record<
+          string,
+          { offset: number; length: number; index: number; inLayout?: boolean }
+        >;
+      };
+    } | null)?._listRef;
+
+    const cellsAroundViewport = listInternal?.state?.cellsAroundViewport;
+    const lastFrame = listInternal?._frames?.[lastKey];
+    const isLastInWindow = cellsAroundViewport
+      ? cellsAroundViewport.last >= lastIndex
+      : true;
+    const isLastFrameReady = listInternal?._frames
+      ? Boolean(lastFrame && lastFrame.index === lastIndex && lastFrame.inLayout)
+      : true;
+
+    const contentChildren = node.firstElementChild?.children;
+    const lastDomChild = node.firstElementChild?.lastElementChild ?? null;
+    const lastChildIsSpacer = Boolean(
+      lastDomChild &&
+      (lastDomChild.childElementCount ?? 0) === 0 &&
+      (lastDomChild.offsetHeight ?? 0) > 0
+    );
+
+    let lastRealContentBottom = 0;
+    if (contentChildren && contentChildren.length > 0) {
+      for (let idx = contentChildren.length - 1; idx >= 0; idx -= 1) {
+        const child = contentChildren[idx];
+        if ((child.childElementCount ?? 0) > 0 && (child.offsetHeight ?? 0) > 0) {
+          lastRealContentBottom = (child.offsetTop ?? 0) + (child.offsetHeight ?? 0);
+          break;
+        }
+      }
+    }
+
+    const isLastMessageReadyAtBottom =
+      isLastInWindow && isLastFrameReady && !lastChildIsSpacer;
+
+    if (isLastMessageReadyAtBottom) {
+      if (progressiveScrollTimerRef.current !== null) {
+        clearTimeout(progressiveScrollTimerRef.current);
+        progressiveScrollTimerRef.current = null;
+      }
+      progressiveScrollAttemptsRef.current = 0;
+
+      // 末项已在窗口完成布局且无尾部空白占位时，以末项底边钳制安全贴齐真实底部
+      const lastFrameBottom =
+        lastFrame &&
+        typeof lastFrame.offset === 'number' &&
+        typeof lastFrame.length === 'number'
+          ? lastFrame.offset + lastFrame.length
+          : maxScrollTop;
+      const safeFinalTop = Math.min(maxScrollTop, lastFrameBottom);
+      if (safeFinalTop - node.scrollTop > 2) {
+        if (shouldAutoScrollRef.current && !isUserDraggingRef.current) {
+          programmaticScrollDeadlineRef.current = Math.max(
+            programmaticScrollDeadlineRef.current,
+            Date.now() + 250
+          );
+        }
+        node.scrollTop = safeFinalTop;
+      }
+      return;
+    }
+
+    // 末项尚未就位或末尾处于空白 $spacer：禁止直接跳到 maxScrollTop，沿已渲染末消息底边安全推进或回锚自愈
+    if (lastRealContentBottom > 0) {
+      const anchorBias = Math.min(80, Math.floor(node.clientHeight * 0.25));
+      const safeAnchorTop = Math.max(0, lastRealContentBottom - anchorBias);
+      const safeTargetTop =
+        lastChildIsSpacer || node.scrollTop > lastRealContentBottom
+          ? Math.min(maxScrollTop, safeAnchorTop)
+          : Math.min(maxScrollTop, Math.max(node.scrollTop, safeAnchorTop));
+
+      if (Math.abs(safeTargetTop - node.scrollTop) > 1) {
+        if (shouldAutoScrollRef.current && !isUserDraggingRef.current) {
+          programmaticScrollDeadlineRef.current = Math.max(
+            programmaticScrollDeadlineRef.current,
+            Date.now() + 250
+          );
+        }
+        node.scrollTop = safeTargetTop;
+      }
+    } else {
+      chatScrollRef.current?.scrollToEnd({ animated: false });
+    }
+
+    if (
+      shouldAutoScrollRef.current &&
+      !isUserDraggingRef.current &&
+      progressiveScrollAttemptsRef.current < 40
+    ) {
+      if (progressiveScrollTimerRef.current !== null) {
+        clearTimeout(progressiveScrollTimerRef.current);
+      }
+      progressiveScrollAttemptsRef.current += 1;
+      progressiveScrollTimerRef.current = setTimeout(() => {
+        progressiveScrollTimerRef.current = null;
+        if (!mountedRef.current || !shouldAutoScrollRef.current || isUserDraggingRef.current) {
+          return;
+        }
+        scrollChatListToBottomRef.current(false);
+      }, 32);
+    }
+  }, [getWebChatScrollableNode]);
+  scrollChatListToBottomRef.current = scrollChatListToBottom;
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') {
+      return;
+    }
+    const node = getWebChatScrollableNode();
+    if (!node?.addEventListener || !node?.removeEventListener) {
+      return;
+    }
+    const handleWheel = (event: { deltaY?: number }) => {
+      if (typeof event.deltaY !== 'number' || event.deltaY >= 0) {
+        return;
+      }
+      if (
+        typeof node.scrollHeight !== 'number' ||
+        typeof node.clientHeight !== 'number' ||
+        node.scrollHeight <= node.clientHeight + 4
+      ) {
+        return;
+      }
+      // Web 滚轮上滑不触发 onScrollBeginDrag，必须同步解除自动吸底防止被 onContentSizeChange 拉回
+      clearScrollToBottomTimers();
+      programmaticScrollDeadlineRef.current = 0;
+      shouldAutoScrollRef.current = false;
+      const currentScrollTop = typeof node.scrollTop === 'number' ? node.scrollTop : 0;
+      const distanceFromBottom = node.scrollHeight - node.clientHeight - currentScrollTop;
+      if (distanceFromBottom >= 120) {
+        setShowScrollToBottom((prev) => (prev ? prev : true));
+      }
+    };
+    node.addEventListener('wheel', handleWheel, { passive: true });
+    return () => {
+      node.removeEventListener?.('wheel', handleWheel);
+    };
+  }, [clearScrollToBottomTimers, getWebChatScrollableNode, workspace.activeConversationId]);
+
+  useEffect(() => {
+    const wasOpen = prevSettingsOpenRef.current;
+    prevSettingsOpenRef.current = settingsOpen;
+    if (Platform.OS !== 'web' || !wasOpen || settingsOpen) {
+      return;
+    }
+    const restoreTimer = setTimeout(() => {
+      if (!mountedRef.current) {
+        return;
+      }
+      if (shouldAutoScrollRef.current) {
+        programmaticScrollDeadlineRef.current = Date.now() + 250;
+        scrollChatListToBottom(false);
+      } else if (lastScrollOffsetYRef.current > 0) {
+        const node = getWebChatScrollableNode();
+        if (
+          node &&
+          typeof node.scrollTop === 'number' &&
+          Math.abs(node.scrollTop - lastScrollOffsetYRef.current) > 4
+        ) {
+          node.scrollTop = lastScrollOffsetYRef.current;
+        }
+      }
+    }, 0);
+    return () => clearTimeout(restoreTimer);
+  }, [getWebChatScrollableNode, scrollChatListToBottom, settingsOpen]);
+
+  const handleChatScrollBeginDrag = useCallback(() => {
+    clearScrollToBottomTimers();
+    programmaticScrollDeadlineRef.current = 0;
+    isUserDraggingRef.current = true;
+    dragStartOffsetYRef.current = lastScrollOffsetYRef.current;
+    shouldAutoScrollRef.current = false;
+  }, [clearScrollToBottomTimers]);
+
+  const handleChatScrollEndDrag = useCallback((event?: NativeSyntheticEvent<NativeScrollEvent>) => {
+    isUserDraggingRef.current = false;
+    const nativeEvent = event?.nativeEvent;
+    if (nativeEvent?.contentSize && nativeEvent?.layoutMeasurement && nativeEvent?.contentOffset) {
+      const distanceFromBottom =
+        nativeEvent.contentSize.height -
+        nativeEvent.layoutMeasurement.height -
+        nativeEvent.contentOffset.y;
+      if (
+        distanceFromBottom < 24 &&
+        nativeEvent.contentOffset.y > dragStartOffsetYRef.current + 2
+      ) {
+        shouldAutoScrollRef.current = true;
+        setShowScrollToBottom((prev) => (prev ? false : prev));
+      }
+    }
+  }, []);
+
+  const handleChatMomentumScrollEnd = useCallback(
+    (event?: NativeSyntheticEvent<NativeScrollEvent>) => {
+      isUserDraggingRef.current = false;
+      const nativeEvent = event?.nativeEvent;
+      if (nativeEvent?.contentSize && nativeEvent?.layoutMeasurement && nativeEvent?.contentOffset) {
+        const distanceFromBottom =
+          nativeEvent.contentSize.height -
+          nativeEvent.layoutMeasurement.height -
+          nativeEvent.contentOffset.y;
+        if (
+          distanceFromBottom < 24 &&
+          nativeEvent.contentOffset.y > dragStartOffsetYRef.current + 2
+        ) {
+          shouldAutoScrollRef.current = true;
+          setShowScrollToBottom((prev) => (prev ? false : prev));
+        }
+      }
+    },
+    []
+  );
+
+  const handleChatScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
+    const nearBottom = distanceFromBottom < 120;
+    const shrinkDelta = Math.max(0, lastContentHeightRef.current - contentSize.height);
+    const contentShrunk = contentSize.height < lastContentHeightRef.current - 2;
+    const significantContentShrink = shrinkDelta > 24;
+    const contentExpanded = contentSize.height > lastContentHeightRef.current + 2;
+    const scrolledUp = !contentShrunk && contentOffset.y < lastScrollOffsetYRef.current - 2;
+    const definiteUserScrollUp =
+      contentOffset.y < lastScrollOffsetYRef.current - shrinkDelta - 2 &&
+      (!significantContentShrink || isUserDraggingRef.current || !shouldAutoScrollRef.current);
+    const inProgrammaticScroll = Date.now() < programmaticScrollDeadlineRef.current;
+    lastScrollOffsetYRef.current = contentOffset.y;
+    lastContentHeightRef.current = contentSize.height;
+
+    if (nearBottom && !scrolledUp && !isUserDraggingRef.current && !definiteUserScrollUp) {
+      shouldAutoScrollRef.current = true;
+      setShowScrollToBottom((prev) => (prev ? false : prev));
+    } else if (
+      definiteUserScrollUp ||
+      scrolledUp ||
+      (!inProgrammaticScroll &&
+        !nearBottom &&
+        (!significantContentShrink || !shouldAutoScrollRef.current) &&
+        (!contentExpanded || !shouldAutoScrollRef.current))
+    ) {
+      clearScrollToBottomTimers();
+      shouldAutoScrollRef.current = false;
+      setShowScrollToBottom((prev) => (prev ? prev : true));
+    }
+  }, [clearScrollToBottomTimers]);
+
+  const handleChatContentSizeChange = useCallback(() => {
+    if (shouldAutoScrollRef.current && renderedChatMessagesRef.current.length > 0) {
+      programmaticScrollDeadlineRef.current = Date.now() + 250;
+      scrollChatListToBottom(false);
+    }
+  }, [scrollChatListToBottom]);
+
+  const handleScrollToBottomPress = useCallback(() => {
+    clearScrollToBottomTimers();
+    shouldAutoScrollRef.current = true;
+    programmaticScrollDeadlineRef.current = Date.now() + 800;
+    setShowScrollToBottom(false);
+    scrollChatListToBottom(true);
+
+    if (Platform.OS === 'web') {
+      for (const delayMs of [320, 650]) {
+        const timer = setTimeout(() => {
+          if (!mountedRef.current || !shouldAutoScrollRef.current || isUserDraggingRef.current) {
+            return;
+          }
+          const node = getWebChatScrollableNode();
+          if (
+            node &&
+            typeof node.scrollHeight === 'number' &&
+            typeof node.clientHeight === 'number' &&
+            typeof node.scrollTop === 'number'
+          ) {
+            const remaining = node.scrollHeight - node.clientHeight - node.scrollTop;
+            if (remaining > 8) {
+              programmaticScrollDeadlineRef.current = Date.now() + 250;
+              scrollChatListToBottom(false);
+            }
+          }
+        }, delayMs);
+        scrollToBottomTimersRef.current.push(timer);
+      }
+    }
+  }, [clearScrollToBottomTimers, getWebChatScrollableNode, scrollChatListToBottom]);
+
+  const handleScrollToIndexFailed = useCallback(
+    (info: { index: number; averageItemLength: number }) => {
+      chatScrollRef.current?.scrollToOffset({
+        offset: Math.max(0, info.averageItemLength * info.index),
+        animated: false,
+      });
+      setTimeout(() => {
+        if (!mountedRef.current) return;
+        if (info.index >= 0 && info.index < renderedChatMessagesRef.current.length) {
+          chatScrollRef.current?.scrollToIndex({
+            index: info.index,
+            animated: true,
+            viewPosition: 0.2,
+          });
+        }
+      }, 60);
+    },
+    []
+  );
+
+  const videoFallbackTarget = useMemo(
+    () =>
+      activeModelTask === 'video-generation' && activeProvider && activeModelId
+        ? { providerId: activeProvider.id, modelId: activeModelId }
+        : null,
+    [activeModelId, activeModelTask, activeProvider]
+  );
+
+  const rowHandlersRef = useRef({
+    copyMessage,
+    retryMessage,
+    beginEditUserMessage,
+    cancelEditUserMessage,
+    saveEditedUserMessage,
+    shareMessage,
+    openMessageActionMenu,
+    saveMessageAsArtifact,
+    saveMessageAsKnowledge,
+    branchConversation,
+    removeMessage,
+    removeSystemInstruction,
+    selectComparisonAnswer,
+    refreshGenerationTask,
+    readAssistantMessageAloud,
+    openImageLightbox,
+    handleEditWithImage,
+  });
+  rowHandlersRef.current = {
+    copyMessage,
+    retryMessage,
+    beginEditUserMessage,
+    cancelEditUserMessage,
+    saveEditedUserMessage,
+    shareMessage,
+    openMessageActionMenu,
+    saveMessageAsArtifact,
+    saveMessageAsKnowledge,
+    branchConversation,
+    removeMessage,
+    removeSystemInstruction,
+    selectComparisonAnswer,
+    refreshGenerationTask,
+    readAssistantMessageAloud,
+    openImageLightbox,
+    handleEditWithImage,
+  };
+
+  const handleRowCopy = useCallback((message: ChatMessage) => {
+    void rowHandlersRef.current.copyMessage(message);
+  }, []);
+  const handleRowRetry = useCallback((message: ChatMessage) => {
+    rowHandlersRef.current.retryMessage(message);
+  }, []);
+  const handleRowBeginEdit = useCallback((message: ChatMessage) => {
+    rowHandlersRef.current.beginEditUserMessage(message);
+  }, []);
+  const handleRowCancelEdit = useCallback(() => {
+    rowHandlersRef.current.cancelEditUserMessage();
+  }, []);
+  const handleRowSaveEdit = useCallback(() => {
+    void rowHandlersRef.current.saveEditedUserMessage();
+  }, []);
+  const handleRowShare = useCallback((message: ChatMessage) => {
+    void rowHandlersRef.current.shareMessage(message);
+  }, []);
+  const handleRowToggleActionMenu = useCallback((message: ChatMessage) => {
+    rowHandlersRef.current.openMessageActionMenu(message);
+  }, []);
+  const handleRowSaveArtifact = useCallback((message: ChatMessage) => {
+    rowHandlersRef.current.saveMessageAsArtifact(message);
+  }, []);
+  const handleRowSaveKnowledge = useCallback((message: ChatMessage) => {
+    rowHandlersRef.current.saveMessageAsKnowledge(message);
+  }, []);
+  const handleRowBranch = useCallback((messageId: string) => {
+    void rowHandlersRef.current.branchConversation(messageId);
+  }, []);
+  const handleRowDelete = useCallback((message: ChatMessage) => {
+    void rowHandlersRef.current.removeMessage(message);
+  }, []);
+  const handleRowRemoveSystemInstruction = useCallback((message: ChatMessage) => {
+    void rowHandlersRef.current.removeSystemInstruction(message);
+  }, []);
+  const handleRowSelectComparisonAnswer = useCallback((message: ChatMessage) => {
+    rowHandlersRef.current.selectComparisonAnswer(message);
+  }, []);
+  const handleRowRefreshGenerationTask = useCallback(
+    (message: ChatMessage, task: GenerationTaskInfo) => {
+      void rowHandlersRef.current.refreshGenerationTask(message, task);
+    },
+    []
+  );
+  const handleRowToggleVideo = useCallback((attachmentId: string) => {
+    setActiveVideoAttachmentId((current) =>
+      current === attachmentId ? null : attachmentId
+    );
+  }, []);
+  const handleRowReadAloud = useCallback((message: ChatMessage) => {
+    void rowHandlersRef.current.readAssistantMessageAloud(message);
+  }, []);
+  const handleRowOpenImageLightbox = useCallback((attachment: MediaAttachment) => {
+    rowHandlersRef.current.openImageLightbox(attachment);
+  }, []);
+  const handleRowEditImageAttachment = useCallback((attachment: MediaAttachment) => {
+    void rowHandlersRef.current.handleEditWithImage(attachment);
+  }, []);
+
+  const hasOlderChatMessages = renderedChatMessages.length < workspace.messages.length;
+  const renderedChatMessageCount = renderedChatMessages.length;
+  const totalChatMessageCount = workspace.messages.length;
+  const renderHistoryLoadHeader = useCallback(() => {
+    if (!hasOlderChatMessages) return null;
+    return (
+      <AnimatedPressable
+        accessibilityRole="button"
+        onPress={() => {
+          shouldAutoScrollRef.current = false;
+          setChatMessageRenderLimit((current) => current + chatMessageRenderPageSize);
+        }}
+        style={styles.chatHistoryLoadButton}
+      >
+        <Text style={styles.chatHistoryLoadText}>
+          显示更早消息 · 当前 {renderedChatMessageCount} / {totalChatMessageCount}
+        </Text>
+      </AnimatedPressable>
+    );
+  }, [
+    hasOlderChatMessages,
+    renderedChatMessageCount,
+    styles.chatHistoryLoadButton,
+    styles.chatHistoryLoadText,
+    totalChatMessageCount,
+  ]);
+
+  const renderChatMessageSeparator = useCallback(
+    () => <View style={styles.chatMessageSeparator} />,
+    [styles.chatMessageSeparator]
+  );
+
+  const canSynthesizeSpeech = Boolean(configuredSpeechTarget);
+  const renderChatMessageItem = useCallback(
+    ({ item: message }: ListRenderItemInfo<ChatMessage>) => {
+      const isEditing = editingMessageId === message.id;
+      const isSpeaking = speakingMessageId === message.id;
+      const activeVideoId =
+        !settingsOpen &&
+        activeVideoAttachmentId &&
+        message.attachments?.some((attachment) => attachment.id === activeVideoAttachmentId)
+          ? activeVideoAttachmentId
+          : null;
+      return (
+        <ChatMessageRow
+          conversationId={workspace.activeConversationId}
+          message={message}
+          isAnimated={Platform.OS !== 'android' && animatedMessageIds.has(message.id)}
+          isSearchHighlighted={highlightedSearchMessageId === message.id}
+          isEditing={isEditing}
+          editingDraft={isEditing ? editingMessageDraft : ''}
+          editDisabled={isEditing ? busy : false}
+          systemRemoveDisabled={message.role === 'system' ? busy || workspaceReadOnly : false}
+          isCopied={copiedMessageId === message.id}
+          isActionMenuOpen={messageActionMenuId === message.id}
+          isTaskQuerying={Boolean(queryingTaskByMessageId[message.id])}
+          activeVideoId={activeVideoId}
+          canSynthesizeSpeech={canSynthesizeSpeech}
+          isSpeaking={isSpeaking}
+          speechDisabled={canSynthesizeSpeech && (voiceRecording || (audioBusy && !isSpeaking))}
+          videoFallbackTarget={videoFallbackTarget}
+          onCopy={handleRowCopy}
+          onRetry={handleRowRetry}
+          onBeginEdit={handleRowBeginEdit}
+          onChangeEditDraft={setEditingMessageDraft}
+          onCancelEdit={handleRowCancelEdit}
+          onSaveEdit={handleRowSaveEdit}
+          onShare={handleRowShare}
+          onToggleActionMenu={handleRowToggleActionMenu}
+          onSaveArtifact={handleRowSaveArtifact}
+          onSaveKnowledge={handleRowSaveKnowledge}
+          onBranch={handleRowBranch}
+          onDelete={handleRowDelete}
+          onRemoveSystemInstruction={handleRowRemoveSystemInstruction}
+          onSelectComparisonAnswer={handleRowSelectComparisonAnswer}
+          onRefreshGenerationTask={handleRowRefreshGenerationTask}
+          onToggleVideo={handleRowToggleVideo}
+          onReadAloud={handleRowReadAloud}
+          onOpenImageLightbox={handleRowOpenImageLightbox}
+          onEditImageAttachment={handleRowEditImageAttachment}
+        />
+      );
+    },
+    [
+      activeVideoAttachmentId,
+      animatedMessageIds,
+      audioBusy,
+      busy,
+      canSynthesizeSpeech,
+      copiedMessageId,
+      editingMessageDraft,
+      editingMessageId,
+      handleRowBeginEdit,
+      handleRowBranch,
+      handleRowCancelEdit,
+      handleRowCopy,
+      handleRowDelete,
+      handleRowEditImageAttachment,
+      handleRowOpenImageLightbox,
+      handleRowReadAloud,
+      handleRowRefreshGenerationTask,
+      handleRowRemoveSystemInstruction,
+      handleRowRetry,
+      handleRowSaveArtifact,
+      handleRowSaveEdit,
+      handleRowSaveKnowledge,
+      handleRowSelectComparisonAnswer,
+      handleRowShare,
+      handleRowToggleActionMenu,
+      handleRowToggleVideo,
+      highlightedSearchMessageId,
+      messageActionMenuId,
+      queryingTaskByMessageId,
+      settingsOpen,
+      speakingMessageId,
+      videoFallbackTarget,
+      voiceRecording,
+      workspace.activeConversationId,
+      workspaceReadOnly,
+    ]
+  );
+
+  async function handleExportConversation(
+    conversation: ChatConversation,
+    format: 'markdown' | 'json'
+  ) {
+    setExportDialogConversation(null);
+    try {
+      const result = await exportConversation({ conversation, format });
+      showToast(`已导出 ${result.filename}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '导出对话失败，请稍后再试。');
+    }
+  }
+
+  function handleComposerInputChange(nextText: string) {
+    inputRef.current = nextText;
+    setInput(nextText);
+
+    if (workspaceReadOnly || !composerSupportsMessages || !shouldOpenSlashCommandMenu(nextText)) {
+      if (activeComposerMenu === 'slash') {
+        setActiveComposerMenu('none');
+      }
+      setSlashHighlightIndex(0);
+      return;
+    }
+
+    const matched = filterSlashCommands(nextText, {
+      promptTemplates: workspace.promptTemplates,
+    });
+    if (matched.length > 0) {
+      setActiveComposerMenu('slash');
+      setSlashHighlightIndex(0);
+    } else if (activeComposerMenu === 'slash') {
+      setActiveComposerMenu('none');
+      setSlashHighlightIndex(0);
+    }
+  }
+
+  function executeSlashCommand(item: SlashCommandItem) {
+    const outcome = resolveSlashCommandSelection(item, inputRef.current);
+    setActiveComposerMenu('none');
+    setSlashHighlightIndex(0);
+
+    if (outcome.kind === 'template') {
+      if (outcome.templateMode === 'system' && outcome.templateId) {
+        inputRef.current = '';
+        setInput('');
+        applyPromptTemplate(outcome.templateId);
+        return;
+      }
+      const nextText = outcome.nextText ?? '';
+      inputRef.current = nextText;
+      setInput(nextText);
+      setNotice('模板已插入输入框；变量占位符可在发送前直接编辑。');
+      return;
+    }
+
+    inputRef.current = '';
+    setInput('');
+    switch (outcome.action) {
+      case 'export-markdown':
+        if (activeConversation) {
+          void handleExportConversation(activeConversation, 'markdown');
+        } else {
+          setNotice('当前没有可导出的对话。');
+        }
+        break;
+      case 'export-json':
+        if (activeConversation) {
+          void handleExportConversation(activeConversation, 'json');
+        } else {
+          setNotice('当前没有可导出的对话。');
+        }
+        break;
+      case 'new-conversation':
+        void projectsNavigation
+          .execute({ type: 'conversation.start' })
+          .then(applyProjectConversationResult);
+        break;
+      case 'open-context':
+        if (contextToolsAvailable) {
+          openContextInspector();
+        } else {
+          setNotice('当前模型不支持上下文检查器。');
+        }
+        break;
+      case 'clear-input':
+        showToast('已清空输入框');
+        break;
+      default:
+        break;
+    }
+  }
+
+  function handleComposerKeyPress(
+    event: Parameters<NonNullable<TextInputProps['onKeyPress']>>[0] & {
+      preventDefault?: () => void;
+    }
+  ) {
+    if (Platform.OS !== 'web') {
+      return;
+    }
+
+    const nativeEvent = event.nativeEvent as unknown as {
+      key?: string;
+      shiftKey?: boolean;
+      ctrlKey?: boolean;
+      metaKey?: boolean;
+      altKey?: boolean;
+      isComposing?: boolean;
+      keyCode?: number;
+    };
+
+    const isComposing =
+      nativeEvent.isComposing === true ||
+      nativeEvent.keyCode === 229 ||
+      nativeEvent.key === 'Process';
+
+    if (!isComposing && slashMenuOpen && slashCommands.length > 0) {
+      if (nativeEvent.key === 'ArrowDown') {
+        event.preventDefault?.();
+        setSlashHighlightIndex((current) => (current + 1) % slashCommands.length);
+        return;
+      }
+      if (nativeEvent.key === 'ArrowUp') {
+        event.preventDefault?.();
+        setSlashHighlightIndex(
+          (current) => (current - 1 + slashCommands.length) % slashCommands.length
+        );
+        return;
+      }
+      if (nativeEvent.key === 'Escape') {
+        event.preventDefault?.();
+        closeComposerMenu();
+        return;
+      }
+    }
+
+    const action = resolveComposerKeyAction({
+      platformOs: 'web',
+      key: nativeEvent.key ?? '',
+      shiftKey: nativeEvent.shiftKey,
+      ctrlKey: nativeEvent.ctrlKey,
+      metaKey: nativeEvent.metaKey,
+      altKey: nativeEvent.altKey,
+      isComposing: nativeEvent.isComposing,
+      keyCode: nativeEvent.keyCode,
+      text: inputRef.current,
+      hasAttachments: pendingAttachmentsRef.current.length > 0,
+      isStreaming: busy,
+      disabled: workspaceReadOnly || !composerSupportsMessages,
+      slashMenuOpen: slashMenuOpen && slashCommands.length > 0,
+    });
+
+    if (action === 'select-slash-command') {
+      event.preventDefault?.();
+      const targetItem = slashCommands[safeSlashHighlightIndex];
+      if (targetItem) {
+        executeSlashCommand(targetItem);
+      }
+      return;
+    }
+
+    if (action === 'submit') {
+      event.preventDefault?.();
+      void sendMessage();
     }
   }
 
   if (booting || !activeProvider) {
     return (
-      <SafeAreaView style={styles.loadingShell}>
+      <View
+        style={[
+          styles.loadingShell,
+          {
+            paddingTop: insets.top,
+            paddingBottom: insets.bottom,
+            paddingLeft: insets.left,
+            paddingRight: insets.right,
+          },
+        ]}
+      >
         <ActivityIndicator color={palette.accent} />
         <Text style={styles.loadingText}>正在加载工作区</Text>
-      </SafeAreaView>
+      </View>
     );
   }
+
+  const shouldShowImageGenParams =
+    !comparisonActive && activeModelTask === 'image-generation' && Boolean(activeModelId);
+  const resolvedComposerTopSlot =
+    composerTopSlot ??
+    (shouldShowImageGenParams ? (
+      <ImageGenParamsBar
+        provider={activeProvider}
+        modelId={activeModelId}
+        value={imageOptions}
+        onChange={setImageOptions}
+        disabled={busy || workspaceReadOnly}
+        onSwitchModelPress={() => {
+          closeComposerMenu();
+          setModelPickerOpen(true);
+        }}
+      />
+    ) : null);
 
   return (
     <>
       <StatusBar style={colorMode === 'light' ? 'dark' : colorMode === 'dark' ? 'light' : 'auto'} />
-      <SafeAreaView style={styles.shell}>
+      <View style={styles.shell}>
         <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           keyboardVerticalOffset={0}
           style={styles.keyboard}
         >
           {!settingsOpen && mainTab === 'chat' ? (
-            <View style={styles.topBar}>
+            <View
+              style={[
+                styles.topBar,
+                {
+                  paddingTop: Math.max(12, insets.top + 4),
+                  paddingLeft: Math.max(16, insets.left),
+                  paddingRight: Math.max(16, insets.right),
+                },
+              ]}
+            >
               <View style={styles.topHeaderRow}>
                 <View style={styles.topLeft}>
-                  <AnimatedPressable accessibilityRole="button" accessibilityLabel="打开聊天记录" onPress={projectsNavigation.openDrawer} style={styles.iconButton}>
+                  <AnimatedPressable
+                    accessibilityRole="button"
+                    accessibilityLabel="打开聊天记录"
+                    onPress={() => {
+                      closeComposerMenu();
+                      projectsNavigation.openDrawer();
+                    }}
+                    style={styles.iconButton}
+                  >
                     <Menu size={20} color={palette.text} strokeWidth={2} />
                   </AnimatedPressable>
                   <AnimatedPressable
                     accessibilityRole="button"
                     accessibilityLabel={needsConfiguration ? '开始配置服务商' : '选择模型'}
                     testID="model-picker-trigger"
-                    onPress={needsConfiguration ? onOpenSetup : () => setModelPickerOpen(true)}
+                    onPress={() => {
+                      closeComposerMenu();
+                      if (needsConfiguration) {
+                        onOpenSetup();
+                      } else {
+                        setModelPickerOpen(true);
+                      }
+                    }}
                     style={[
                       styles.modelPickerPill,
                       needsConfiguration && styles.modelPickerPillAttention,
@@ -3335,6 +4451,22 @@ function ChatPaneImplementation({
                 <View style={styles.topHeaderActions}>
                   <AnimatedPressable
                     accessibilityRole="button"
+                    accessibilityLabel="导出当前对话"
+                    testID="chat-export-button"
+                    onPress={() => {
+                      closeComposerMenu();
+                      if (activeConversation) {
+                        setExportDialogConversation(activeConversation);
+                      } else {
+                        setNotice('当前没有可导出的对话。');
+                      }
+                    }}
+                    style={styles.iconButton}
+                  >
+                    <Download size={19} color={palette.text} strokeWidth={2} />
+                  </AnimatedPressable>
+                  <AnimatedPressable
+                    accessibilityRole="button"
                     accessibilityLabel="打开本地成果工作台"
                     onPress={() => openWorkspaceWorkbench()}
                     style={styles.iconButton}
@@ -3360,7 +4492,14 @@ function ChatPaneImplementation({
               accessibilityLiveRegion="assertive"
               accessibilityRole="alert"
               testID="workspace-read-only-banner"
-              style={styles.persistenceErrorBanner}
+              style={[
+                styles.persistenceErrorBanner,
+                {
+                  marginLeft: 16 + insets.left,
+                  marginRight: 16 + insets.right,
+                },
+                mainTab !== 'chat' && { marginTop: Math.max(8, insets.top) },
+              ]}
             >
               <Text style={styles.persistenceErrorTitle}>工作区处于只读模式</Text>
               <Text style={styles.persistenceErrorText}>
@@ -3386,6 +4525,10 @@ function ChatPaneImplementation({
           <View
             style={[
               styles.screenPane,
+              {
+                paddingLeft: insets.left,
+                paddingRight: insets.right,
+              },
               (settingsOpen || mainTab !== 'chat') && styles.screenPaneHidden,
             ]}
             pointerEvents={settingsOpen || mainTab !== 'chat' ? 'none' : 'auto'}
@@ -3393,292 +4536,51 @@ function ChatPaneImplementation({
             importantForAccessibility={settingsOpen || mainTab !== 'chat' ? 'no-hide-descendants' : 'auto'}
           >
             <ScreenFade>
-              <ScrollView
-                ref={chatScrollRef}
-                style={styles.content}
-                contentContainerStyle={styles.chatContent}
-                keyboardDismissMode={Platform.OS === 'android' ? 'on-drag' : 'interactive'}
-                keyboardShouldPersistTaps="handled"
-                onScroll={handleChatScroll}
-                onContentSizeChange={handleChatContentSizeChange}
-                scrollEventThrottle={32}
-              >
-                {renderedChatMessages.length < workspace.messages.length ? (
+              <View style={styles.messageListContainer}>
+                <FlatList
+                  ref={chatScrollRef}
+                  data={renderedChatMessages}
+                  keyExtractor={chatMessageKeyExtractor}
+                  renderItem={renderChatMessageItem}
+                  ItemSeparatorComponent={renderChatMessageSeparator}
+                  ListHeaderComponent={renderHistoryLoadHeader}
+                  style={
+                    Platform.OS === 'web'
+                      ? [styles.content, { overflowAnchor: 'none' } as unknown as ViewStyle]
+                      : styles.content
+                  }
+                  contentContainerStyle={
+                    Platform.OS === 'web'
+                      ? [styles.chatContent, { overflowAnchor: 'none' } as unknown as ViewStyle]
+                      : styles.chatContent
+                  }
+                  initialNumToRender={16}
+                  maxToRenderPerBatch={8}
+                  windowSize={Platform.OS === 'web' ? 21 : 9}
+                  removeClippedSubviews={Platform.OS === 'android'}
+                  keyboardDismissMode={Platform.OS === 'android' ? 'on-drag' : 'interactive'}
+                  keyboardShouldPersistTaps="handled"
+                  onScrollBeginDrag={handleChatScrollBeginDrag}
+                  onScrollEndDrag={handleChatScrollEndDrag}
+                  onMomentumScrollEnd={handleChatMomentumScrollEnd}
+                  onScroll={handleChatScroll}
+                  onContentSizeChange={handleChatContentSizeChange}
+                  onScrollToIndexFailed={handleScrollToIndexFailed}
+                  scrollEventThrottle={Platform.OS === 'web' ? 16 : 32}
+                />
+                {showScrollToBottom ? (
                   <AnimatedPressable
                     accessibilityRole="button"
-                    onPress={() => {
-                      shouldAutoScrollRef.current = false;
-                      setChatMessageRenderLimit((current) => current + chatMessageRenderPageSize);
-                    }}
-                    style={styles.chatHistoryLoadButton}
+                    accessibilityLabel="回到底部"
+                    testID="chat-scroll-to-bottom"
+                    onPress={handleScrollToBottomPress}
+                    style={styles.scrollToBottomButton}
                   >
-                    <Text style={styles.chatHistoryLoadText}>
-                      显示更早消息 · 当前 {renderedChatMessages.length} / {workspace.messages.length}
-                    </Text>
+                    <ArrowDown size={15} color={palette.text} strokeWidth={2.2} />
+                    <Text style={styles.scrollToBottomButtonText}>回到底部</Text>
                   </AnimatedPressable>
                 ) : null}
-                {renderedChatMessages.map((message) => {
-                  const generationTask =
-                    message.role === 'assistant'
-                      ? message.generationTask ?? inferMessageGenerationTask(message)
-                      : undefined;
-                  const messageModelId = message.modelId ?? '模型未记录';
-                  const messageProviderName = message.providerName ?? '未知服务商';
-                  return (
-                  <AnimatedMessage
-                    key={message.id}
-                    animate={Platform.OS !== 'android' && animatedMessageIds.has(message.id)}
-                    onLayout={(event) => {
-                      messageLayoutYByIdRef.current.set(message.id, event.nativeEvent.layout.y);
-                      if (pendingSearchMessageIdRef.current === message.id) {
-                        scrollToSearchMessage(message.id);
-                      }
-                    }}
-                    style={[
-                      styles.messageBubble,
-                      message.role === 'user'
-                        ? styles.userMessageBlock
-                        : message.role === 'system'
-                          ? styles.systemMessageBlock
-                          : styles.assistantBubble,
-                      message.status === 'error' && styles.errorBubble,
-                      highlightedSearchMessageId === message.id && styles.searchHighlightedMessage,
-                    ]}
-                  >
-                    {message.role === 'user' ? (
-                      <>
-                        <View style={styles.userBubble}>
-                          {editingMessageId === message.id ? (
-                            <MessageInlineEditor
-                              role="user"
-                              value={editingMessageDraft}
-                              placeholder="修改这条问题"
-                              primaryLabel="提交修改"
-                              disabled={busy}
-                              onChange={setEditingMessageDraft}
-                              onCancel={cancelEditUserMessage}
-                              onSave={() => { void saveEditedUserMessage(); }}
-                            />
-                          ) : (
-                            <Text style={[styles.messageText, styles.userMessageText]}>{message.content}</Text>
-                          )}
-                          {message.attachments?.length ? (
-                            <View style={styles.attachmentGrid}>
-                              {message.attachments.map((attachment) => (
-                                <AttachmentPreview
-                                  key={attachment.id}
-                                  attachment={attachment}
-                                  videoActive={!settingsOpen && activeVideoAttachmentId === attachment.id}
-                                  onToggleVideo={() =>
-                                    setActiveVideoAttachmentId((current) =>
-                                      current === attachment.id ? null : attachment.id
-                                    )
-                                  }
-                                />
-                              ))}
-                            </View>
-                          ) : null}
-                        </View>
-                        <MessageActions
-                          role="user"
-                          copied={copiedMessageId === message.id}
-                          onCopy={() => void copyMessage(message)}
-                          onRetry={() => retryMessage(message)}
-                          onEdit={() => beginEditUserMessage(message)}
-                          onShare={() => void shareMessage(message)}
-                          onMore={() => openMessageActionMenu(message)}
-                        />
-                        {messageActionMenuId === message.id ? (
-                          <MessageActionMenu
-                            role="user"
-                            canSave={message.status === 'ready' && Boolean(message.content.trim())}
-                            onEdit={() => beginEditUserMessage(message)}
-                            onSaveArtifact={() => saveMessageAsArtifact(message)}
-                            onSaveKnowledge={() => saveMessageAsKnowledge(message)}
-                            onBranch={() => branchConversation(message.id)}
-                            onDelete={() => removeMessage(message)}
-                          />
-                        ) : null}
-                      </>
-                    ) : message.role === 'system' ? (
-                      <View style={styles.systemInstructionCard}>
-                        <View style={styles.systemInstructionHeader}>
-                          <View style={styles.systemInstructionTitleRow}>
-                            <BookOpen size={15} color={palette.text} strokeWidth={2} />
-                            <Text style={styles.systemInstructionTitle}>会话指令</Text>
-                          </View>
-                          <AnimatedPressable
-                            accessibilityRole="button"
-                            accessibilityLabel="移除会话指令"
-                            disabled={busy || workspaceReadOnly}
-                            onPress={() => void removeSystemInstruction(message)}
-                            style={styles.iconButton}
-                          >
-                            <X size={15} color={palette.textSecondary} strokeWidth={2} />
-                          </AnimatedPressable>
-                        </View>
-                        <Text style={styles.systemInstructionText}>{message.content}</Text>
-                      </View>
-                    ) : (
-                      <>
-                        <AssistantMessageHeader
-                          modelId={messageModelId}
-                          providerName={messageProviderName}
-                          createdAt={message.createdAt}
-                        />
-                        {message.comparisonGroupId ? (
-                          <AnimatedPressable
-                            accessibilityRole="button"
-                            accessibilityState={{
-                              selected: message.selectedForContext === true,
-                              disabled: message.status !== 'ready',
-                            }}
-                            disabled={message.status !== 'ready'}
-                            onPress={() => selectComparisonAnswer(message)}
-                            style={[
-                              styles.comparisonContextButton,
-                              message.selectedForContext && styles.comparisonContextButtonSelected,
-                              message.status !== 'ready' && styles.buttonDisabled,
-                            ]}
-                          >
-                            {message.selectedForContext ? (
-                              <Check size={12} color={palette.textOnAccent} strokeWidth={2.8} />
-                            ) : null}
-                            <Text
-                              style={[
-                                styles.comparisonContextButtonText,
-                                message.selectedForContext && styles.comparisonContextButtonTextSelected,
-                              ]}
-                            >
-                              {message.selectedForContext ? '用于后续上下文' : '以此回答继续'}
-                            </Text>
-                          </AnimatedPressable>
-                        ) : null}
-                        <MessageActivityModules message={message} />
-                        {editingMessageId === message.id ? (
-                          <MessageInlineEditor
-                            role="assistant"
-                            value={editingMessageDraft}
-                            placeholder="修改这条回答"
-                            primaryLabel="保存修改"
-                            disabled={busy}
-                            onChange={setEditingMessageDraft}
-                            onCancel={cancelEditUserMessage}
-                            onSave={() => { void saveEditedUserMessage(); }}
-                          />
-                        ) : message.content ? (
-                          <View accessibilityLiveRegion="polite">
-                            {message.status === 'pending' ? (
-                              <Text selectable style={styles.messageText}>
-                                {message.content}
-                              </Text>
-                            ) : (
-                              <MessageMarkdown
-                                content={message.content}
-                                citations={message.citations}
-                              />
-                            )}
-                          </View>
-                        ) : null}
-                        {message.citations?.length ? (
-                          <WebCitationList citations={message.citations} />
-                        ) : null}
-                        {message.mcpActivity &&
-                        !message.toolActivity?.length &&
-                        !message.mcpActivity.approvals.length &&
-                        !message.mcpActivity.calls.length ? (
-                          <McpActivityPanel activity={message.mcpActivity} />
-                        ) : null}
-                        {message.status === 'cancelled' ? (
-                          <Text style={styles.messageStatusText}>已停止生成</Text>
-                        ) : message.error && message.content !== message.error ? (
-                          <Text accessibilityLiveRegion="polite" style={[styles.messageStatusText, styles.messageErrorText]}>
-                            {message.error}
-                          </Text>
-                        ) : null}
-                        {generationTask && !message.attachments?.some((attachment) => attachment.kind === 'video') ? (
-                          <GenerationTaskPanel
-                            task={generationTask}
-                            busy={Boolean(queryingTaskByMessageId[message.id])}
-                            onRefresh={() => refreshGenerationTask(message, generationTask)}
-                          />
-                        ) : null}
-                        {message.attachments?.length ? (
-                          <View style={styles.attachmentGrid}>
-                            {message.attachments.map((attachment) => (
-                              <AttachmentPreview
-                                key={attachment.id}
-                                attachment={attachment}
-                                videoActive={!settingsOpen && activeVideoAttachmentId === attachment.id}
-                                onToggleVideo={() =>
-                                  setActiveVideoAttachmentId((current) =>
-                                    current === attachment.id ? null : attachment.id
-                                  )
-                                }
-                              />
-                            ))}
-                          </View>
-                        ) : null}
-                        <View style={styles.assistantFooterRow}>
-                          <View style={styles.messageActions}>
-                            <MessageActions
-                              role="assistant"
-                              copied={copiedMessageId === message.id}
-                              onCopy={() => void copyMessage(message)}
-                              onRetry={() => retryMessage(message)}
-                              onEdit={() => beginEditUserMessage(message)}
-                              onShare={() => void shareMessage(message)}
-                              onMore={() => openMessageActionMenu(message)}
-                            />
-                            {configuredSpeechTarget && message.status === 'ready' && message.content.trim() ? (
-                              <AnimatedPressable
-                                accessibilityRole="button"
-                                disabled={
-                                  voiceRecording ||
-                                  (audioBusy && speakingMessageId !== message.id)
-                                }
-                                accessibilityLabel={
-                                  speakingMessageId === message.id ? '停止 AI 朗读' : '使用服务商生成 AI 朗读'
-                                }
-                                onPress={() => void readAssistantMessageAloud(message)}
-                                style={[
-                                  styles.messageActionButton,
-                                  (voiceRecording ||
-                                    (audioBusy && speakingMessageId !== message.id)) && styles.buttonDisabled,
-                                ]}
-                              >
-                                <Volume2
-                                  size={15}
-                                  color={speakingMessageId === message.id ? palette.accent : palette.textSecondary}
-                                  strokeWidth={2}
-                                />
-                              </AnimatedPressable>
-                            ) : null}
-                          </View>
-                          {message.usage ? <TokenUsageLine usage={message.usage} /> : null}
-                          {message.requestMetrics?.durationMs !== undefined ? (
-                            <Text style={styles.tokenUsageText}>
-                              {(message.requestMetrics.durationMs / 1000).toFixed(1)}s
-                            </Text>
-                          ) : null}
-                        </View>
-                        {messageActionMenuId === message.id ? (
-                          <MessageActionMenu
-                            role="assistant"
-                            canSave={message.status === 'ready' && Boolean(message.content.trim())}
-                            onEdit={() => beginEditUserMessage(message)}
-                            onSaveArtifact={() => saveMessageAsArtifact(message)}
-                            onSaveKnowledge={() => saveMessageAsKnowledge(message)}
-                            onBranch={() => branchConversation(message.id)}
-                            onDelete={() => removeMessage(message)}
-                          />
-                        ) : null}
-                      </>
-                    )}
-                  </AnimatedMessage>
-                  );
-                })}
-              </ScrollView>
+              </View>
 
               {persistenceSaveError ? (
                 <Text accessibilityLiveRegion="assertive" style={styles.notice}>
@@ -3704,40 +4606,40 @@ function ChatPaneImplementation({
                 </ScrollView>
               ) : null}
 
-              {attachMenuOpen || reasoningMenuOpen || parameterMenuOpen ? (
+              {activeComposerMenu !== 'none' ? (
                 <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="关闭工具菜单"
                   style={styles.attachMenuBackdrop}
                   onPress={() => {
                     Keyboard.dismiss();
-                    setAttachMenuOpen(false);
-                    setReasoningMenuOpen(false);
-                    setParameterMenuOpen(false);
-                    setSearchMenuOpen(false);
+                    closeComposerMenu();
                   }}
                 />
               ) : null}
-              <ComposerSearchSheet
-                visible={searchMenuOpen}
-                webSearchEnabled={workspace.webSearch.enabled}
-                webSearchReady={webSearchReady}
-                externalSearch={workspace.externalSearch}
-                modelSupportsTools={Boolean(
-                  activeProvider &&
-                  activeModel?.capabilities.includes('tool-calling') &&
-                  !isOpenAiResponsesOnlyModel(activeProvider, activeModel.id)
-                )}
-                onClose={() => setSearchMenuOpen(false)}
-                onSelectOff={() => applyComposerSearchMode('off')}
-                onSelectProvider={() => applyComposerSearchMode('provider')}
-                onSelectExternal={(serviceId) =>
-                  applyComposerSearchMode('external', serviceId)
-                }
-                onManage={openSearchServicesManage}
-              />
               <View
                 style={styles.composerWrapper}
                 onLayout={(event) => setComposerLayoutY(event.nativeEvent.layout.y)}
               >
+                <ComposerSearchSheet
+                  visible={searchMenuOpen}
+                  webSearchEnabled={workspace.webSearch.enabled}
+                  webSearchReady={webSearchReady}
+                  externalSearch={workspace.externalSearch}
+                  modelSupportsTools={Boolean(
+                    activeProvider &&
+                    activeModel?.capabilities.includes('tool-calling') &&
+                    !isOpenAiResponsesOnlyModel(activeProvider, activeModel.id)
+                  )}
+                  maxHeight={parameterMenuMaxHeight}
+                  onClose={closeComposerMenu}
+                  onSelectOff={() => applyComposerSearchMode('off')}
+                  onSelectProvider={() => applyComposerSearchMode('provider')}
+                  onSelectExternal={(serviceId) =>
+                    applyComposerSearchMode('external', serviceId)
+                  }
+                  onManage={openSearchServicesManage}
+                />
                 <AnimatePresence>
                   {reasoningMenuOpen && canConfigureReasoning ? (
                     <MotiView
@@ -3759,7 +4661,7 @@ function ChatPaneImplementation({
                             testID={`reasoning-effort-${option.key}`}
                             onPress={() => {
                               setActiveReasoningEffort(option.key);
-                              setReasoningMenuOpen(false);
+                              closeComposerMenu();
                             }}
                             haptic="selection"
                             style={[styles.reasoningMenuItem, active && styles.reasoningMenuItemActive]}
@@ -3788,7 +4690,7 @@ function ChatPaneImplementation({
                         <AnimatedPressable
                         accessibilityRole="button"
                         accessibilityLabel="添加图片"
-                        onPress={() => { void addAttachments('image'); setAttachMenuOpen(false); }}
+                        onPress={() => { void addAttachments('image'); closeComposerMenu(); }}
                         style={styles.attachMenuItem}
                       >
                         <View style={styles.attachMenuIcon}><ImageIcon size={18} color={palette.text} strokeWidth={2} /></View>
@@ -3799,7 +4701,7 @@ function ChatPaneImplementation({
                         <AnimatedPressable
                         accessibilityRole="button"
                         accessibilityLabel="添加视频"
-                        onPress={() => { void addAttachments('video'); setAttachMenuOpen(false); }}
+                        onPress={() => { void addAttachments('video'); closeComposerMenu(); }}
                         style={styles.attachMenuItem}
                       >
                         <View style={styles.attachMenuIcon}><Video size={18} color={palette.text} strokeWidth={2} /></View>
@@ -3810,13 +4712,72 @@ function ChatPaneImplementation({
                         <AnimatedPressable
                         accessibilityRole="button"
                         accessibilityLabel="添加文件"
-                        onPress={() => { void addAttachments('file'); setAttachMenuOpen(false); }}
+                        onPress={() => { void addAttachments('file'); closeComposerMenu(); }}
                         style={styles.attachMenuItem}
                       >
                         <View style={styles.attachMenuIcon}><FileText size={18} color={palette.text} strokeWidth={2} /></View>
                         <Text style={styles.attachMenuText}>文件</Text>
                         </AnimatedPressable>
                       ) : null}
+                    </MotiView>
+                  ) : null}
+                </AnimatePresence>
+                <AnimatePresence>
+                  {slashMenuOpen && slashCommands.length > 0 ? (
+                    <MotiView
+                      key="slash-menu"
+                      from={{ opacity: 0, translateY: 8, scale: 0.96 }}
+                      animate={{ opacity: 1, translateY: 0, scale: 1 }}
+                      exit={{ opacity: 0, translateY: 8, scale: 0.96 }}
+                      transition={{ type: 'timing', duration: 150 }}
+                      style={[styles.slashMenu, { maxHeight: parameterMenuMaxHeight }]}
+                    >
+                      <ScrollView
+                        testID="slash-command-menu"
+                        style={[styles.slashMenuScroll, { maxHeight: parameterMenuMaxHeight }]}
+                        contentContainerStyle={styles.slashMenuContent}
+                        keyboardDismissMode={Platform.OS === 'android' ? 'on-drag' : 'interactive'}
+                        keyboardShouldPersistTaps="handled"
+                        nestedScrollEnabled
+                        bounces={false}
+                        showsVerticalScrollIndicator
+                      >
+                        {slashCommands.map((item, index) => {
+                          const active = index === safeSlashHighlightIndex;
+                          return (
+                            <AnimatedPressable
+                              key={item.id}
+                              accessibilityRole="button"
+                              accessibilityLabel={`执行指令 ${item.command}：${item.title}`}
+                              accessibilityState={{ selected: active }}
+                              testID={`slash-command-item-${item.id}`}
+                              onPress={() => executeSlashCommand(item)}
+                              haptic="selection"
+                              style={[
+                                styles.slashMenuItem,
+                                active && styles.slashMenuItemActive,
+                              ]}
+                            >
+                              <View style={styles.slashMenuItemMain}>
+                                <View style={styles.slashMenuHeaderRow}>
+                                  <Text style={styles.slashMenuCommand}>{item.command}</Text>
+                                  <Text numberOfLines={1} style={styles.slashMenuTitle}>
+                                    {item.title}
+                                  </Text>
+                                </View>
+                                <Text numberOfLines={1} style={styles.slashMenuDescription}>
+                                  {item.description}
+                                </Text>
+                              </View>
+                              <View style={styles.slashMenuBadge}>
+                                <Text style={styles.slashMenuBadgeText}>
+                                  {item.kind === 'builtin' ? '动作' : '模板'}
+                                </Text>
+                              </View>
+                            </AnimatedPressable>
+                          );
+                        })}
+                      </ScrollView>
                     </MotiView>
                   ) : null}
                 </AnimatePresence>
@@ -3908,6 +4869,9 @@ function ChatPaneImplementation({
                   ) : null}
                 </AnimatePresence>
                 <View style={styles.composer}>
+                  {resolvedComposerTopSlot ? (
+                    <View style={styles.composerTopSlot}>{resolvedComposerTopSlot}</View>
+                  ) : null}
                   {comparisonActive ? (
                     <Text accessibilityLiveRegion="polite" style={styles.messageStatusText}>
                       对比模式：将向 {comparisonRuntimes.length} 个模型分别发起请求，费用由你的服务商账户结算。
@@ -3933,7 +4897,8 @@ function ChatPaneImplementation({
                     }
                     placeholderTextColor={palette.placeholder}
                     value={input}
-                    onChangeText={setInput}
+                    onChangeText={handleComposerInputChange}
+                    onKeyPress={handleComposerKeyPress}
                     style={styles.composerInput}
                   />
                   <View style={styles.composerFooter}>
@@ -3988,12 +4953,7 @@ function ChatPaneImplementation({
                           selected: anySearchEnabled(workspace),
                         }}
                         testID="composer-search-globe"
-                        onPress={() => {
-                          setAttachMenuOpen(false);
-                          setReasoningMenuOpen(false);
-                          setParameterMenuOpen(false);
-                          setSearchMenuOpen((open) => !open);
-                        }}
+                        onPress={() => toggleComposerMenu('search')}
                         style={[
                           styles.composerToolButton,
                           (anySearchEnabled(workspace) || searchMenuOpen) &&
@@ -4049,12 +5009,7 @@ function ChatPaneImplementation({
                           accessibilityRole="button"
                           accessibilityLabel="设置思考参数"
                           accessibilityState={{ expanded: reasoningMenuOpen }}
-                          onPress={() => {
-                            setAttachMenuOpen(false);
-                            setParameterMenuOpen(false);
-                            setSearchMenuOpen(false);
-                            setReasoningMenuOpen((current) => !current);
-                          }}
+                          onPress={() => toggleComposerMenu('reasoning')}
                           style={[
                             styles.composerToolButton,
                             activeReasoningEffort !== 'default' && styles.composerToolButtonActive,
@@ -4072,12 +5027,7 @@ function ChatPaneImplementation({
                           accessibilityRole="button"
                           accessibilityLabel="添加附件"
                           accessibilityState={{ expanded: attachMenuOpen }}
-                          onPress={() => {
-                            setReasoningMenuOpen(false);
-                            setParameterMenuOpen(false);
-                            setSearchMenuOpen(false);
-                            setAttachMenuOpen((v) => !v);
-                          }}
+                          onPress={() => toggleComposerMenu('attach')}
                           style={styles.composerToolButton}
                         >
                           <Plus size={15} color={palette.textSecondary} strokeWidth={2.4} />
@@ -4090,10 +5040,7 @@ function ChatPaneImplementation({
                           accessibilityState={{ expanded: parameterMenuOpen }}
                           onPress={() => {
                             Keyboard.dismiss();
-                            setReasoningMenuOpen(false);
-                            setAttachMenuOpen(false);
-                            setSearchMenuOpen(false);
-                            setParameterMenuOpen((current) => !current);
+                            toggleComposerMenu('parameter');
                           }}
                           style={[
                             styles.composerToolButton,
@@ -4153,35 +5100,46 @@ function ChatPaneImplementation({
           ) : null}
 
           {!settingsOpen && mainTab === 'artifacts' ? (
-            <WorkspaceWorkbench
-              visible
-              presentation="screen"
-              projectName="全部项目"
-              artifacts={workspace.artifacts}
-              knowledgeSources={workspace.knowledgeSources}
-              projects={workspace.projects}
-              initialArtifactId={workbenchArtifactId}
-              readOnly={workspaceReadOnly}
-              onClose={() => switchMainTab('projects')}
-              onCreateArtifact={createArtifact}
-              onSaveArtifact={saveArtifact}
-              onRestoreArtifactRevision={restoreArtifactRevision}
-              onDeleteArtifact={(artifactId) => { void removeArtifact(artifactId); }}
-              onExportArtifact={(artifactId) => { void exportArtifact(artifactId); }}
-              onSaveArtifactAsKnowledge={saveArtifactAsKnowledge}
-              onSetArtifactFavorite={(artifactId, favorite) => { void setArtifactFavorite(artifactId, favorite); }}
-              onSetArtifactTags={(artifactId, tags) => { void setArtifactTags(artifactId, tags); }}
-              onContinueConversation={(conversationId) => { void continueArtifactConversation(conversationId); }}
-              onCreateKnowledge={createKnowledge}
-              onSaveKnowledge={saveKnowledge}
-              onDeleteKnowledge={(sourceId) => { void removeKnowledge(sourceId); }}
-              onImportTextKnowledge={() => { void importTextKnowledge(); }}
-              onImportDocumentKnowledge={() => { void importDocumentKnowledge(); }}
-            />
+            <View
+              style={[
+                styles.screenPane,
+                {
+                  paddingTop: insets.top,
+                  paddingLeft: insets.left,
+                  paddingRight: insets.right,
+                },
+              ]}
+            >
+              <WorkspaceWorkbench
+                visible
+                presentation="screen"
+                projectName="全部项目"
+                artifacts={workspace.artifacts}
+                knowledgeSources={workspace.knowledgeSources}
+                projects={workspace.projects}
+                initialArtifactId={workbenchArtifactId}
+                readOnly={workspaceReadOnly}
+                onClose={() => switchMainTab('projects')}
+                onCreateArtifact={createArtifact}
+                onSaveArtifact={saveArtifact}
+                onRestoreArtifactRevision={restoreArtifactRevision}
+                onDeleteArtifact={(artifactId) => { void removeArtifact(artifactId); }}
+                onExportArtifact={(artifactId) => { void exportArtifact(artifactId); }}
+                onSaveArtifactAsKnowledge={saveArtifactAsKnowledge}
+                onSetArtifactFavorite={(artifactId, favorite) => { void setArtifactFavorite(artifactId, favorite); }}
+                onSetArtifactTags={(artifactId, tags) => { void setArtifactTags(artifactId, tags); }}
+                onContinueConversation={(conversationId) => { void continueArtifactConversation(conversationId); }}
+                onCreateKnowledge={createKnowledge}
+                onSaveKnowledge={saveKnowledge}
+                onDeleteKnowledge={(sourceId) => { void removeKnowledge(sourceId); }}
+                onImportTextKnowledge={() => { void importTextKnowledge(); }}
+                onImportDocumentKnowledge={() => { void importDocumentKnowledge(); }}
+              />
+            </View>
           ) : null}
         </KeyboardAvoidingView>
 
-        {!settingsOpen ? (
+        {!settingsOpen && !keyboardVisible ? (
           <MainWorkspaceTabBar active={mainTab} onChange={switchMainTab} />
         ) : null}
 
@@ -4268,8 +5226,69 @@ function ChatPaneImplementation({
           onClose={() => { void closeKnowledgeImport(); }}
         />
 
+        {lightboxAttachment !== null ? (
+          <Suspense fallback={null}>
+            <ImageLightboxModal
+              visible
+              attachment={lightboxAttachment}
+              onClose={() => setLightboxAttachment(null)}
+              onSave={handleLightboxSave}
+              onEditWithImage={(attachment) => {
+                void handleEditWithImage(attachment);
+              }}
+            />
+          </Suspense>
+        ) : null}
+
+        <ActionSheetDialog
+          visible={exportDialogConversation !== null}
+          title="导出当前对话"
+          description="自动脱敏 API Key 与加密思考载荷，支持本地保存或系统分享。"
+          icon={<Download size={22} color={palette.text} strokeWidth={2.2} />}
+          onClose={() => setExportDialogConversation(null)}
+        >
+          <AnimatedPressable
+            accessibilityRole="button"
+            accessibilityLabel="导出为 Markdown"
+            testID="export-markdown-option"
+            onPress={() => {
+              if (exportDialogConversation) {
+                void handleExportConversation(exportDialogConversation, 'markdown');
+              }
+            }}
+            style={styles.exportSheetRow}
+          >
+            <FileText size={18} color={palette.accentText} strokeWidth={2.2} />
+            <View style={styles.exportSheetTextBlock}>
+              <Text style={styles.exportSheetRowText}>导出为 Markdown (.md)</Text>
+              <Text style={styles.exportSheetRowSub}>
+                保留标题、Thinking 折叠区、引用来源与代码块格式
+              </Text>
+            </View>
+          </AnimatedPressable>
+          <AnimatedPressable
+            accessibilityRole="button"
+            accessibilityLabel="导出为 JSON"
+            testID="export-json-option"
+            onPress={() => {
+              if (exportDialogConversation) {
+                void handleExportConversation(exportDialogConversation, 'json');
+              }
+            }}
+            style={styles.exportSheetRow}
+          >
+            <FileText size={18} color={palette.accentText} strokeWidth={2.2} />
+            <View style={styles.exportSheetTextBlock}>
+              <Text style={styles.exportSheetRowText}>导出为 JSON (.json)</Text>
+              <Text style={styles.exportSheetRowSub}>
+                结构化完整消息树，适合二次处理与归档备份
+              </Text>
+            </View>
+          </AnimatedPressable>
+        </ActionSheetDialog>
+
         <Toast message={toastMessage} />
-      </SafeAreaView>
+      </View>
     </>
   );
 }

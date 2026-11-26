@@ -60,7 +60,6 @@ export function SettingsProductivityProvider(
   const { children } = props;
   const workspaceSession = useWorkspaceSession();
   const [isOpen, setIsOpen] = useState(false);
-  const [hasMounted, setHasMounted] = useState(false);
   const settingsScreenRef = useRef<SettingsScreenHandle | null>(null);
   // State (rather than a ref) is intentional: calling open(destination) while
   // Settings is already visible must retrigger the navigation effect.
@@ -88,7 +87,6 @@ export function SettingsProductivityProvider(
       } else {
         setPendingDestination(null);
       }
-      setHasMounted(true);
       setIsOpen(true);
     },
     []
@@ -108,16 +106,17 @@ export function SettingsProductivityProvider(
   const launcher = useMemo<SettingsLauncher>(
     () => ({
       isOpen,
-      hasMounted,
+      // 临时兼容未修改的 SettingsLifecycleContext.SettingsLauncher 接口字段
+      hasMounted: isOpen,
       open,
       close,
       back,
     }),
-    [back, close, hasMounted, isOpen, open]
+    [back, close, isOpen, open]
   );
 
   useEffect(() => {
-    if (!isOpen || !hasMounted || !pendingDestination) {
+    if (!isOpen || !pendingDestination) {
       return;
     }
     const settings = settingsScreenRef.current;
@@ -135,7 +134,7 @@ export function SettingsProductivityProvider(
     } else if (destination.kind === 'tool') {
       settings.openToolsSection(destination.tool);
     }
-  }, [hasMounted, isOpen, pendingDestination]);
+  }, [isOpen, pendingDestination]);
 
   const value = useMemo(
     () => ({

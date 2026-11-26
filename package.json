@@ -49,6 +49,7 @@
     "fake-indexeddb": "^6.2.4",
     "jimp-compact": "0.16.1",
     "patch-package": "^8.0.1",
+    "playwright": "^1.65.1",
     "pngjs": "3.4.0",
     "typescript": "~6.0.3",
     "vitest": "^4.1.10",
@@ -67,6 +68,11 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "check": "npm run typecheck && npm run lint && npm run test",
+    "typecheck:e2e": "node --stack_size=16384 ./node_modules/typescript/lib/tsc.js -p tsconfig.e2e.json --noEmit",
+    "lint:e2e": "node ./node_modules/eslint/bin/eslint.js --no-ignore --max-warnings=0 tests/e2e/helpers/*.ts tests/e2e/r1/*.e2e.spec.ts tests/e2e/r2/*.e2e.spec.ts tests/e2e/r3/*.e2e.spec.ts tests/e2e/tier3/*.e2e.spec.ts tests/e2e/tier4/*.e2e.spec.ts tests/e2e/web/*.mjs",
+    "test:e2e:core": "vitest run --config vitest.e2e.config.ts",
+    "test:e2e:web": "node tests/e2e/web/run-web-e2e.mjs",
+    "test:e2e": "node scripts/run-e2e.mjs",
     "postinstall": "patch-package"
   },
   "private": true

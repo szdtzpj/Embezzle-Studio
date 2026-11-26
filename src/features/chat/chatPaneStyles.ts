@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { Platform, StyleSheet } from 'react-native';
+import { Platform, StyleSheet, type ViewStyle } from 'react-native';
 
 import { useKelivoTheme } from '../../ui/theme';
 
@@ -147,13 +147,23 @@ function createChatPaneStyles(palette: AppPalette) {
   },
   shell: {
     flex: 1,
+    minHeight: 0,
     backgroundColor: palette.bg,
+    ...(Platform.OS === 'web'
+      ? ({
+          height: '100dvh',
+          maxHeight: '100dvh',
+          overflow: 'hidden',
+        } as unknown as ViewStyle)
+      : {}),
   },
   keyboard: {
     flex: 1,
+    minHeight: 0,
   },
   screenPane: {
     flex: 1,
+    minHeight: 0,
   },
   screenPaneHidden: {
     display: 'none',
@@ -205,6 +215,7 @@ function createChatPaneStyles(palette: AppPalette) {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: 8,
   },
   topHeaderActions: {
     flexDirection: 'row',
@@ -307,6 +318,37 @@ function createChatPaneStyles(palette: AppPalette) {
   },
   content: {
     flex: 1,
+    minHeight: 0,
+  },
+  messageListContainer: {
+    flex: 1,
+    minHeight: 0,
+    position: 'relative',
+  },
+  scrollToBottomButton: {
+    position: 'absolute',
+    right: 14,
+    bottom: 12,
+    zIndex: 5,
+    elevation: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    height: 36,
+    paddingHorizontal: 12,
+    borderRadius: radii.pill,
+    backgroundColor: palette.surface,
+    borderWidth: 1,
+    borderColor: palette.borderStrong,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.14,
+    shadowRadius: 8,
+  },
+  scrollToBottomButtonText: {
+    color: palette.text,
+    fontSize: 12,
+    fontWeight: '600',
   },
   settingsContent: {
     padding: 16,
@@ -314,10 +356,13 @@ function createChatPaneStyles(palette: AppPalette) {
   },
   chatContent: {
     padding: 16,
-    gap: 18,
+  },
+  chatMessageSeparator: {
+    height: 18,
   },
   chatHistoryLoadButton: {
     minHeight: 38,
+    marginBottom: 18,
     borderRadius: radii.md,
     backgroundColor: palette.surface,
     borderWidth: 1,
@@ -1196,80 +1241,9 @@ function createChatPaneStyles(palette: AppPalette) {
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.12,
     shadowRadius: 16,
-    elevation: 8,
+    zIndex: 30,
+    elevation: 12,
     minWidth: 180,
-  },
-  searchMenu: {
-    position: 'absolute',
-    bottom: '100%',
-    left: 0,
-    right: 0,
-    marginBottom: 8,
-    backgroundColor: palette.bg,
-    borderRadius: radii.md,
-    padding: 12,
-    gap: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.12,
-    shadowRadius: 16,
-    elevation: 8,
-    maxHeight: 360,
-  },
-  searchMenuItem: {
-    minHeight: 48,
-    borderRadius: radii.sm,
-    borderWidth: 1,
-    borderColor: palette.border,
-    backgroundColor: palette.surface,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  searchMenuItemActive: {
-    borderColor: palette.accent,
-    backgroundColor: palette.accent,
-  },
-  searchMenuItemTextBlock: {
-    flex: 1,
-    minWidth: 0,
-    gap: 2,
-  },
-  searchMenuItemTitle: {
-    color: palette.text,
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  searchMenuItemTitleActive: {
-    color: palette.textOnAccent,
-  },
-  searchMenuItemHint: {
-    color: palette.textSecondary,
-    fontSize: 11,
-    lineHeight: 15,
-  },
-  searchMenuItemHintActive: {
-    color: palette.textOnAccent,
-    opacity: 0.88,
-  },
-  searchMenuEmpty: {
-    color: palette.textSecondary,
-    fontSize: 12,
-    lineHeight: 17,
-  },
-  searchMenuLink: {
-    minHeight: 36,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 4,
-  },
-  searchMenuLinkText: {
-    color: palette.accentText,
-    fontSize: 13,
-    fontWeight: '700',
   },
   reasoningMenu: {
     position: 'absolute',
@@ -1287,7 +1261,8 @@ function createChatPaneStyles(palette: AppPalette) {
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.12,
     shadowRadius: 16,
-    elevation: 8,
+    zIndex: 30,
+    elevation: 12,
   },
   reasoningMenuItem: {
     height: 30,
@@ -1328,7 +1303,8 @@ function createChatPaneStyles(palette: AppPalette) {
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.12,
     shadowRadius: 16,
-    elevation: 8,
+    zIndex: 30,
+    elevation: 12,
   },
   parameterMenuScroll: {
     flexGrow: 0,
@@ -1338,6 +1314,122 @@ function createChatPaneStyles(palette: AppPalette) {
     flexGrow: 0,
     padding: 12,
     gap: 12,
+  },
+  slashMenu: {
+    position: 'absolute',
+    bottom: '100%',
+    left: 0,
+    right: 0,
+    marginBottom: 8,
+    backgroundColor: palette.bg,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: palette.border,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 16,
+    zIndex: 30,
+    elevation: 12,
+  },
+  slashMenuScroll: {
+    flexGrow: 0,
+    flexShrink: 1,
+  },
+  slashMenuContent: {
+    flexGrow: 0,
+    padding: 6,
+    gap: 4,
+  },
+  slashMenuItem: {
+    minHeight: 42,
+    borderRadius: radii.sm,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  slashMenuItemActive: {
+    backgroundColor: palette.accentSoft,
+  },
+  slashMenuItemMain: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  slashMenuHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  slashMenuCommand: {
+    color: palette.accentText,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  slashMenuTitle: {
+    flex: 1,
+    minWidth: 0,
+    color: palette.text,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  slashMenuDescription: {
+    color: palette.textSecondary,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  slashMenuBadge: {
+    height: 20,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    paddingHorizontal: 7,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  slashMenuBadgeText: {
+    color: palette.textSecondary,
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  slashMenuEmpty: {
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    color: palette.textSecondary,
+    fontSize: 12,
+  },
+  exportSheetRow: {
+    minHeight: 50,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: palette.border,
+    backgroundColor: palette.surface,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  exportSheetTextBlock: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  exportSheetRowText: {
+    color: palette.text,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  exportSheetRowSub: {
+    color: palette.textSecondary,
+    fontSize: 11,
+    lineHeight: 15,
   },
   toolMenuHeader: {
     flexDirection: 'row',
@@ -1446,6 +1538,10 @@ function createChatPaneStyles(palette: AppPalette) {
     borderColor: palette.border,
     overflow: 'visible',
     zIndex: 20,
+    elevation: 6,
+  },
+  composerTopSlot: {
+    paddingBottom: 4,
   },
   composer: {
     paddingHorizontal: 10,

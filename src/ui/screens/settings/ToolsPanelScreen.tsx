@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { ArrowLeft } from 'lucide-react-native';
 import { Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AnimatedPressable } from '../../components/AnimatedPressable';
 import { useKelivoTheme, type KelivoTheme } from '../../theme';
 
@@ -23,11 +24,21 @@ export function ToolsPanelScreen({
   children,
 }: ToolsPanelScreenProps) {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = getStyles(theme);
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
+      <View
+        style={[
+          styles.header,
+          {
+            paddingTop: Math.max(8, insets.top),
+            paddingLeft: Math.max(6, insets.left),
+            paddingRight: Math.max(6, insets.right),
+          },
+        ]}
+      >
         <AnimatedPressable accessibilityRole="button" onPress={onBack} style={styles.headerButton}>
           <ArrowLeft size={22} color={theme.colors.text} strokeWidth={2.2} />
         </AnimatedPressable>
@@ -36,7 +47,14 @@ export function ToolsPanelScreen({
       </View>
       <ScrollView
         style={styles.scroll}
-        contentContainerStyle={styles.content}
+        contentContainerStyle={[
+          styles.content,
+          {
+            paddingBottom: Math.max(28, insets.bottom + 16),
+            paddingLeft: insets.left,
+            paddingRight: insets.right,
+          },
+        ]}
         keyboardDismissMode={Platform.OS === 'android' ? 'on-drag' : 'interactive'}
         keyboardShouldPersistTaps="handled"
       >

@@ -282,7 +282,7 @@ describe('document import parsers', () => {
       mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       uri,
       file: new Blob([new Uint8Array([1, 2, 3, 4])]),
-    })).rejects.toThrow();
+    })).rejects.toThrow(/OOXML|压缩包/);
 
     expect(fileSystemState.deletedUris).toEqual([uri]);
   });
@@ -320,5 +320,68 @@ describe('document import parsers', () => {
     }, 'page-1', 'OCR text');
     expect(withText.sections[0].content).toBe('OCR text');
     expect(withText.sections[0].kind).toBe('ocr');
+  });
+
+  it('blocks IPv6 loopback/ULA/mapped/IMDS/CGNAT/non-443 SSRF URLs and aborts hanging HTML streams cleanly', async () => {
+    const blockedUrls = [
+      'https://[::1]/secret',
+      'https://[fd00:ec2::254]/latest/meta-data/',
+      'https://[::ffff:169.254.169.254]/latest/meta-data/',
+      'https://100.100.100.200/latest/meta-data/',
+      'https://0.0.0.0/admin',
+      'https://metadata.google.internal/computeMetadata/v1/',
+      'https://example.com:8443/article',
+      'https://user:pass@example.com/article',
+    ];
+    const fetchSpy = vi.fn();
+    for (const url of blockedUrls) {
+      await expect(parseWebPageImport(url, { fetchImpl: fetchSpy })).rejects.toThrow(/公开 HTTPS/);
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    let markReadingStarted: (() => void) | undefined;
+    let markCancelled: (() => void) | undefined;
+    const readingStarted = new Promise<void>((resolve) => {
+      markReadingStarted = resolve;
+    });
+    const cancelled = new Promise<void>((resolve) => {
+      markCancelled = resolve;
+    });
+    let cancelCount = 0;
+
+    const hangingResponse = new Response(
+      new ReadableStream<Uint8Array>(
+        {
+          start() {
+            // 响应头返回后模拟挂起流
+          },
+          pull() {
+            markReadingStarted?.();
+          },
+          cancel() {
+            cancelCount += 1;
+            markCancelled?.();
+          },
+        },
+        { highWaterMark: 0 }
+      ),
+      { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } }
+    );
+
+    const controller = new AbortController();
+    const pending = parseWebPageImport('https://example.com/hanging', {
+      signal: controller.signal,
+      fetchImpl: async (_input, init) => {
+        expect(init?.redirect).toBe('error');
+        return hangingResponse;
+      },
+    });
+    const assertion = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    await readingStarted;
+    controller.abort();
+    await assertion;
+    await cancelled;
+    expect(cancelCount).toBeGreaterThanOrEqual(1);
+    expect(hangingResponse.body?.locked).toBe(false);
   });
 });

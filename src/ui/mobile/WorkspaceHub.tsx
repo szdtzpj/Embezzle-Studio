@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   BookOpen,
   FileText,
@@ -49,6 +50,7 @@ export function WorkspaceHub({
   onOpenSettings,
 }: WorkspaceHubProps): React.ReactElement {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const recentConversations = useMemo(
     () => [...workspace.conversations].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 5),
@@ -73,7 +75,16 @@ export function WorkspaceHub({
 
   return (
     <View style={styles.root} testID="workspace-hub">
-      <View style={styles.header}>
+      <View
+        style={[
+          styles.header,
+          {
+            paddingTop: Math.max(13, insets.top + 8),
+            paddingLeft: Math.max(18, insets.left),
+            paddingRight: Math.max(18, insets.right),
+          },
+        ]}
+      >
         <View style={styles.headerCopy}>
           <Text style={styles.eyebrow}>本地工作区</Text>
           <Text style={styles.title}>项目</Text>
@@ -84,7 +95,16 @@ export function WorkspaceHub({
         </AnimatedPressable>
       </View>
 
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={[
+          styles.content,
+          {
+            paddingLeft: Math.max(16, insets.left),
+            paddingRight: Math.max(16, insets.right),
+          },
+        ]}
+      >
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.projectRow}>
           {workspace.projects.map((project) => {
             const active = project.id === workspace.activeProjectId;
@@ -195,6 +215,7 @@ export function MainWorkspaceTabBar(props: {
   onChange: (tab: MainWorkspaceTab) => void;
 }): React.ReactElement {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const items: Array<{ key: MainWorkspaceTab; label: string; icon: typeof MessageCircle }> = [
     { key: 'chat', label: '对话', icon: MessageCircle },
@@ -202,7 +223,17 @@ export function MainWorkspaceTabBar(props: {
     { key: 'artifacts', label: '成果', icon: BookOpen },
   ];
   return (
-    <View style={styles.tabBar} accessibilityRole="tablist">
+    <View
+      style={[
+        styles.tabBar,
+        {
+          paddingBottom: Math.max(7, insets.bottom),
+          paddingLeft: Math.max(12, insets.left),
+          paddingRight: Math.max(12, insets.right),
+        },
+      ]}
+      accessibilityRole="tablist"
+    >
       {items.map((item) => {
         const selected = item.key === props.active;
         const Icon = item.icon;

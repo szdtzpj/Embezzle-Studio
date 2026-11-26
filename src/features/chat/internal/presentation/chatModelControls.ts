@@ -87,10 +87,9 @@ export function formatParameterValue(value: number): string {
 export function getSelectableModels(provider: ProviderProfile) {
   return provider.models.filter(
     (model) =>
-      model.source !== 'preset' &&
+      model.source !== 'remote' &&
       !(
         isVolcengineArkProvider(provider) &&
-        model.source !== 'remote' &&
         isArkStaticDoubaoModelId(model.id)
       )
   );

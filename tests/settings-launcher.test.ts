@@ -44,16 +44,20 @@ describe('Settings public seam', () => {
       'utf8'
     );
     expect(provider).toContain('const [pendingDestination, setPendingDestination]');
-    expect(provider).toContain('[hasMounted, isOpen, pendingDestination]');
+    expect(provider).toContain('[isOpen, pendingDestination]');
     expect(provider).toContain('settings.openProviderModels(destination.providerId)');
     expect(provider).toContain('settings.openActiveProviderModels()');
   });
 
-  it('removes closed Settings from the web layout while retaining native mounted state', async () => {
+  it('unmounts closed Settings instead of keeping hidden mounted state', async () => {
     const pane = await readFile(path.resolve('src/features/settings/SettingsPane.tsx'), 'utf8');
-    expect(pane).toContain("Platform.OS === 'web' ? styles.webHidden : styles.nativeHidden");
-    expect(pane).toContain("webHidden: { display: 'none' }");
-    expect(pane).toContain('nativeHidden: { opacity: 0 }');
-    expect(pane).toContain('accessibilityElementsHidden={!props.isOpen}');
+    expect(pane).toContain('if (!isOpen)');
+    expect(pane).toContain('return null;');
+    expect(pane).not.toContain('hasMounted');
+    expect(pane).not.toContain("display: 'none'");
+    expect(pane).not.toContain('nativeHidden');
+    expect(pane.indexOf('if (!isOpen)')).toBeLessThan(
+      pane.indexOf('useSettingsScreenModel(props.close)')
+    );
   });
 });

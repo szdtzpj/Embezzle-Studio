@@ -6,6 +6,14 @@ import {
   getDocumentImportNativeModule,
   type NativeOcrScript,
 } from './documentImportNative';
+import {
+  awaitStreamCancelSettled,
+  createAbortError,
+  createAbortPromise,
+  isAbortError,
+  isBlockedPublicHost,
+  resolveStreamAbortError,
+} from './ssrfGuard';
 
 export const MAX_DOCUMENT_IMPORT_FILE_BYTES = 20_000_000;
 export const MAX_DOCUMENT_IMPORT_HTML_BYTES = 5_000_000;
@@ -126,6 +134,7 @@ export interface DocumentImportInput {
 export interface DocumentImportWebOptions {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface PickedDocumentImportAsset {
@@ -250,29 +259,69 @@ function decodeUtf8(bytes: Uint8Array): string {
   return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
 }
 
-/** Read an untrusted response body while enforcing the byte limit during the read. */
-async function readResponseTextBounded(response: Response, limit: number): Promise<string> {
+/** Read an untrusted response body while enforcing the byte limit and abort signal during the read. */
+async function readResponseTextBounded(
+  response: Response,
+  limit: number,
+  signal?: AbortSignal
+): Promise<string> {
+  if (signal?.aborted) {
+    void response.body?.cancel().catch(() => undefined);
+    throw resolveStreamAbortError(signal);
+  }
+
   const declaredLength = Number.parseInt(response.headers.get('content-length') ?? '', 10);
   if (Number.isSafeInteger(declaredLength) && declaredLength > limit) {
+    void response.body?.cancel().catch(() => undefined);
     throw new Error(`HTML response exceeds ${limit.toLocaleString()} bytes.`);
   }
 
   const body = response.body;
-  if (!body || typeof body.getReader !== 'function') {
-    const text = await response.text();
-    if (new TextEncoder().encode(text).byteLength > limit) {
-      throw new Error(`HTML response exceeds ${limit.toLocaleString()} bytes.`);
+  const reader = body && typeof body.getReader === 'function' ? body.getReader() : undefined;
+  let cancelPromise: Promise<unknown> | null = null;
+  const { promise: abortPromise, cleanup: cleanupAbort } = createAbortPromise(signal, () => {
+    if (reader) {
+      cancelPromise = reader.cancel().catch(() => undefined);
+    } else if (body) {
+      cancelPromise = body.cancel().catch(() => undefined);
     }
-    return text;
+  });
+
+  if (!reader) {
+    try {
+      const text = abortPromise
+        ? await Promise.race([response.text(), abortPromise])
+        : await response.text();
+      if (signal?.aborted) {
+        throw resolveStreamAbortError(signal);
+      }
+      if (new TextEncoder().encode(text).byteLength > limit) {
+        throw new Error(`HTML response exceeds ${limit.toLocaleString()} bytes.`);
+      }
+      return text;
+    } finally {
+      cleanupAbort();
+      await awaitStreamCancelSettled(cancelPromise);
+    }
   }
 
-  const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
     while (true) {
-      const next = await reader.read();
+      if (signal?.aborted) {
+        await reader.cancel().catch(() => undefined);
+        throw resolveStreamAbortError(signal);
+      }
+      const next = abortPromise
+        ? await Promise.race([reader.read(), abortPromise])
+        : await reader.read();
+      if (signal?.aborted) {
+        await reader.cancel().catch(() => undefined);
+        throw resolveStreamAbortError(signal);
+      }
       if (next.done) break;
+      if (!next.value) continue;
       const chunk = next.value instanceof Uint8Array
         ? next.value
         : new Uint8Array(next.value);
@@ -288,7 +337,13 @@ async function readResponseTextBounded(response: Response, limit: number): Promi
       chunks.push(chunk);
     }
   } finally {
-    reader.releaseLock?.();
+    cleanupAbort();
+    await awaitStreamCancelSettled(cancelPromise);
+    try {
+      reader.releaseLock?.();
+    } catch {
+      // 流已释放或取消时忽略
+    }
   }
 
   const bytes = new Uint8Array(total);
@@ -829,18 +884,21 @@ export async function parseDocumentImport(input: DocumentImportInput): Promise<K
 }
 
 function normalizePublicHttpsUrl(raw: string): string {
+  const trimmed = raw.trim();
   let url: URL;
   try {
-    url = new URL(raw.trim());
+    url = new URL(trimmed);
   } catch {
     throw new Error('网页地址不是有效网址。');
   }
-  const host = url.hostname.toLowerCase().replace(/\.$/u, '');
-  const privateHost = host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') ||
-    host === '::1' || host === '::' || host.startsWith('127.') || host.startsWith('10.') ||
-    host.startsWith('192.168.') || /^172\.(1[6-9]|2\d|3[01])\./u.test(host) || host.startsWith('169.254.');
-  if (url.protocol !== 'https:' || url.username || url.password || privateHost) {
-    throw new Error('网页导入只允许不含凭据的公开 HTTPS 地址。');
+  if (
+    url.protocol !== 'https:' ||
+    url.username ||
+    url.password ||
+    (url.port && url.port !== '443') ||
+    isBlockedPublicHost(url.hostname)
+  ) {
+    throw new Error('网页导入只允许不含凭据、使用标准 443 端口的公开 HTTPS 地址。');
   }
   return url.toString();
 }
@@ -849,10 +907,21 @@ export async function parseWebPageImport(
   rawUrl: string,
   options: DocumentImportWebOptions = {}
 ): Promise<KnowledgeImportDraft> {
+  if (options.signal?.aborted) {
+    throw resolveStreamAbortError(options.signal);
+  }
   const url = normalizePublicHttpsUrl(rawUrl);
   const fetcher = options.fetchImpl ?? fetch;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), Math.max(1_000, options.timeoutMs ?? 12_000));
+  let timedOut = false;
+  const onCallerAbort = () => {
+    controller.abort(options.signal?.reason ?? createAbortError());
+  };
+  options.signal?.addEventListener('abort', onCallerAbort, { once: true });
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort(createAbortError('网页读取超时，请检查网络后重试。'));
+  }, Math.max(1_000, options.timeoutMs ?? 12_000));
   try {
     const response = await fetcher(url, { signal: controller.signal, redirect: 'error' });
     if (!response.ok) throw new Error(`网页返回 HTTP ${response.status}。`);
@@ -860,7 +929,7 @@ export async function parseWebPageImport(
     if (contentType && !contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) {
       throw new Error('网页响应不是 HTML，已拒绝作为网页资料导入。');
     }
-    const text = await readResponseTextBounded(response, MAX_DOCUMENT_IMPORT_HTML_BYTES);
+    const text = await readResponseTextBounded(response, MAX_DOCUMENT_IMPORT_HTML_BYTES, controller.signal);
     const warnings: string[] = [];
     const draft = draftFromBlocks({
       fileName: titleFromFilename(new URL(url).hostname) || '网页资料',
@@ -872,13 +941,22 @@ export async function parseWebPageImport(
     draft.sourceUri = url;
     return draft;
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') throw new Error('网页读取超时，请检查网络后重试。');
+    if (timedOut) {
+      throw new Error('网页读取超时，请检查网络后重试。');
+    }
+    if (options.signal?.aborted) {
+      throw resolveStreamAbortError(options.signal);
+    }
+    if (isAbortError(error)) {
+      throw new Error('网页读取超时，请检查网络后重试。');
+    }
     if (error instanceof TypeError && Platform.OS === 'web') {
       throw new Error('浏览器阻止了跨域网页读取；请复制网页正文、使用允许 CORS 的地址，或在 Android 分享入口导入。');
     }
     throw error instanceof Error ? error : new Error('网页读取失败。');
   } finally {
     clearTimeout(timeout);
+    options.signal?.removeEventListener('abort', onCallerAbort);
   }
 }
 

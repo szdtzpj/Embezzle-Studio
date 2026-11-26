@@ -10,6 +10,7 @@ module.exports = defineConfig([
       'dist/**',
       'node_modules/**',
       'pro-ref/**',
+      'tests/e2e/**',
       'web-build/**',
     ],
   },

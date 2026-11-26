@@ -17,7 +17,7 @@ export interface ChatUsageLedgerHost {
   isReplacing(): boolean;
   replaceUsageEvents(events: ProviderUsageEvent[]): Promise<boolean>;
   flushRequired(): Promise<void>;
-  confirmCost(reason: string): Promise<boolean>;
+  confirmCost(reason: string, signal?: AbortSignal): Promise<boolean>;
   notify(message: string): void;
   now(): number;
 }
@@ -30,7 +30,10 @@ export interface ChatUsageLedgerHost {
 export class ChatUsageLedger {
   constructor(private readonly host: ChatUsageLedgerHost) {}
 
-  async authorize(plan: ProviderRequestPlan): Promise<boolean> {
+  async authorize(plan: ProviderRequestPlan, signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted) {
+      return false;
+    }
     if (this.host.isReplacing()) {
       this.host.notify('正在验证并导入备份，暂时不能发起新请求。');
       return false;
@@ -48,14 +51,17 @@ export class ChatUsageLedger {
       return false;
     }
     if (evaluation.decision === 'warn') {
-      const confirmed = await this.host.confirmCost(evaluation.reason);
+      const confirmed = await this.host.confirmCost(evaluation.reason, signal);
+      if (signal?.aborted) {
+        return false;
+      }
       if (this.host.isReplacing()) {
         this.host.notify('备份导入已开始，本次请求未发出。');
         return false;
       }
       return confirmed;
     }
-    return !this.host.isReplacing();
+    return !this.host.isReplacing() && !signal?.aborted;
   }
 
   createStarted(

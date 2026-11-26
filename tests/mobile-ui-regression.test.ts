@@ -26,8 +26,10 @@ describe('Android mobile UI regressions', () => {
     expect(appConfig.expo.android.allowBackup).toBe(false);
     expect(appConfig.expo.android.softwareKeyboardLayoutMode).toBe('resize');
     expect(appSource).toContain(
-      "behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined}"
+      "behavior={Platform.OS === 'ios' ? 'padding' : undefined}"
     );
+    expect(appSource).toContain('Keyboard.addListener(');
+    expect(appSource).toContain('!settingsOpen && !keyboardVisible');
     expect(appSource).toContain('keyboardDismissMode={Platform.OS === \'android\' ? \'on-drag\' : \'interactive\'}');
   });
 
@@ -44,18 +46,18 @@ describe('Android mobile UI regressions', () => {
     expect(settingsModelSource).toContain('filteredModelCandidates.slice(0, candidateModelRenderLimit)');
     expect(mobileSource).toContain('<ChatPane settings={settings}');
     expect(mobileSource).toContain('<SettingsPane />');
-    expect(settingsPaneSource).toContain('if (!hasMounted)');
-    expect(settingsPaneSource).toContain("pointerEvents={props.isOpen ? 'auto' : 'none'}");
-    expect(settingsPaneSource).toContain("Platform.OS === 'web' ? styles.webHidden : styles.nativeHidden");
-    expect(settingsPaneSource).toContain("webHidden: { display: 'none' }");
-    expect(settingsPaneSource.indexOf('if (!hasMounted)')).toBeLessThan(
+    expect(settingsPaneSource).toContain('if (!isOpen)');
+    expect(settingsPaneSource).not.toContain('hasMounted');
+    expect(settingsPaneSource).not.toContain("display: 'none'");
+    expect(settingsPaneSource).not.toContain('nativeHidden');
+    expect(settingsPaneSource.indexOf('if (!isOpen)')).toBeLessThan(
       settingsPaneSource.indexOf('useSettingsScreenModel(props.close)')
     );
     expect(appSource).toContain('const settingsOpen = settings.isOpen;');
     expect(appSource).toContain("workspaceStatus.phase === 'ready' && workspaceStatus.dirty");
     expect(appSource).toContain('本机工作区尚未保存：{persistenceSaveError}');
     expect(await source('src/features/settings/SettingsProductivityProvider.tsx')).toContain(
-      'hasMounted'
+      '[isOpen, pendingDestination]'
     );
     expect(appSource).toContain('Keyboard.dismiss();');
     expect(motionSource).toContain(
@@ -193,8 +195,8 @@ describe('Android mobile UI regressions', () => {
     );
 
     expect(appSource).toContain('const parameterMenuMaxHeight = composerLayoutY > 0');
-    expect(appSource).toContain('Math.max(0, Math.floor(composerLayoutY - 12))');
-    expect(appSource).not.toContain('Math.max(120, Math.floor(composerLayoutY - 12))');
+    expect(appSource).toContain('Math.max(120, Math.floor(composerLayoutY - 12))');
+    expect(appSource).not.toContain('Math.max(0, Math.floor(composerLayoutY - 12))');
     expect(appSource).toContain('onLayout={(event) => setComposerLayoutY(event.nativeEvent.layout.y)}');
     expect(menuSource).toContain('testID="parameter-menu-scroll"');
     expect(menuSource).toContain("keyboardDismissMode={Platform.OS === 'android' ? 'on-drag' : 'interactive'}");
@@ -276,14 +278,14 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('renders assistant message content as Markdown', async () => {
-    const [appSource, mdSource] = await Promise.all([
-      source('src/features/chat/ChatPane.tsx'),
+    const [rowSource, mdSource] = await Promise.all([
+      source('src/features/chat/internal/presentation/ChatMessageRow.tsx'),
       source('src/ui/components/MessageMarkdown.tsx'),
     ]);
-    expect(appSource).toContain('MessageMarkdown');
-    expect(appSource).toContain('citations={message.citations}');
-    expect(appSource).toContain("message.status === 'pending'");
-    expect(appSource).toContain('<Text selectable style={styles.messageText}>');
+    expect(rowSource).toContain('MessageMarkdown');
+    expect(rowSource).toContain('citations={displayMessage.citations}');
+    expect(rowSource).toContain("displayMessage.status === 'pending'");
+    expect(rowSource).toContain('<Text selectable style={styles.messageText}>');
     expect(mdSource).not.toContain('react-native-markdown-display');
     expect(mdSource).toContain('MAX_MARKDOWN_RENDER_CHARS');
     expect(mdSource).toContain('parseMarkdownBlocks');
@@ -292,13 +294,14 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('renders modular thinking and tool activity cards instead of three bouncing dots', async () => {
-    const [appSource, activityUiSource, activitySource] = await Promise.all([
+    const [appSource, rowSource, activityUiSource, activitySource] = await Promise.all([
       source('src/features/chat/ChatPane.tsx'),
+      source('src/features/chat/internal/presentation/ChatMessageRow.tsx'),
       source('src/ui/components/MessageActivityModules.tsx'),
       source('src/services/messageActivity.ts'),
     ]);
 
-    expect(appSource).toContain('<MessageActivityModules message={message} />');
+    expect(rowSource).toContain('<MessageActivityModules message={displayMessage} />');
     expect(activityUiSource).toContain('testID="message-activity-modules"');
     expect(activityUiSource).toContain('testID="search-step-detail"');
     expect(activityUiSource).toContain('reasoningCard');
@@ -366,8 +369,9 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('uses square attachment thumbnails and a native inline video player with save controls', async () => {
-    const [appSource, attachmentSource, styleSource, packageSource, mediaPickerSource] = await Promise.all([
+    const [appSource, rowSource, attachmentSource, styleSource, packageSource, mediaPickerSource] = await Promise.all([
       source('src/features/chat/ChatPane.tsx'),
+      source('src/features/chat/internal/presentation/ChatMessageRow.tsx'),
       source('src/features/chat/internal/presentation/ChatAttachmentPresentation.tsx'),
       source('src/features/chat/internal/presentation/ChatAttachmentPresentationStyles.ts'),
       source('package.json'),
@@ -380,9 +384,9 @@ describe('Android mobile UI regressions', () => {
     expect(styleSource).toMatch(/pendingAttachment:\s*\{[\s\S]*?aspectRatio:\s*1,/);
     expect(attachmentSource).toContain('<VideoView');
     expect(attachmentSource).toContain('fullscreenOptions={{ enable: true }}');
-    expect(appSource).toContain(
-      'videoActive={!settingsOpen && activeVideoAttachmentId === attachment.id}'
-    );
+    expect(appSource).toContain('!settingsOpen &&');
+    expect(appSource).toContain('activeVideoAttachmentId');
+    expect(rowSource).toContain('videoActive={activeVideoId === attachment.id}');
     expect(attachmentSource).toContain('saveAttachmentToDevice(attachment)');
     expect(mediaPickerSource).toContain("base64: Platform.OS === 'web'");
     expect(attachmentSource).not.toContain("createElement('video'");
@@ -390,7 +394,10 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('keeps multi-model comparison group-scoped and explicit about provider billing', async () => {
-    const appSource = await source('src/features/chat/ChatPane.tsx');
+    const [appSource, rowSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
+      source('src/features/chat/internal/presentation/ChatMessageRow.tsx'),
+    ]);
     const comparisonSource = appSource.slice(
       appSource.indexOf('async function sendComparisonMessage'),
       appSource.indexOf('async function sendMessage')
@@ -401,7 +408,8 @@ describe('Android mobile UI regressions', () => {
     expect(appSource).toContain('finishRequest: false');
     expect(appSource).toContain('finishActiveRequest(controller);');
     expect(appSource).toContain('applyComparisonSelection(comparisonGroupId');
-    expect(appSource).toContain('以此回答继续');
+    expect(rowSource).toContain('以此回答继续');
+    expect(appSource).toContain('onSelectComparisonAnswer={handleRowSelectComparisonAnswer}');
     expect(appSource).toContain('费用由对应服务商从你的账户结算');
     expect(comparisonSource.indexOf('assertProviderWebSearchMessagesSupported')).toBeGreaterThan(-1);
     expect(comparisonSource.indexOf('assertProviderWebSearchMessagesSupported')).toBeLessThan(
@@ -598,14 +606,17 @@ describe('Android mobile UI regressions', () => {
   });
 
   it('removes only the selected system instruction and preserves later conversation history', async () => {
-    const appSource = await source('src/features/chat/ChatPane.tsx');
+    const [appSource, rowSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
+      source('src/features/chat/internal/presentation/ChatMessageRow.tsx'),
+    ]);
     const handlerSource = appSource.slice(
       appSource.indexOf('async function removeSystemInstruction'),
       appSource.indexOf('async function removeMessage')
     );
-    const systemCardSource = appSource.slice(
-      appSource.indexOf(") : message.role === 'system' ? ("),
-      appSource.indexOf('<AssistantMessageHeader')
+    const systemCardSource = rowSource.slice(
+      rowSource.indexOf(") : displayMessage.role === 'system' ? ("),
+      rowSource.indexOf('<AssistantMessageHeader')
     );
 
     expect(handlerSource).toContain("message.role !== 'system'");
@@ -614,9 +625,10 @@ describe('Android mobile UI regressions', () => {
     expect(handlerSource).not.toContain('.slice(0,');
     expect(handlerSource).not.toContain('deletePersistedAttachments');
     expect(systemCardSource).toContain(
-      'onPress={() => void removeSystemInstruction(message)}'
+      'onPress={() => onRemoveSystemInstruction(displayMessage)}'
     );
-    expect(systemCardSource).not.toContain('removeMessage(message)');
+    expect(systemCardSource).not.toContain('onDelete(');
+    expect(appSource).toContain('onRemoveSystemInstruction={handleRowRemoveSystemInstruction}');
   });
 
   it('keeps assistant editing unavailable in both direct and overflow message actions', async () => {
@@ -713,5 +725,84 @@ describe('Android mobile UI regressions', () => {
     expect(audioSource).toContain("if (platform !== 'android')");
     expect(audioSource).toContain('An API key supplied by the user is required');
     expect(audioSource).toContain('buildOpenAiFileBackedTranscriptionRequest');
+  });
+
+  it('virtualizes chat messages, isolates streaming drafts, and eliminates modal/overlay collisions', async () => {
+    const [appSource, stylesSource, rowSource, panelSource, mobileSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
+      source('src/features/chat/chatPaneStyles.ts'),
+      source('src/features/chat/internal/presentation/ChatMessageRow.tsx'),
+      source('src/ui/components/SearchServicesPanel.tsx'),
+      source('src/ui/mobile/MobileApplication.tsx'),
+    ]);
+
+    // B6: FlatList 虚拟化、智能吸底与“回到底部”按钮 + M3 composerTopSlot 插槽
+    expect(appSource).toContain('<FlatList');
+    expect(appSource).toContain('onScrollBeginDrag={handleChatScrollBeginDrag}');
+    expect(appSource).toContain('initialNumToRender={16}');
+    expect(appSource).toContain('maxToRenderPerBatch={8}');
+    expect(appSource).toContain("windowSize={Platform.OS === 'web' ? 21 : 9}");
+    expect(appSource).toContain("removeClippedSubviews={Platform.OS === 'android'}");
+    expect(appSource).toContain('testID="chat-scroll-to-bottom"');
+    expect(appSource).toContain('accessibilityLabel="回到底部"');
+    expect(appSource).toContain('composerTopSlot');
+
+    // B2: 流式草稿隔离路由 + ChatMessageRow React.memo 与 M3 图片插槽
+    const updateHandler = appSource.slice(
+      appSource.indexOf('function updateAssistantMessage('),
+      appSource.indexOf('function resolveMessageRuntime(')
+    );
+    expect(updateHandler).toContain("patch.status === 'pending'");
+    expect(updateHandler).toContain('publishStreamingDraft(');
+    expect(updateHandler).toContain('clearStreamingDraft(');
+    expect(updateHandler).toContain("type: 'message.update'");
+    expect(rowSource).toContain('memo(');
+    expect(rowSource).toContain('useStreamingDraftSelector(');
+    expect(rowSource).toContain('onEditImageAttachment');
+    expect(rowSource).toContain('onOpenImageLightbox');
+    expect(mobileSource).not.toContain('(snapshot) => snapshot');
+    expect(mobileSource).toContain('workspaceNeedsOnboarding');
+
+    // B5 & B7: 单一 Composer 浮层、SafeArea 去嵌套、SearchServicesPanel 去 Modal 与非遮挡 Popover
+    expect(appSource).toContain("type ComposerOverlayMenu = 'none' | 'attach' | 'reasoning' | 'parameter' | 'search' | 'slash'");
+    expect(appSource).not.toContain('<SafeAreaView');
+    expect(appSource).toContain('useSafeAreaInsets()');
+    expect(stylesSource).toContain("'100dvh'");
+    expect(panelSource).not.toContain('<Modal');
+    expect(panelSource).toContain('<OverlayPortal');
+    expect(panelSource).toContain('composerPopover');
+  });
+
+  it('prevents near-bottom drag stealing, content-shrink false scroll-up, stale menus, and compact search sheet collapse', async () => {
+    const [appSource, panelSource] = await Promise.all([
+      source('src/features/chat/ChatPane.tsx'),
+      source('src/ui/components/SearchServicesPanel.tsx'),
+    ]);
+
+    expect(appSource).toContain('const isUserDraggingRef = useRef(false);');
+    expect(appSource).toContain('onScrollEndDrag={handleChatScrollEndDrag}');
+    expect(appSource).toContain('onMomentumScrollEnd={handleChatMomentumScrollEnd}');
+    expect(appSource).toContain('nearBottom && !scrolledUp && !isUserDraggingRef.current');
+    expect(appSource).toContain('const contentShrunk = contentSize.height < lastContentHeightRef.current - 2;');
+    expect(appSource).toContain('!contentShrunk');
+
+    const convEffect = appSource.slice(
+      appSource.indexOf('setChatMessageRenderLimit(initialChatMessageRenderLimit);'),
+      appSource.indexOf('}, [workspace.activeConversationId]);')
+    );
+    expect(convEffect).toContain('shouldAutoScrollRef.current = true;');
+    expect(convEffect).toContain('isUserDraggingRef.current = false;');
+
+    const topBarSection = appSource.slice(
+      appSource.indexOf('accessibilityLabel="打开聊天记录"'),
+      appSource.indexOf('styles.topHeaderActions')
+    );
+    expect(topBarSection).toContain('closeComposerMenu();\n                      projectsNavigation.openDrawer();');
+    expect(topBarSection).toContain('closeComposerMenu();\n                      if (needsConfiguration)');
+
+    expect(panelSource).toContain('const isCompact = popoverMaxH <= 180;');
+    expect(panelSource).toContain('Math.max(48, popoverMaxH - 66)');
+    expect(panelSource).toContain('composerSheetCompact');
+    expect(panelSource).toContain('masterCardCompact');
   });
 });

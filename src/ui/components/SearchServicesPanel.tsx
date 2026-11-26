@@ -7,7 +7,7 @@ import {
 } from 'react';
 import {
   Dimensions,
-  Modal,
+  KeyboardAvoidingView,
   Platform,
   Pressable,
   ScrollView,
@@ -18,7 +18,7 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Bing, Grok, Tavily } from '@lobehub/icons-rn';
+import { Bing, DeepSeek, Exa, Grok, Tavily } from '@lobehub/icons-rn';
 import {
   Activity,
   Check,
@@ -38,18 +38,28 @@ import type {
 } from '../../domain/types';
 import {
   DEFAULT_GROK_SEARCH_MODEL,
+  allExternalSearchProviderHints,
+  allExternalSearchProviderKinds,
+  allExternalSearchProviderLabels,
   externalSearchProviderAllowsAnonymous,
-  externalSearchProviderHints,
-  externalSearchProviderKinds,
-  externalSearchProviderLabels,
   externalSearchProviderRequiresApiKey,
+  externalSearchProviderRequiresEndpoint,
   isExternalSearchServiceConfigured,
   runExternalSearch,
+  validateExternalSearchEndpoint,
 } from '../../services/externalSearch';
 import { guardedApiFetch } from '../../services/openAiCompatible';
 import { useKelivoTheme, type KelivoTheme } from '../theme';
+import { OverlayPortal } from './AppDialogHost';
 import { AnimatedPressable } from './AnimatedPressable';
-import { BraveMark, DuckDuckGoMark, FirecrawlMark } from './SearchBrandMarks';
+import {
+  BochaMark,
+  BraveMark,
+  DuckDuckGoMark,
+  ExaMark,
+  FirecrawlMark,
+  SearxngMark,
+} from './SearchBrandMarks';
 import { RowDivider, SectionCard, SectionHeader } from './settings/SettingsList';
 
 // Domain type re-export for context size used by settings.
@@ -84,6 +94,10 @@ const brandTint: Record<ExternalSearchProviderKind, string> = {
   brave: '#FB542B',
   firecrawl: '#E11D48',
   grok: '#111827',
+  deepseek: '#4D6BFE',
+  bocha: '#0EA5E9',
+  exa: '#1F40ED',
+  searxng: '#3050FF',
 };
 
 const brandLetter: Record<ExternalSearchProviderKind, string> = {
@@ -93,7 +107,130 @@ const brandLetter: Record<ExternalSearchProviderKind, string> = {
   brave: 'b',
   firecrawl: 'F',
   grok: 'G',
+  deepseek: 'D',
+  bocha: 'B',
+  exa: 'E',
+  searxng: 'S',
 };
+
+/** 全部 10 家外部搜索服务默认 Endpoint 输入占位提示。 */
+const endpointPlaceholderByKind: Record<ExternalSearchProviderKind, string> = {
+  tavily: 'https://api.tavily.com/search',
+  brave: 'https://api.search.brave.com/res/v1/web/search',
+  grok: 'https://api.x.ai/v1/responses',
+  bing: 'https://www.bing.com/search',
+  duckduckgo: 'https://html.duckduckgo.com/html/',
+  firecrawl: 'https://api.firecrawl.dev/v2/search',
+  deepseek: 'https://api.deepseek.com/v1/tools/search',
+  bocha: 'https://api.bochaai.com/v1/web-search',
+  exa: 'https://api.exa.ai/search',
+  searxng: 'https://search.example.com',
+};
+
+function escapeSanitizeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildPercentEncodedSecretPattern(encodedValue: string): RegExp {
+  const source = escapeSanitizeRegExp(encodedValue).replace(
+    /%([0-9a-f]{2})/gi,
+    (_, hex: string) => {
+      const upper = hex.toUpperCase();
+      const lower = hex.toLowerCase();
+      if (upper === '20') return '(?:%20|\\+)';
+      const c0 = upper[0] === lower[0] ? upper[0] : `[${upper[0]}${lower[0]}]`;
+      const c1 = upper[1] === lower[1] ? upper[1] : `[${upper[1]}${lower[1]}]`;
+      return `%${c0}${c1}`;
+    }
+  );
+  return new RegExp(source, 'g');
+}
+
+const SENSITIVE_URL_PARAM_RE =
+  /([?&#])(api[-_]?key|apikey|x[-_](?:api|auth|goog-api|subscription)[-_]?(?:key|token)|(?:ocp-apim-)?subscription[-_]key|access[-_]?token|refresh[-_]?token|id[-_]?token|session[-_]?token|security[-_]?token|auth[-_]?token|client[-_]?secret|secret[-_]?key|private[-_]?key|key|token|secret|password|passwd|credential|signature)=([^&#\s"'<>()[\]{}]+)/gi;
+
+const SENSITIVE_AUTH_SCHEME_RE = /\b(Bearer|Basic)\s+[A-Za-z0-9._\-+/=%:~]+/gi;
+
+const AUTH_SCHEME_PREFIX =
+  '(?:(?:bearer|basic|token|oauth|key|secret|negotiate|ntlm|aws4-hmac-sha256|api[-_]?key|apikey|digest|hmac|signature)\\s+)?';
+
+const SENSITIVE_AUTH_HEADER_RE = new RegExp(
+  `\\b((?:proxy[-_]?)?authorization\\s*[:=]\\s*${AUTH_SCHEME_PREFIX})[^\\s"'<>()\\[\\]{},;&#]+`,
+  'gi'
+);
+
+const SENSITIVE_JSON_DOUBLE_QUOTED_RE =
+  /(")(proxy[-_]?authorization|authorization|x[-_]?api[-_]?key|x[-_]?goog[-_]?api[-_]?key|x[-_]?auth[-_]?token|x[-_]?api[-_]?token|x[-_]?subscription[-_]?token|(?:ocp-apim-)?subscription[-_]?key|x-amz-(?:security-token|signature|credential)|api[-_]?key|apikey|access[-_]?token|refresh[-_]?token|id[-_]?token|session[-_]?token|security[-_]?token|auth[-_]?token|client[-_]?secret|secret[-_]?key|private[-_]?key|token|secret|password|passwd|credential|signature|key)("\s*:\s*")((?:\\.|[^"\\])+)"?/gi;
+
+const SENSITIVE_JSON_SINGLE_QUOTED_RE =
+  /(')(proxy[-_]?authorization|authorization|x[-_]?api[-_]?key|x[-_]?goog[-_]?api[-_]?key|x[-_]?auth[-_]?token|x[-_]?api[-_]?token|x[-_]?subscription[-_]?token|(?:ocp-apim-)?subscription[-_]?key|x-amz-(?:security-token|signature|credential)|api[-_]?key|apikey|access[-_]?token|refresh[-_]?token|id[-_]?token|session[-_]?token|security[-_]?token|auth[-_]?token|client[-_]?secret|secret[-_]?key|private[-_]?key|token|secret|password|passwd|credential|signature|key)('\s*:\s*')((?:\\.|[^'\\])+)'?/gi;
+
+// 与 JSON 引号规则同步字段清单，并在引号值正则中额外覆盖无引号键的 Authorization / Proxy-Authorization。
+const SENSITIVE_HEADER_FIELDS =
+  'x[-_]api[-_]key|x[-_]goog[-_]api[-_]key|x[-_]auth[-_]token|x[-_]api[-_]token|x[-_]subscription[-_]token|(?:ocp-apim-)?subscription[-_]key|x-amz-(?:security-token|signature|credential)|api[-_]?key|apikey|access[-_]?token|refresh[-_]?token|id[-_]?token|session[-_]?token|security[-_]?token|auth[-_]?token|client[-_]?secret|secret[-_]?key|private[-_]?key|token|secret|password|passwd|credential|signature';
+
+const SENSITIVE_QUOTED_HEADER_FIELDS = `(?:proxy[-_]?authorization|authorization)\\s*[:=]\\s*${AUTH_SCHEME_PREFIX}|(?:${SENSITIVE_HEADER_FIELDS})\\s*[:=]\\s*`;
+
+const SENSITIVE_UNQUOTED_KEY_DOUBLE_VAL_RE = new RegExp(
+  `\\b((?:${SENSITIVE_QUOTED_HEADER_FIELDS})")((?:\\\\.|[^"\\\\])+)"?`,
+  'gi'
+);
+
+const SENSITIVE_UNQUOTED_KEY_SINGLE_VAL_RE = new RegExp(
+  `\\b((?:${SENSITIVE_QUOTED_HEADER_FIELDS})')((?:\\\\.|[^'\\\\])+)'?`,
+  'gi'
+);
+
+const SENSITIVE_UNQUOTED_KEY_PLAIN_VAL_RE = new RegExp(
+  `\\b((?:${SENSITIVE_HEADER_FIELDS})\\s*[:=]\\s*)[^\\s"'<>()\\[\\]{},;&#]+`,
+  'gi'
+);
+
+/** 对连接测试异常消息进行脱敏与长度截断，防止意外回显密钥与 URL 凭据。 */
+export function formatSanitizedConnectionError(
+  error: unknown,
+  rawApiKey?: string
+): string {
+  const rawMessage =
+    error instanceof Error ? error.message : '连接测试失败，请检查配置。';
+  let sanitized = rawMessage.replace(/\s+/g, ' ').trim();
+  const trimmedKey = rawApiKey?.trim();
+  // 仅当用户密钥长度达到 4 位时执行字面与百分号编码替换，避免短测试字符误伤提示文本。
+  if (trimmedKey && trimmedKey.length >= 4) {
+    sanitized = sanitized.split(trimmedKey).join('***');
+    const encodedKey = encodeURIComponent(trimmedKey);
+    if (encodedKey && encodedKey !== trimmedKey) {
+      sanitized = sanitized.replace(
+        buildPercentEncodedSecretPattern(encodedKey),
+        '***'
+      );
+    }
+  }
+  sanitized = sanitized
+    // 1. URL userinfo 凭据（含 user:pass@、单用户名 user@、多 @ 特殊密码及 :@）
+    .replace(/(\b[a-z][a-z0-9+.-]{1,15}:\/\/)[^\s/?#"'<>]*@/gi, '$1***@')
+    // 2. URL query 与 hash fragment 敏感参数（保留空参数如 api_key=&token=***）
+    .replace(SENSITIVE_URL_PARAM_RE, '$1$2=***')
+    // 3. Bearer / Basic 方案（含 URL-safe Base64 `-`/`_`/`.` 与 `%`/`:`/`~`）
+    .replace(SENSITIVE_AUTH_SCHEME_RE, '$1 ***')
+    // 4. JSON / 单引号键值对（支持转义引号与日志截断未闭合引号）
+    .replace(SENSITIVE_JSON_DOUBLE_QUOTED_RE, '$1$2$3***"')
+    .replace(SENSITIVE_JSON_SINGLE_QUOTED_RE, "$1$2$3***'")
+    // 5. 无引号键名接引号值（含 Authorization / Proxy-Authorization 及带方案后接引号）
+    .replace(SENSITIVE_UNQUOTED_KEY_DOUBLE_VAL_RE, '$1***"')
+    .replace(SENSITIVE_UNQUOTED_KEY_SINGLE_VAL_RE, "$1***'")
+    // 6. Authorization / Proxy-Authorization 无引号鉴权方案或裸凭据（在引号脱敏后执行，防方案名被误替而遗留引号原文）
+    .replace(SENSITIVE_AUTH_HEADER_RE, '$1***')
+    // 7. 其余无引号键名接无引号值（含 Signature=、Ocp-Apim-Subscription-Key 等）
+    .replace(SENSITIVE_UNQUOTED_KEY_PLAIN_VAL_RE, '$1***')
+    // 8. 常见服务商 API Key 前缀兜底
+    .replace(/\b(?:sk|tvly|bsk|fc|xai|exa)-[A-Za-z0-9_\-]{6,}/gi, '***')
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{16,}/g, '***')
+    .replace(/\bAIza[0-9A-Za-z_\-]{20,}/g, '***');
+
+  if (!sanitized) return '连接测试失败，请检查配置。';
+  return sanitized.length > 160 ? `${sanitized.slice(0, 157)}...` : sanitized;
+}
 
 function renderBrandMark(
   kind: ExternalSearchProviderKind,
@@ -106,6 +243,32 @@ function renderBrandMark(
   if (kind === 'brave') return <BraveMark size={iconSize} />;
   if (kind === 'firecrawl') return <FirecrawlMark size={iconSize} />;
   if (kind === 'duckduckgo') return <DuckDuckGoMark size={iconSize} />;
+  if (kind === 'deepseek') {
+    let DeepSeekIcon: typeof DeepSeek.Color | typeof DeepSeek | undefined;
+    try {
+      const candidate = DeepSeek?.Color ?? DeepSeek;
+      if (typeof candidate === 'function') {
+        DeepSeekIcon = candidate;
+      }
+    } catch {
+      DeepSeekIcon = undefined;
+    }
+    if (DeepSeekIcon) return <DeepSeekIcon size={iconSize} />;
+  }
+  if (kind === 'exa') {
+    let ExaIcon: typeof Exa.Color | typeof Exa | undefined;
+    try {
+      const candidate = Exa?.Color ?? Exa;
+      if (typeof candidate === 'function') {
+        ExaIcon = candidate;
+      }
+    } catch {
+      ExaIcon = undefined;
+    }
+    return ExaIcon ? <ExaIcon size={iconSize} /> : <ExaMark size={iconSize} />;
+  }
+  if (kind === 'bocha') return <BochaMark size={iconSize} />;
+  if (kind === 'searxng') return <SearxngMark size={iconSize} />;
   return (
     <Text
       style={{
@@ -285,6 +448,9 @@ export const SearchServicesPanel = forwardRef<
   const [connectionStatus, setConnectionStatus] = useState<
     Record<string, 'ok' | 'fail' | undefined>
   >({});
+  const [connectionErrors, setConnectionErrors] = useState<
+    Record<string, string | undefined>
+  >({});
 
   useImperativeHandle(ref, () => ({
     openAdd: () => {
@@ -326,14 +492,23 @@ export const SearchServicesPanel = forwardRef<
   const formAllowsAnonymous = formKind
     ? externalSearchProviderAllowsAnonymous(formKind, endpoint)
     : false;
-  const canSubmitForm = Boolean(formKind) && (formRequiresKey ? Boolean(apiKey.trim()) : true);
+  const formRequiresEndpoint = formKind
+    ? externalSearchProviderRequiresEndpoint(formKind)
+    : false;
+  const endpointValidation = formKind
+    ? validateExternalSearchEndpoint(formKind, endpoint)
+    : { ok: true as const, endpoint: undefined };
+  const canSubmitForm =
+    Boolean(formKind) &&
+    (formRequiresKey ? Boolean(apiKey.trim()) : true) &&
+    endpointValidation.ok;
 
   const handleSubmit = () => {
-    if (!formKind || !canSubmitForm) return;
+    if (!formKind || !canSubmitForm || !endpointValidation.ok) return;
     onAddExternalService({
       kind: formKind,
       apiKey: apiKey.trim() || undefined,
-      ...(endpoint.trim() ? { endpoint: endpoint.trim() } : {}),
+      ...(endpointValidation.endpoint ? { endpoint: endpointValidation.endpoint } : {}),
       ...(formKind === 'grok' && model.trim() ? { model: model.trim() } : {}),
       ...(editingServiceId ? { serviceId: editingServiceId } : {}),
     });
@@ -354,6 +529,7 @@ export const SearchServicesPanel = forwardRef<
   const testServiceConnection = async (service: ExternalSearchService) => {
     setActionService(null);
     setTestingServiceId(service.id);
+    setConnectionErrors((current) => ({ ...current, [service.id]: undefined }));
     try {
       await runExternalSearch({
         query: 'connectivity test',
@@ -363,8 +539,13 @@ export const SearchServicesPanel = forwardRef<
         fetchImpl: guardedApiFetch,
       });
       setConnectionStatus((current) => ({ ...current, [service.id]: 'ok' }));
-    } catch {
+      setConnectionErrors((current) => ({ ...current, [service.id]: undefined }));
+    } catch (error) {
       setConnectionStatus((current) => ({ ...current, [service.id]: 'fail' }));
+      setConnectionErrors((current) => ({
+        ...current,
+        [service.id]: formatSanitizedConnectionError(error, service.apiKey),
+      }));
     } finally {
       setTestingServiceId(null);
     }
@@ -387,7 +568,7 @@ export const SearchServicesPanel = forwardRef<
             <Text style={styles.settingsTitle}>服务商内置</Text>
             <Text style={styles.settingsHint} numberOfLines={1}>
               {webSearchReady
-                ? 'OpenAI / 方舟 / 百炼官方搜索'
+                ? 'OpenAI / Claude / Gemini / Grok / DeepSeek / 方舟 / 百炼'
                 : '当前模型或端点未满足条件'}
             </Text>
           </View>
@@ -422,6 +603,7 @@ export const SearchServicesPanel = forwardRef<
 
         {externalSearch.services.map((service) => {
           const status = connectionStatus[service.id];
+          const connectionError = connectionErrors[service.id];
           const testing = testingServiceId === service.id;
           return (
             <View key={service.id}>
@@ -463,20 +645,36 @@ export const SearchServicesPanel = forwardRef<
                 ) : null}
                 <ChevronRight size={16} color={colors.textTertiary} strokeWidth={2} />
               </AnimatedPressable>
+              {status === 'fail' && connectionError ? (
+                <Text
+                  testID="search-service-connection-error"
+                  style={styles.connectionErrorText}
+                  numberOfLines={2}
+                >
+                  {connectionError}
+                </Text>
+              ) : null}
             </View>
           );
         })}
       </SectionCard>
 
       {/* Long-press actions — kelivo style: 测试连接 / 删除 */}
-      <Modal
+      <OverlayPortal
         visible={actionService != null}
-        transparent
-        animationType="fade"
-        statusBarTranslucent
+        layer="sheet"
         onRequestClose={() => setActionService(null)}
       >
-        <View style={styles.sheetScrim}>
+        <View
+          style={[
+            styles.sheetScrim,
+            {
+              paddingTop: Math.max(16, insets.top),
+              paddingLeft: insets.left,
+              paddingRight: insets.right,
+            },
+          ]}
+        >
           <Pressable
             style={StyleSheet.absoluteFill}
             onPress={() => setActionService(null)}
@@ -521,7 +719,7 @@ export const SearchServicesPanel = forwardRef<
             </AnimatedPressable>
           </View>
         </View>
-      </Modal>
+      </OverlayPortal>
 
       <SectionHeader title="通用选项" />
       <SectionCard>
@@ -555,14 +753,21 @@ export const SearchServicesPanel = forwardRef<
       </SectionCard>
 
       {/* Add provider picker — full scrollable bottom sheet (no mid-list clip) */}
-      <Modal
+      <OverlayPortal
         visible={addPickerOpen}
-        transparent
-        animationType="fade"
-        statusBarTranslucent
+        layer="sheet"
         onRequestClose={closeForms}
       >
-        <View style={styles.sheetScrim}>
+        <View
+          style={[
+            styles.sheetScrim,
+            {
+              paddingTop: Math.max(16, insets.top),
+              paddingLeft: insets.left,
+              paddingRight: insets.right,
+            },
+          ]}
+        >
           <Pressable style={StyleSheet.absoluteFill} onPress={closeForms} />
           <View
             style={[
@@ -579,7 +784,7 @@ export const SearchServicesPanel = forwardRef<
               showsVerticalScrollIndicator
               keyboardShouldPersistTaps="handled"
             >
-              {externalSearchProviderKinds.map((kind) => (
+              {allExternalSearchProviderKinds.map((kind) => (
                 <AnimatedPressable
                   key={kind}
                   accessibilityRole="button"
@@ -591,9 +796,9 @@ export const SearchServicesPanel = forwardRef<
                 >
                   <SearchServiceIcon kind={kind} size={28} color={colors.primary} />
                   <View style={styles.settingsTextBlock}>
-                    <Text style={styles.pickTitle}>{externalSearchProviderLabels[kind]}</Text>
+                    <Text style={styles.pickTitle}>{allExternalSearchProviderLabels[kind]}</Text>
                     <Text style={styles.settingsHint} numberOfLines={2}>
-                      {externalSearchProviderHints[kind]}
+                      {allExternalSearchProviderHints[kind]}
                     </Text>
                   </View>
                   <ChevronRight size={16} color={colors.textTertiary} strokeWidth={2} />
@@ -602,122 +807,138 @@ export const SearchServicesPanel = forwardRef<
             </ScrollView>
           </View>
         </View>
-      </Modal>
+      </OverlayPortal>
 
       {/* Provider config form */}
-      <Modal
+      <OverlayPortal
         visible={formKind != null}
-        transparent
-        animationType="fade"
-        statusBarTranslucent
+        layer="sheet"
         onRequestClose={closeForms}
       >
-        <View style={styles.sheetScrim}>
+        <View
+          style={[
+            styles.sheetScrim,
+            {
+              paddingTop: Math.max(16, insets.top),
+              paddingLeft: insets.left,
+              paddingRight: insets.right,
+            },
+          ]}
+        >
           <Pressable style={StyleSheet.absoluteFill} onPress={closeForms} />
-          <View
-            style={[
-              styles.sheet,
-              { maxHeight: sheetMaxH, paddingBottom: sheetBottomPad },
-            ]}
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={styles.sheetKeyboard}
           >
-            <View style={styles.sheetHandle} />
-            <ScrollView
-              keyboardShouldPersistTaps="handled"
-              bounces={false}
-              showsVerticalScrollIndicator={false}
+            <View
+              style={[
+                styles.sheet,
+                { maxHeight: sheetMaxH, paddingBottom: sheetBottomPad },
+              ]}
             >
-              <View style={styles.formHeader}>
-                {formKind ? (
-                  <SearchServiceIcon kind={formKind} size={32} color={colors.primary} />
-                ) : null}
-                <Text style={[styles.sheetTitle, { marginBottom: 4 }]}>
-                  {formKind ? externalSearchProviderLabels[formKind] : ''}
-                </Text>
-              </View>
-              {formKind ? (
-                <Text style={styles.formHint}>{externalSearchProviderHints[formKind]}</Text>
-              ) : null}
-              <View style={styles.formField}>
-                <Text style={styles.formLabel}>
-                  API Key{formRequiresKey ? '' : formAllowsAnonymous ? '（可选）' : ''}
-                </Text>
-                <TextInput
-                  value={apiKey}
-                  onChangeText={setApiKey}
-                  placeholder={
-                    formRequiresKey
-                      ? '粘贴你的 API Key'
-                      : formKind === 'firecrawl'
-                        ? '可留空使用匿名额度；填写可提升额度'
-                        : '可留空'
-                  }
-                  placeholderTextColor={colors.placeholder}
-                  secureTextEntry
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  style={styles.formInput}
-                />
-              </View>
-              {formKind === 'grok' ? (
-                <View style={styles.formField}>
-                  <Text style={styles.formLabel}>模型</Text>
-                  <TextInput
-                    value={model}
-                    onChangeText={setModel}
-                    placeholder={DEFAULT_GROK_SEARCH_MODEL}
-                    placeholderTextColor={colors.placeholder}
-                    autoCapitalize="none"
-                    style={styles.formInput}
-                  />
+              <View style={styles.sheetHandle} />
+              <ScrollView
+                keyboardShouldPersistTaps="handled"
+                bounces={false}
+                showsVerticalScrollIndicator={false}
+              >
+                <View style={styles.formHeader}>
+                  {formKind ? (
+                    <SearchServiceIcon kind={formKind} size={32} color={colors.primary} />
+                  ) : null}
+                  <Text style={[styles.sheetTitle, { marginBottom: 4 }]}>
+                    {formKind ? allExternalSearchProviderLabels[formKind] : ''}
+                  </Text>
                 </View>
-              ) : null}
-              {formKind === 'tavily' ||
-              formKind === 'grok' ||
-              formKind === 'firecrawl' ||
-              formKind === 'bing' ||
-              formKind === 'duckduckgo' ||
-              formKind === 'brave' ? (
+                {formKind ? (
+                  <Text style={styles.formHint}>{allExternalSearchProviderHints[formKind]}</Text>
+                ) : null}
                 <View style={styles.formField}>
-                  <Text style={styles.formLabel}>自定义 URL（可选）</Text>
+                  <Text style={styles.formLabel}>
+                    API Key{formRequiresKey ? '' : formAllowsAnonymous ? '（可选）' : ''}
+                  </Text>
                   <TextInput
-                    value={endpoint}
-                    onChangeText={setEndpoint}
+                    testID="search-service-form-apikey"
+                    value={apiKey}
+                    onChangeText={setApiKey}
                     placeholder={
-                      formKind === 'grok'
-                        ? 'https://api.x.ai/v1/responses'
+                      formRequiresKey
+                        ? '粘贴你的 API Key'
                         : formKind === 'firecrawl'
-                          ? 'https://api.firecrawl.dev/v2/search'
-                          : formKind === 'bing'
-                            ? 'https://www.bing.com/search'
-                            : formKind === 'duckduckgo'
-                              ? 'https://html.duckduckgo.com/html/'
-                              : formKind === 'brave'
-                                ? 'https://api.search.brave.com/res/v1/web/search'
-                                : 'https://api.tavily.com/search'
+                          ? '可留空使用匿名额度；填写可提升额度'
+                          : formKind === 'searxng'
+                            ? '可留空；若实例开启鉴权可填写 Bearer Token'
+                            : '可留空'
                     }
                     placeholderTextColor={colors.placeholder}
+                    secureTextEntry
                     autoCapitalize="none"
                     autoCorrect={false}
                     style={styles.formInput}
                   />
                 </View>
-              ) : null}
-              <AnimatedPressable
-                accessibilityRole="button"
-                disabled={readOnly || !canSubmitForm}
-                testID="search-service-form-submit"
-                onPress={handleSubmit}
-                haptic="light"
-                style={[styles.sheetPrimary, (!canSubmitForm || readOnly) && styles.disabled]}
-              >
-                <Text style={styles.sheetPrimaryText}>
-                  {editingServiceId ? '保存' : '添加'}
-                </Text>
-              </AnimatedPressable>
-            </ScrollView>
-          </View>
+                {formKind === 'grok' ? (
+                  <View style={styles.formField}>
+                    <Text style={styles.formLabel}>模型</Text>
+                    <TextInput
+                      testID="search-service-form-model"
+                      value={model}
+                      onChangeText={setModel}
+                      placeholder={DEFAULT_GROK_SEARCH_MODEL}
+                      placeholderTextColor={colors.placeholder}
+                      autoCapitalize="none"
+                      style={styles.formInput}
+                    />
+                  </View>
+                ) : null}
+                {formKind ? (
+                  <View style={styles.formField}>
+                    <Text style={styles.formLabel}>
+                      {formRequiresEndpoint ? '实例 URL（必填，HTTPS）' : '自定义 URL（可选）'}
+                    </Text>
+                    <TextInput
+                      testID="search-service-form-endpoint"
+                      value={endpoint}
+                      onChangeText={setEndpoint}
+                      placeholder={endpointPlaceholderByKind[formKind]}
+                      placeholderTextColor={colors.placeholder}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      style={styles.formInput}
+                    />
+                    {formKind === 'searxng' ? (
+                      <Text style={styles.formFieldNote}>
+                        需启用 SearXNG format=json 输出；仅支持公网 HTTPS 地址，禁止 http:// 或内网地址。
+                      </Text>
+                    ) : null}
+                  </View>
+                ) : null}
+                {!endpointValidation.ok ? (
+                  <Text
+                    testID="search-service-form-error"
+                    accessibilityLiveRegion="assertive"
+                    style={styles.formError}
+                  >
+                    {endpointValidation.error}
+                  </Text>
+                ) : null}
+                <AnimatedPressable
+                  accessibilityRole="button"
+                  disabled={readOnly || !canSubmitForm}
+                  testID="search-service-form-submit"
+                  onPress={handleSubmit}
+                  haptic="light"
+                  style={[styles.sheetPrimary, (!canSubmitForm || readOnly) && styles.disabled]}
+                >
+                  <Text style={styles.sheetPrimaryText}>
+                    {editingServiceId ? '保存' : '添加'}
+                  </Text>
+                </AnimatedPressable>
+              </ScrollView>
+            </View>
+          </KeyboardAvoidingView>
         </View>
-      </Modal>
+      </OverlayPortal>
     </View>
   );
 });
@@ -732,7 +953,8 @@ export function ComposerSearchSheet({
   webSearchReady,
   externalSearch,
   modelSupportsTools,
-  onClose,
+  maxHeight,
+  onClose: _onClose,
   onSelectOff,
   onSelectProvider,
   onSelectExternal,
@@ -743,6 +965,7 @@ export function ComposerSearchSheet({
   webSearchReady: boolean;
   externalSearch: ExternalSearchSettings;
   modelSupportsTools: boolean;
+  maxHeight?: number;
   onClose: () => void;
   onSelectOff: () => void;
   onSelectProvider: () => void;
@@ -752,10 +975,8 @@ export function ComposerSearchSheet({
   const theme = useKelivoTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const { colors } = theme;
-  const insets = useSafeAreaInsets();
   const windowH = Dimensions.get('window').height;
   const sheetMaxH = Math.round(windowH * 0.72);
-  const sheetBottomPad = Math.max(insets.bottom, 16) + 8;
   const searchOn = webSearchEnabled || externalSearch.enabled;
 
   const handleToggle = (next: boolean) => {
@@ -788,159 +1009,163 @@ export function ComposerSearchSheet({
     onSelectProvider();
   };
 
+  if (!visible) return null;
+
+  const popoverMaxH =
+    maxHeight !== undefined
+      ? Math.max(120, Math.min(sheetMaxH, maxHeight))
+      : sheetMaxH;
+  const isCompact = popoverMaxH <= 180;
+  // 紧凑模式固定头部总高：composerSheetCompact(4+4+2=10) + title(16+2=18) + masterCardCompact(34+4=38) = 66px
+  const listMaxH = isCompact
+    ? Math.max(48, popoverMaxH - 66)
+    : Math.max(80, Math.min(320, popoverMaxH - 130));
+
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      statusBarTranslucent
-      onRequestClose={onClose}
-    >
-      <View style={styles.sheetScrim} testID="composer-search-menu">
-        <Pressable
-          style={StyleSheet.absoluteFill}
-          accessibilityRole="button"
-          accessibilityLabel="关闭搜索设置"
-          onPress={onClose}
-        />
-        <View
-          style={[
-            styles.composerSheet,
-            { maxHeight: sheetMaxH, paddingBottom: sheetBottomPad },
-          ]}
-          testID="composer-search-tags"
-        >
-            <View style={styles.sheetHandle} />
-            <Text style={styles.sheetTitle}>搜索设置</Text>
+    <View style={styles.composerPopover} testID="composer-search-menu">
+      <View
+        style={[
+          styles.composerSheet,
+          isCompact && styles.composerSheetCompact,
+          { maxHeight: popoverMaxH },
+        ]}
+        testID="composer-search-tags"
+      >
+        {!isCompact ? <View style={styles.sheetHandle} /> : null}
+        <Text style={[styles.sheetTitle, isCompact && styles.sheetTitleCompact]}>搜索设置</Text>
 
-            {/* Master: 网络搜索 + gear + switch — kelivo IosCardPress row */}
-            <View style={styles.masterCard}>
-              <View style={styles.masterLeft}>
-                <Globe2 size={20} color={colors.primary} strokeWidth={2.1} />
-                <Text style={styles.masterTitle}>网络搜索</Text>
-              </View>
-              <View style={styles.masterRight}>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  accessibilityLabel="管理搜索服务"
-                  testID="composer-search-manage"
-                  onPress={onManage}
-                  style={styles.masterGear}
-                  hitSlop={10}
-                  haptic="light"
-                >
-                  <Settings size={20} color={colors.textSecondary} strokeWidth={2} />
-                </AnimatedPressable>
-                <Switch
-                  value={searchOn}
-                  onValueChange={handleToggle}
-                  trackColor={{
-                    false: colors.outlineVariant,
-                    true: colors.primary,
-                  }}
-                  thumbColor={Platform.OS === 'android' ? colors.card : undefined}
-                  ios_backgroundColor={colors.outlineVariant}
-                  testID="composer-search-toggle"
-                />
-              </View>
-            </View>
+        {/* Master: 网络搜索 + gear + switch — kelivo IosCardPress row */}
+        <View style={[styles.masterCard, isCompact && styles.masterCardCompact]}>
+          <View style={styles.masterLeft}>
+            <Globe2 size={isCompact ? 18 : 20} color={colors.primary} strokeWidth={2.1} />
+            <Text style={styles.masterTitle}>网络搜索</Text>
+          </View>
+          <View style={styles.masterRight}>
+            <AnimatedPressable
+              accessibilityRole="button"
+              accessibilityLabel="管理搜索服务"
+              testID="composer-search-manage"
+              onPress={onManage}
+              style={[styles.masterGear, isCompact && styles.masterGearCompact]}
+              hitSlop={10}
+              haptic="light"
+            >
+              <Settings size={isCompact ? 17 : 20} color={colors.textSecondary} strokeWidth={2} />
+            </AnimatedPressable>
+            <Switch
+              value={searchOn}
+              onValueChange={handleToggle}
+              trackColor={{
+                false: colors.outlineVariant,
+                true: colors.primary,
+              }}
+              thumbColor={Platform.OS === 'android' ? colors.card : undefined}
+              ios_backgroundColor={colors.outlineVariant}
+              testID="composer-search-toggle"
+            />
+          </View>
+        </View>
 
-            {searchOn ? (
-              <ScrollView
-                style={styles.serviceListScroll}
-                contentContainerStyle={styles.serviceList}
-                bounces
-                showsVerticalScrollIndicator={false}
-                keyboardShouldPersistTaps="handled"
+        {searchOn ? (
+          <ScrollView
+            style={[styles.serviceListScroll, { maxHeight: listMaxH }]}
+            contentContainerStyle={styles.serviceList}
+            bounces
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+          >
+            {/* Built-in as independent rounded row */}
+            <AnimatedPressable
+              accessibilityRole="button"
+              accessibilityState={{
+                selected: webSearchEnabled,
+                disabled: !webSearchReady && !webSearchEnabled,
+              }}
+              disabled={!webSearchReady && !webSearchEnabled}
+              testID="composer-search-option-builtin"
+              onPress={onSelectProvider}
+              haptic="light"
+              pressScale={0.98}
+              style={[
+                styles.serviceCard,
+                isCompact && styles.serviceCardCompact,
+                (!webSearchReady && !webSearchEnabled) && styles.disabled,
+              ]}
+            >
+              <SearchServiceIcon
+                kind="builtin"
+                size={22}
+                color={colors.primary}
+                active={webSearchEnabled}
+              />
+              <Text
+                style={[
+                  styles.serviceName,
+                  webSearchEnabled && styles.serviceNameActive,
+                ]}
+                numberOfLines={1}
               >
-                {/* Built-in as independent rounded row */}
+                服务商内置
+              </Text>
+              {webSearchEnabled ? (
+                <Check size={18} color={colors.primary} strokeWidth={2.4} />
+              ) : (
+                <View style={styles.checkSpacer} />
+              )}
+            </AnimatedPressable>
+
+            {externalSearch.services.map((service) => {
+              const selected =
+                externalSearch.enabled &&
+                externalSearch.selectedServiceId === service.id;
+              const available =
+                isExternalSearchServiceConfigured(service) && modelSupportsTools;
+              return (
                 <AnimatedPressable
+                  key={service.id}
                   accessibilityRole="button"
-                  accessibilityState={{
-                    selected: webSearchEnabled,
-                    disabled: !webSearchReady && !webSearchEnabled,
-                  }}
-                  disabled={!webSearchReady && !webSearchEnabled}
-                  testID="composer-search-option-builtin"
-                  onPress={onSelectProvider}
+                  accessibilityState={{ selected, disabled: !available && !selected }}
+                  disabled={!available && !selected}
+                  testID={`composer-search-option-${service.kind}`}
+                  onPress={() => onSelectExternal(service.id)}
                   haptic="light"
                   pressScale={0.98}
                   style={[
                     styles.serviceCard,
-                    (!webSearchReady && !webSearchEnabled) && styles.disabled,
+                    isCompact && styles.serviceCardCompact,
+                    (!available && !selected) && styles.disabled,
                   ]}
                 >
                   <SearchServiceIcon
-                    kind="builtin"
+                    kind={service.kind}
                     size={22}
                     color={colors.primary}
-                    active={webSearchEnabled}
+                    active={selected}
                   />
                   <Text
-                    style={[
-                      styles.serviceName,
-                      webSearchEnabled && styles.serviceNameActive,
-                    ]}
+                    style={[styles.serviceName, selected && styles.serviceNameActive]}
                     numberOfLines={1}
                   >
-                    服务商内置
+                    {service.name}
                   </Text>
-                  {webSearchEnabled ? (
+                  {selected ? (
                     <Check size={18} color={colors.primary} strokeWidth={2.4} />
                   ) : (
                     <View style={styles.checkSpacer} />
                   )}
                 </AnimatedPressable>
+              );
+            })}
 
-                {externalSearch.services.map((service) => {
-                  const selected =
-                    externalSearch.enabled &&
-                    externalSearch.selectedServiceId === service.id;
-                  const available =
-                    isExternalSearchServiceConfigured(service) && modelSupportsTools;
-                  return (
-                    <AnimatedPressable
-                      key={service.id}
-                      accessibilityRole="button"
-                      accessibilityState={{ selected, disabled: !available && !selected }}
-                      disabled={!available && !selected}
-                      testID={`composer-search-option-${service.kind}`}
-                      onPress={() => onSelectExternal(service.id)}
-                      haptic="light"
-                      pressScale={0.98}
-                      style={[styles.serviceCard, (!available && !selected) && styles.disabled]}
-                    >
-                      <SearchServiceIcon
-                        kind={service.kind}
-                        size={22}
-                        color={colors.primary}
-                        active={selected}
-                      />
-                      <Text
-                        style={[styles.serviceName, selected && styles.serviceNameActive]}
-                        numberOfLines={1}
-                      >
-                        {service.name}
-                      </Text>
-                      {selected ? (
-                        <Check size={18} color={colors.primary} strokeWidth={2.4} />
-                      ) : (
-                        <View style={styles.checkSpacer} />
-                      )}
-                    </AnimatedPressable>
-                  );
-                })}
-
-                {externalSearch.services.length === 0 ? (
-                  <Text style={styles.emptyHint}>
-                    尚未添加外部搜索。点齿轮可添加 Bing / DuckDuckGo（免费）等。
-                  </Text>
-                ) : null}
-              </ScrollView>
+            {externalSearch.services.length === 0 ? (
+              <Text style={styles.emptyHint}>
+                尚未添加外部搜索。点齿轮可添加 Bing / DuckDuckGo（免费）等。
+              </Text>
             ) : null}
-        </View>
+          </ScrollView>
+        ) : null}
       </View>
-    </Modal>
+    </View>
   );
 }
 
@@ -1029,6 +1254,14 @@ function createStyles(theme: KelivoTheme) {
       color: '#D97706',
       fontSize: 11,
       fontWeight: '600',
+    },
+    connectionErrorText: {
+      color: colors.error,
+      fontSize: 12,
+      lineHeight: 16,
+      paddingHorizontal: 12,
+      paddingBottom: 10,
+      marginTop: -4,
     },
     actionSheet: {
       backgroundColor: colors.card,
@@ -1138,6 +1371,9 @@ function createStyles(theme: KelivoTheme) {
         ? ({ position: 'fixed', inset: 0 } as object)
         : {}),
     },
+    sheetKeyboard: {
+      width: '100%',
+    },
     sheet: {
       backgroundColor: colors.card,
       borderTopLeftRadius: 20,
@@ -1162,6 +1398,11 @@ function createStyles(theme: KelivoTheme) {
       fontWeight: '600',
       textAlign: 'center',
       marginBottom: 14,
+    },
+    sheetTitleCompact: {
+      fontSize: 12,
+      lineHeight: 16,
+      marginBottom: 2,
     },
     sheetListContent: {
       paddingBottom: 8,
@@ -1211,6 +1452,18 @@ function createStyles(theme: KelivoTheme) {
       color: colors.text,
       fontSize: 15,
     },
+    formFieldNote: {
+      color: colors.textSecondary,
+      fontSize: 12,
+      lineHeight: 16,
+      marginTop: 2,
+    },
+    formError: {
+      color: colors.error,
+      fontSize: 12,
+      lineHeight: 17,
+      marginBottom: 8,
+    },
     sheetPrimary: {
       marginTop: 8,
       minHeight: 48,
@@ -1225,15 +1478,37 @@ function createStyles(theme: KelivoTheme) {
       fontWeight: '600',
     },
 
-    /* Composer sheet — kelivo search_settings_sheet */
+    /* Composer popover — kelivo search_settings_sheet */
+    composerPopover: {
+      position: 'absolute',
+      bottom: '100%',
+      left: 0,
+      right: 0,
+      marginBottom: 8,
+      zIndex: 30,
+      elevation: 12,
+    },
     composerSheet: {
       backgroundColor: colors.card,
-      borderTopLeftRadius: 20,
-      borderTopRightRadius: 20,
+      borderRadius: 18,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.outline,
       paddingHorizontal: 16,
       paddingTop: 10,
+      paddingBottom: 12,
       width: '100%',
-      overflow: 'visible',
+      overflow: 'hidden',
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.12,
+      shadowRadius: 16,
+      elevation: 12,
+    },
+    composerSheetCompact: {
+      borderRadius: 14,
+      paddingHorizontal: 12,
+      paddingTop: 4,
+      paddingBottom: 4,
     },
     masterCard: {
       minHeight: 48,
@@ -1245,6 +1520,14 @@ function createStyles(theme: KelivoTheme) {
       paddingHorizontal: 12,
       paddingVertical: 6,
       marginBottom: 10,
+    },
+    masterCardCompact: {
+      minHeight: 34,
+      height: 34,
+      borderRadius: 10,
+      paddingHorizontal: 10,
+      paddingVertical: 2,
+      marginBottom: 4,
     },
     masterLeft: {
       flexDirection: 'row',
@@ -1269,8 +1552,14 @@ function createStyles(theme: KelivoTheme) {
       alignItems: 'center',
       justifyContent: 'center',
     },
+    masterGearCompact: {
+      width: 28,
+      height: 28,
+    },
     serviceListScroll: {
       flexGrow: 0,
+      flexShrink: 1,
+      minHeight: 0,
       maxHeight: 320,
     },
     serviceList: {
@@ -1286,6 +1575,10 @@ function createStyles(theme: KelivoTheme) {
       alignItems: 'center',
       paddingHorizontal: 12,
       gap: 10,
+    },
+    serviceCardCompact: {
+      height: 42,
+      borderRadius: 12,
     },
     serviceName: {
       flex: 1,

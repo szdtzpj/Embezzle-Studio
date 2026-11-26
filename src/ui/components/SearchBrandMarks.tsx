@@ -1,4 +1,4 @@
-import Svg, { Circle, Path } from 'react-native-svg';
+import Svg, { Circle, Path, Rect } from 'react-native-svg';
 
 /** Compact official-ish brand marks for search providers (list + toolbar). */
 
@@ -49,6 +49,52 @@ export function DuckDuckGoMark({ size = 16 }: { size?: number }) {
       />
       <Circle cx="11.2" cy="11.1" r="0.85" fill="#1a1a1a" />
       <Path d="M14.8 12.4c.9.2 1.8.1 2.5-.4.1.7-.3 1.4-1 1.7-.8.4-1.7.2-2.3-.3.3-.3.6-.7.8-1z" fill="#FFCC33" />
+    </Svg>
+  );
+}
+
+/** Bocha 博查搜索品牌图标（蓝色圆角底标 + 白色几何波纹检索标识）。 */
+export function BochaMark({ size = 16 }: { size?: number }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Rect x="2" y="2" width="20" height="20" rx="6" fill="#0EA5E9" />
+      <Circle cx="11" cy="11" r="4.2" stroke="#fff" strokeWidth="2.1" />
+      <Path
+        d="M14.3 14.3L18 18"
+        stroke="#fff"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+      />
+      <Circle cx="11" cy="11" r="1.4" fill="#BAE6FD" />
+    </Svg>
+  );
+}
+
+/** SearXNG 自托管元搜索品牌图标（品牌蓝环形放大镜）。 */
+export function SearxngMark({ size = 16 }: { size?: number }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Circle cx="10.5" cy="10.5" r="6.5" stroke="#3050FF" strokeWidth="2.8" />
+      <Circle cx="10.5" cy="10.5" r="2.2" fill="#3050FF" />
+      <Path
+        d="M15.4 15.4L20.5 20.5"
+        stroke="#3050FF"
+        strokeWidth="3"
+        strokeLinecap="round"
+      />
+    </Svg>
+  );
+}
+
+/** Exa AI 兜底品牌图标（当精简测试 mock 未提供 Exa.Color 时降级使用）。 */
+export function ExaMark({ size = 16 }: { size?: number }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Rect x="2" y="2" width="20" height="20" rx="5" fill="#1F40ED" />
+      <Path
+        d="M7.5 7.5H16.5V10H10.3V11H15.5V13.2H10.3V14.2H16.5V16.7H7.5V7.5Z"
+        fill="#fff"
+      />
     </Svg>
   );
 }

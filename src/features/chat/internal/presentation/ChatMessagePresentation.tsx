@@ -1,8 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Image,
   Linking,
-  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -35,6 +34,8 @@ import type {
   MessageRole,
   WebCitation,
 } from '../../../../domain/types';
+import { resolveMessageMarkdownLink } from '../../../../services/externalSearch';
+import { OverlayPortal } from '../../../../ui/components/AppDialogHost';
 import { ModelAvatar } from '../../../../ui/components/ModelAvatar';
 import { useChatMessagePresentationTheme } from './ChatMessagePresentationStyles';
 import { AnimatedPressable, IconCrossfade } from './ChatMotion';
@@ -315,23 +316,72 @@ function faviconUriForUrl(raw: string): string | null {
 }
 
 
+const CITATION_CARD_WIDTH = 212;
+const CITATION_CARD_GAP = 8;
+
+export interface WebCitationListProps {
+  citations: WebCitation[];
+  focusedCitationIndex?: number | null;
+  onFocusCitationChange?: (index: number | null) => void;
+}
+
+function resolveCitationDisplayIndex(
+  citation: WebCitation,
+  arrayIndex: number
+): number {
+  return typeof citation.index === 'number' && citation.index > 0
+    ? citation.index
+    : arrayIndex + 1;
+}
+
 /**
- * Collapsed citation chip (e.g. "47个引用"); tap opens a bottom sheet of sources.
- * Matches kelivo-style search result UX from the product reference.
+ * 引用摘要胶囊 + 横向来源卡片抽屉 + 底部全量来源 Sheet：
+ * 支持正文内联角标 `[n]` 点击联动横向滚动聚焦与高亮显示。
  */
-export function WebCitationList({ citations }: { citations: WebCitation[] }) {
+export function WebCitationList({
+  citations,
+  focusedCitationIndex = null,
+  onFocusCitationChange,
+}: WebCitationListProps) {
   const { palette, styles } = useChatMessagePresentationTheme();
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
   const [open, setOpen] = useState(false);
+  const carouselRef = useRef<ScrollView | null>(null);
   const count = citations.length;
   const preview = citations.slice(0, 3);
   const sheetMaxH = Math.round(windowHeight * 0.78);
 
+  useEffect(() => {
+    if (
+      typeof focusedCitationIndex !== 'number' ||
+      !Number.isFinite(focusedCitationIndex) ||
+      !citations.length
+    ) {
+      return;
+    }
+    const targetPos = citations.findIndex(
+      (citation, idx) => resolveCitationDisplayIndex(citation, idx) === focusedCitationIndex
+    );
+    if (targetPos < 0) return;
+    carouselRef.current?.scrollTo?.({
+      x: Math.max(0, targetPos * (CITATION_CARD_WIDTH + CITATION_CARD_GAP) - 12),
+      animated: true,
+    });
+  }, [focusedCitationIndex, citations]);
+
   if (!count) return null;
 
+  const openCitationSafely = (citation: WebCitation, displayIndex: number) => {
+    onFocusCitationChange?.(displayIndex);
+    const safeUrl = resolveMessageMarkdownLink(citation.url, citations);
+    if (safeUrl) {
+      void Linking.openURL(safeUrl).catch(() => undefined);
+    }
+  };
+
   return (
-    <>
+    <View style={styles.webCitationSection}>
       <AnimatedPressable
         accessibilityRole="button"
         accessibilityLabel={`${count}个引用，点按查看搜索结果`}
@@ -370,14 +420,95 @@ export function WebCitationList({ citations }: { citations: WebCitation[] }) {
         <Text style={styles.webCitationChipText}>{count}个引用</Text>
       </AnimatedPressable>
 
-      <Modal
+      {/* 横向滑动来源卡片抽屉，支持与正文 [n] 角标联动定位高亮 */}
+      <ScrollView
+        ref={carouselRef}
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        testID="web-citation-carousel"
+        style={styles.webCitationCarouselWrap}
+        contentContainerStyle={styles.webCitationCarousel}
+      >
+        {citations.map((citation, index) => {
+          const displayIndex = resolveCitationDisplayIndex(citation, index);
+          const isFocused = focusedCitationIndex === displayIndex;
+          const host = hostnameFromUrl(citation.url);
+          const favicon = faviconUriForUrl(citation.url);
+          return (
+            <AnimatedPressable
+              key={`${citation.url}:card:${index}`}
+              accessibilityRole="link"
+              accessibilityLabel={`打开第 ${displayIndex} 条来源 ${citation.title ?? host}`}
+              accessibilityState={{ selected: isFocused }}
+              testID={`web-citation-card-${displayIndex}`}
+              onPress={() => openCitationSafely(citation, displayIndex)}
+              style={[styles.webCitationCard, isFocused && styles.webCitationCardFocused]}
+            >
+              <View style={styles.webCitationCardTop}>
+                <View style={styles.webCitationCardHostRow}>
+                  {favicon ? (
+                    <Image source={{ uri: favicon }} style={styles.webCitationSheetFavicon} />
+                  ) : (
+                    <View
+                      style={[
+                        styles.webCitationSheetFavicon,
+                        styles.webCitationFaviconFallback,
+                      ]}
+                    >
+                      <Text style={styles.webCitationFaviconLetter}>
+                        {(host[0] ?? '?').toUpperCase()}
+                      </Text>
+                    </View>
+                  )}
+                  <Text style={styles.webCitationCardHost} numberOfLines={1}>
+                    {host}
+                  </Text>
+                </View>
+                <View
+                  style={[
+                    styles.webCitationCardBadge,
+                    isFocused && styles.webCitationCardBadgeFocused,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.webCitationCardBadgeText,
+                      isFocused && styles.webCitationCardBadgeTextFocused,
+                    ]}
+                  >
+                    {displayIndex}
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.webCitationCardTitle} numberOfLines={2}>
+                {citation.title?.trim() || host}
+              </Text>
+              {citation.text?.trim() ? (
+                <Text style={styles.webCitationCardSnippet} numberOfLines={2}>
+                  {citation.text.trim()}
+                </Text>
+              ) : null}
+            </AnimatedPressable>
+          );
+        })}
+      </ScrollView>
+
+      <OverlayPortal
         visible={open}
-        transparent
-        animationType="fade"
-        statusBarTranslucent
+        layer="sheet"
         onRequestClose={() => setOpen(false)}
       >
-        <View style={styles.webCitationSheetScrim} testID="web-citation-sheet">
+        <View
+          style={[
+            styles.webCitationSheetScrim,
+            {
+              paddingTop: Math.max(16, insets.top),
+              paddingLeft: insets.left,
+              paddingRight: insets.right,
+            },
+          ]}
+          testID="web-citation-sheet"
+        >
           <Pressable
             style={StyleSheet.absoluteFill}
             accessibilityRole="button"
@@ -389,7 +520,7 @@ export function WebCitationList({ citations }: { citations: WebCitation[] }) {
               styles.webCitationSheet,
               {
                 maxHeight: sheetMaxH,
-                paddingBottom: Math.max(insets.bottom, 16) + 8,
+                paddingBottom: Math.max(18, insets.bottom + 12),
               },
             ]}
           >
@@ -413,6 +544,8 @@ export function WebCitationList({ citations }: { citations: WebCitation[] }) {
               contentContainerStyle={styles.webCitationSheetList}
             >
               {citations.map((citation, index) => {
+                const displayIndex = resolveCitationDisplayIndex(citation, index);
+                const isFocused = focusedCitationIndex === displayIndex;
                 const host = hostnameFromUrl(citation.url);
                 const favicon = faviconUriForUrl(citation.url);
                 return (
@@ -420,10 +553,11 @@ export function WebCitationList({ citations }: { citations: WebCitation[] }) {
                     key={`${citation.url}:sheet:${index}`}
                     accessibilityRole="link"
                     accessibilityLabel={`打开来源 ${citation.title ?? host}`}
-                    onPress={() => {
-                      void Linking.openURL(citation.url);
-                    }}
-                    style={styles.webCitationSheetRow}
+                    onPress={() => openCitationSafely(citation, displayIndex)}
+                    style={[
+                      styles.webCitationSheetRow,
+                      isFocused && styles.webCitationSheetRowFocused,
+                    ]}
                   >
                     <View style={styles.webCitationSheetRowTop}>
                       <View style={styles.webCitationSheetHostGroup}>
@@ -445,8 +579,20 @@ export function WebCitationList({ citations }: { citations: WebCitation[] }) {
                           {host}
                         </Text>
                       </View>
-                      <View style={styles.webCitationSheetIndex}>
-                        <Text style={styles.webCitationSheetIndexText}>{index + 1}</Text>
+                      <View
+                        style={[
+                          styles.webCitationSheetIndex,
+                          isFocused && styles.webCitationCardBadgeFocused,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.webCitationSheetIndexText,
+                            isFocused && styles.webCitationCardBadgeTextFocused,
+                          ]}
+                        >
+                          {displayIndex}
+                        </Text>
                       </View>
                     </View>
                     <Text style={styles.webCitationSheetItemTitle} numberOfLines={2}>
@@ -463,8 +609,8 @@ export function WebCitationList({ citations }: { citations: WebCitation[] }) {
             </ScrollView>
           </View>
         </View>
-      </Modal>
-    </>
+      </OverlayPortal>
+    </View>
   );
 }
 

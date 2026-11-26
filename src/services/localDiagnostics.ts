@@ -79,18 +79,50 @@ function boundedError(value: string | undefined): string | undefined {
   return Array.from(redactSensitiveText(value, 500).normalize('NFKC')).slice(0, 500).join('');
 }
 
-function workspaceAttachments(workspace: AppWorkspace): MediaAttachment[] {
-  return workspace.conversations.flatMap((conversation) =>
-    conversation.messages.flatMap((message) => message.attachments ?? [])
-  );
+/**
+ * 收集工作区中所有有效引用到的附件（含当前活跃消息列表、所有历史会话消息以及未发送的草稿附件），
+ * 防止孤儿媒体诊断统计或缓存清理误判草稿与活跃任务附件。
+ */
+export function collectWorkspaceReferencedAttachments(workspace: AppWorkspace): MediaAttachment[] {
+  return [
+    ...workspace.messages.flatMap((message) => message.attachments ?? []),
+    ...workspace.conversations.flatMap((conversation) =>
+      conversation.messages.flatMap((message) => message.attachments ?? [])
+    ),
+    ...workspace.composerDrafts.flatMap((draft) => draft.attachments ?? []),
+  ];
+}
+
+/**
+ * 解析设置页“清理异常媒体缓存”时应受保护的附件引用集合：
+ * 涵盖工作区消息、未发送草稿附件（含“以此图继续编辑”）及未合并的后台生成队列附件。
+ */
+export async function resolveReferencedAttachmentsForMediaCleanup(
+  workspace: AppWorkspace,
+  readOutbox?: () => Promise<Array<{ attachments?: MediaAttachment[] }>>
+): Promise<MediaAttachment[]> {
+  const outboxEntries = await (
+    readOutbox
+      ? readOutbox()
+      : import('./generationTaskOutbox').then((mod) => mod.readGenerationTaskOutbox())
+  ).catch(() => []);
+  return [
+    ...collectWorkspaceReferencedAttachments(workspace),
+    ...outboxEntries.flatMap((entry) => entry.attachments ?? []),
+  ];
 }
 
 export async function createRedactedDiagnosticBundle(
   workspace: AppWorkspace,
   status: WorkspaceStatus,
-  now = Date.now()
+  now = Date.now(),
+  readOutbox?: () => Promise<Array<{ attachments?: MediaAttachment[] }>>
 ): Promise<RedactedDiagnosticBundle> {
-  const mediaStorage = await inspectMediaStorage(workspaceAttachments(workspace));
+  const referencedAttachments = await resolveReferencedAttachmentsForMediaCleanup(
+    workspace,
+    readOutbox
+  );
+  const mediaStorage = await inspectMediaStorage(referencedAttachments);
   const messageFailures = workspace.conversations.flatMap((conversation) =>
     conversation.messages.flatMap((message) =>
       message.status === 'error' || message.error

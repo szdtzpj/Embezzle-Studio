@@ -23,6 +23,7 @@
   <a href="https://szdtzpj.github.io/Embezzle-Studio/release.html"><strong>下载 Android 正式版</strong></a>
   · <a href="./docs/local-knowledge-workbench.md">本地知识工作台</a>
   · <a href="./docs/product-architecture.md">架构与安全边界</a>
+  · <a href="./docs/manual-acceptance-checklist.md">真机手动验收清单</a>
   · <a href="./README.en.md">English</a>
 </p>
 
@@ -32,27 +33,27 @@
     <td width="50%" valign="top"><strong>🛡️ Local-first</strong><br /><sub>项目、对话、成果、资料、检索与费用估算保存在本机，不依赖 Embezzle Studio 服务器。</sub></td>
   </tr>
   <tr>
-    <td width="50%" valign="top"><strong>⚡ 多模型统一工作台</strong><br /><sub>集中管理 OpenAI 兼容接口、火山方舟、阿里百炼和个人中转，并支持显式多模型对比。</sub></td>
+    <td width="50%" valign="top"><strong>⚡ 全生态多模型工作台</strong><br /><sub>集中管理 OpenAI、Anthropic Claude、Google Gemini、xAI Grok、DeepSeek、火山方舟、阿里百炼与个人中转，支持全协议生图与显式多模型对比。</sub></td>
     <td width="50%" valign="top"><strong>📚 从对话到成果</strong><br /><sub>把回答沉淀为可版本化成果与项目资料，在发送前检查实际上下文和 Token 风险。</sub></td>
   </tr>
 </table>
 
 ## 当前功能
 
-- 服务商配置：支持 OpenAI 兼容接口、火山方舟、百炼兼容模式、New API 中转站和自定义中转地址。`1.2.0` 的本地配置向导使用独立草稿检查服务商类型、Endpoint 与 Key 绑定；类型或规范化 Endpoint 改变时会先清除旧 Key、模型与候选，避免把凭据发送到新地址。百炼 Coding Plan/Token Plan 等不允许接入自定义应用的套餐端点会被阻断。
-- 主题与设置：`1.5.0` 加入跟随系统、浅色和深色三种主题并在本机持久化；设置页按账号、服务商、模型与应用信息重新分组，服务商详情可集中管理 Endpoint、Key、模型与启停状态。停用服务商现在是实际运行时边界：它不会再参与模型选择、重试、对比、语音或项目默认目标，且应用会阻止停用最后一个可用服务商。`1.6.0` 进一步为聊天空态和模型获取结果加入设置深链，并把模型配置做成独立设置入口，减少在供应商详情中来回查找。
+- 服务商配置：内置 9 大服务商预设——OpenAI、Anthropic Claude、Google Gemini、xAI Grok、DeepSeek、火山方舟、阿里百炼、New API 中转站和自定义 OpenAI 兼容地址；支持 5 种鉴权模式（`auto`、`bearer`、`x-api-key`、`x-goog-api-key`、`custom`）及自定义请求头编辑器（保留协议 `Content-Type` 并阻断 `Host`、`Cookie`、`Proxy-Authorization` 等敏感系统头）。本地配置向导使用独立草稿检查服务商类型、Endpoint 与 Key 绑定；类型或规范化 Endpoint 改变时会先清除旧 Key、模型与候选，避免把凭据发送到新地址。百炼 Coding Plan/Token Plan 等不允许接入自定义应用的套餐端点会被阻断。
+- 主题与设置：`1.5.0` 加入跟随系统、浅色和深色三种主题并在本机持久化；设置页按账号、服务商、模型与应用信息重新分组，服务商详情可集中管理 Endpoint、Key、鉴权模式、自定义请求头、生图模式、模型与启停状态。停用服务商现在是实际运行时边界：它不会再参与模型选择、重试、对比、语音或项目默认目标，且应用会阻止停用最后一个可用服务商。`1.6.0` 进一步为聊天空态和模型获取结果加入设置深链，并把模型配置做成独立设置入口，减少在供应商详情中来回查找。
 - 模型获取：OpenAI/兼容服务商尝试模型列表接口；火山方舟只在精确官方数据面主机上尝试未列入官方 API 参考的兼容 `/models` 探测，失败或响应不兼容时回退到根据官方目录维护的本地精选候选，并始终支持手动添加 Model ID 或 Endpoint ID。普通成功结果现在以自动消失的轻提示呈现；火山方舟未文档化探测和目录回退仍保留为风险提示，不会被短时成功 Toast 吞掉。
 - 模型选择：聊天页可按服务商查看已添加模型，并切换当前激活模型。能力矩阵把服务商/模型声明与客户端已经实现、测试过的协议能力分开显示，不会把目录标签当成可用适配器的证据；手动模型和中转模型仍可明确覆盖用途与能力，以便正确开放图片、视频、语音、附件、推理及 MCP 路由。独立模型配置页集中展示跨供应商模型、用途/能力覆盖与当前选择。
-- 对话协议：Chat Completions 默认流式输出；OpenAI Responses-only Pro 模型自动切换 `/responses` 非流式协议，并记录 Token 用量。
+- 多协议原生对话：支持 OpenAI Chat Completions 流式与 Responses 流式/推理摘要（覆盖 GPT-6/5/4.1）、Anthropic Claude 原生 `/v1/messages`（含 `adaptive` 思考与 `signature`/`redacted_thinking` 多轮无损回传）、Google Gemini 原生 `streamGenerateContent`（含 `thoughtSignature` 续接）、xAI Grok 原生 `/v1/responses`（非官方中转自动降级至 `/v1/chat/completions`），以及 DeepSeek 官方与中转兼容协议，并统一记录 Token 用量。
 - 多模型同问：可选择 2–4 个用户服务商模型并行回答；整组共用停止控制，单个失败不丢弃其它结果，后续对话只携带用户选中的一个候选。界面会在发送前明确本次将产生多少次独立服务商调用；目标尚未配置时会直接引导到对应设置，而不是只留下无法继续的提示。
-- 可信联网搜索：使用用户自己的 Key 调用 OpenAI、火山方舟或阿里百炼官方 Responses 搜索协议；只有响应包含搜索调用、有效引用或百炼搜索计数证据时才标记为已联网，并把 HTTPS 来源展示为可点击链接。
-- 外部 BYOK 搜索（1.7）：可配置 Tavily、Brave Search、xAI Grok Search、Firecrawl，或在 Android/本机调试路径使用无需 Key 的 Bing、DuckDuckGo。聊天模型只获得一个有界 `search_web` 工具，单轮最多 4 次工具调用、每次最多 10 条结果，查询和响应体均有限额；引用会绑定到经过 HTTPS 过滤的结果。Firecrawl 云端必须使用用户自己的 Key，无鉴权自建实例才可留空；xAI 默认模型按当前官方文档使用 `grok-4.5` 与 `web_search`/`x_search`。正式 Web 构建继续拒绝发送 API Key 或模型/搜索请求，本机 Web 只能通过显式受限调试代理访问。
-- Markdown 与活动时间线（1.7）：模型完成后的回答支持标题、列表、代码块、表格和显式链接，思考片段与搜索工具活动按真实顺序展示；流式期间仍使用轻量文本渲染。模型输出只能打开经过校验的 HTTPS 链接，Markdown 原始 HTML 与模糊自动 linkify 均关闭，完整工具参数不进入外部备份。
-- 思考设置：按精确模型系列保存思考强度，区分 `off`、`none`、`minimal`、`xhigh`、`max`，并分别映射 OpenAI、火山方舟和百炼协议。
+- 可信联网搜索：使用用户自己的 Key 调用各大厂商原生联网搜索协议——OpenAI Responses `web_search`、Anthropic `web_search_20250305`、Google Gemini `google_search` Grounding、xAI Grok `web_search`/`x_search`（替代已废弃的 410 `search_parameters`）、DeepSeek 官方 `deepseek_web_search`/`deepseek_read_url`（非官方中转严格隔离不误标），以及火山方舟、阿里百炼官方搜索协议；只有响应包含真实搜索证据时才标记为已联网，并把 HTTPS 来源展示为正文内联胶囊与底部来源抽屉卡片。
+- 外部 BYOK 搜索（10 家全链路支持）：可配置 DeepSeek Search（`/v1/tools/search` & `/fetch`）、Bocha 博查、Exa AI、自托管 SearXNG（需公网 HTTPS 且启用 `format=json`）、Tavily、Brave Search、xAI Grok Search、Firecrawl，或在 Android/本机调试路径使用无需 Key 的 Bing、DuckDuckGo。聊天模型只获得一个有界 `search_web` 工具，单轮最多 4 次工具调用、每次最多 10 条结果，查询和响应体均有限额；全链路经过统一 SSRF 守卫（`src/services/ssrfGuard.ts`）、`redirect: 'error'` 与多层错误密钥脱敏，引用仅绑定经过 HTTPS 过滤的结果。Firecrawl 云端必须使用用户自己的 Key，无鉴权自建实例才可留空。正式 Web 构建继续以五重 fail-closed 护栏拒绝发送 API Key 或模型/搜索请求，本机 Web 只能通过显式受限调试代理访问。
+- Markdown、富媒体与现代化交互：升级为线性 `O(L)` 防卡死 Markdown 解析，支持标题、列表、表格、语法高亮代码块（带语言标签与一键复制）、行内与块级 LaTeX 公式排版以及显式 HTTPS 链接；思考过程支持实时计时与完成后自动折叠，工具/搜索活动按真实顺序展示，正文内嵌 `[1]` 引用胶囊并联动底部来源抽屉；新增支持凭据脱敏的 Markdown / JSON 会话导出（删除最后仅存对话后自动重建可用空会话）、Web 端 `Enter` / `Shift+Enter` / 中文 IME 组合防误触以及 `/` 快捷指令浮层。Markdown 原始 HTML 与模糊自动 linkify 均关闭，完整工具参数不进入外部备份。
+- 思考设置：按精确模型系列保存思考强度，区分 `off`、`none`、`minimal`、`xhigh`、`max`，并分别映射 OpenAI、Anthropic Claude、Google Gemini、xAI Grok、DeepSeek、火山方舟和阿里百炼协议。
 - 参数调整：按服务商和模型只显示已适配的温度、top_p、惩罚参数及其真实范围；思考模式或固定参数模型会明确提示或隐藏无效控件，关闭后交给服务商默认值处理。`1.6.0` 把参数正文改为受可用高度约束的独立滚动区，拖动可收起 Android 键盘，数值输入完成和关闭面板也会主动收键盘。
-- 多模态入口：按模型能力显示图片、视频和文件选择入口；图片可发送给视觉模型，百炼兼容模式支持有界的本地视频 `video_url` 输入，文件输入仅对显式具备 `file-input` 能力的 OpenAI 官方模型开放。另支持文本生图，以及带参考图片/视频的火山方舟视频任务提交和后续查询。
-- 媒体预览与导出：待发送图片显示为方形缩略图；对话中的视频使用 `expo-video` 原生控件在当前页播放并支持全屏。视频卡片把文件名与“保存/分享”操作放在独立操作区；Android 保存通过系统 Storage Access Framework 让用户选择目录，Web 使用浏览器下载，其它原生平台回退到系统分享。
-- Android 布局与切页：主聊天区和改名对话框使用键盘避让，Android 配置为 `resize`；聊天页在打开设置后保持挂载，设置页首次打开后复用，并限制远端候选模型的单批渲染量以降低切页和大列表压力。`1.5.0` 恢复 Android 控件/列表的静态按压回退，系统返回键会先退出设置子页再关闭设置，并在切换服务商时清理详情页临时状态。
+- 多模态与全协议生图/改图：按模型能力显示图片、视频和文件选择入口；图片可发送给视觉模型，百炼兼容模式支持有界的本地视频 `video_url` 输入，文件输入仅对显式具备 `file-input` 能力的 OpenAI 官方模型开放。统一生图与改图引擎（`src/services/imageGeneration.ts`）全面适配 OpenAI（`/v1/images/generations`、`multipart` `/v1/images/edits` 含 Web Proxy `base64` 转发、Responses `image_generation`）、Google Gemini 原生生图与 `thoughtSignature` 多轮改图、xAI `grok-imagine-image-2.0` + JSON `/edits`、火山方舟 Seedream / 阿里百炼 Wanx，并对不支持原生直出光栅图的 Claude / DeepSeek 提供一键切换引导；新增对话内生图参数条（比例/画质/张数）与参考图“以此图继续编辑”草稿流，同时保留带参考图片/视频的火山方舟视频任务提交和后续查询。
+- 媒体预览、全屏灯箱与导出：待发送图片显示为方形缩略图；对话内生成或发送的图片支持点击进入全屏灯箱（`ImageLightboxModal`，提供缩放、保存与“以此图继续编辑”快捷动作）。对话中的视频使用 `expo-video` 原生控件在当前页播放并支持全屏，文件名与“保存/分享”操作位于独立操作区；Android 保存通过系统 Storage Access Framework 让用户选择目录，Web 使用浏览器下载，其它原生平台回退到系统分享。
+- Android / Web 布局、遮挡治理与流式性能：消除 Android 双重 `KeyboardAvoidingView` 挤压并在键盘弹出时自动隐藏底部主工作区 TabBar，Web 端适配 `100dvh`；全仓清除业务组件原生 `<Modal>` 与嵌套 `<SafeAreaView>`，统一至单队列 `AppDialogHost` / `OverlayPortal` 与单源 `useSafeAreaInsets()`；加固侧边抽屉手势取消（`.onFinalize`）消除半透明遮罩残影。聊天消息流升级为 `<FlatList>` + `React.memo` 行级订阅（`streamingDraftStore`）+ `ItemSeparatorComponent`（根治长列表虚拟化渲染死锁）+ 防抢手势吸底与“回到底部”悬浮按钮，结合标量状态切片与 Web 宏任务让步消除消息发送时的主线程 Long Task 卡顿，并以双通道 FIFO 决策队列与全链路 `AbortSignal` / 流取消释放锁杜绝挂起无响应。
 - 安全对话框：确认与提示请求按 FIFO 顺序处理，避免并发请求覆盖前一个未完成 Promise；长提示内容可在小屏幕上滚动，键盘弹出时仍可到达操作按钮。浅色/深色主题分别提供可读的警告、菜单、编辑器、媒体遮罩和工作台差异颜色。
 - 本地项目工作区：项目、项目指令、默认模型和会话归属都保存在本机；删除项目时会明确迁移其中会话，不依赖 Embezzle Studio 的同步服务。新建项目可从研究分析、写作编辑、软件开发、学习整理四个纯本地预设开始，预设只填入可审阅的名称与指令，不调用 API 或 Embezzle Studio 服务器。
 - 本地成果工作台：`1.3.0` 可把消息保存为项目成果，或新建 Markdown/纯文本/代码/JSON/HTML 成果；编辑会追加有界版本，旧版本恢复会生成新版本而不破坏后续历史，并支持有界行级差异和当前版本导出。HTML 以 `.html.txt`/`text/plain` 惰性导出，不执行脚本、代码或网络预览。
@@ -73,6 +74,8 @@
 
 当前稳定 Latest 是 [`v1.8.0`](https://github.com/szdtzpj/Embezzle-Studio/releases/tag/v1.8.0) / Android versionCode 14。正式安装包来自受保护 Actions 构建与生产签名流程，并通过 immutable Release、GitHub attestation、SHA-256 校验文件及公共 Pages 下载闭环复核。
 
+当前仓库主干开发树在 `v1.8.0` 基础上已完成生态与稳定性大更新（尚未发布新的 Release / APK）：包括 OpenAI Responses 流式、Anthropic Claude / Google Gemini / xAI Grok / DeepSeek 原生协议与联网搜索、10 家外部搜索服务、9 大服务商预设与自定义请求头/鉴权编辑器、全协议生图与“以此图继续编辑”工作流、全屏图片灯箱、线性 `O(L)` Markdown/LaTeX/代码高亮与 Thinking 计时、脱敏会话导出与 `/` 快捷指令，以及 Android/Web 交互遮挡、虚拟化长列表死锁与主线程 Long Task 卡顿治理。完整自动化门禁实测与真机/真实 API 验收范围见[真机手动验收清单](./docs/manual-acceptance-checklist.md)。
+
 `1.8.0` 的 P0/P1 范围、官方协议核对、本机质量门、候选 APK 与正式发布证据见 [`1.8.0` 发布续作断点](./docs/CONTINUATION_CHECKPOINT_2026-07-14_V1.8.md)。
 
 `1.8.0` / Android versionCode 14 已正式发布：工作区 v7 迁移、首次配置向导、项目/成果工作台、文档导入与显式 OCR、Android 后台媒体任务、系统分享入口，以及用户自有 WebDAV/S3 加密同步均已进入公开版本。精确 `main` / tag 提交为 `cafecfdbc74bc314239802ee121a938d4fa2c113`；受保护 [Android run `29384863423`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29384863423) 与发布后 [Pages run `29385766421`](https://github.com/szdtzpj/Embezzle-Studio/actions/runs/29385766421) 均成功。
@@ -84,7 +87,7 @@ Embezzle Studio 不购买、转售、补贴或代理模型、搜索、语音、�
 - 对话视频附件目前只为百炼兼容模式实现 `video_url` 传输；其他服务商仍需各自的上传、转码或引用协议适配。
 - 用户已在一台 Android 真机上确认键盘避让、Seedance 预览/下载、图片预览尺寸和设置/聊天切换的主路径解决；更多机型、系统目录取消/失败/空间不足、远程媒体过期和长时间压力矩阵仍需验收。Web 回归不能替代这些扩展原生验证。
 - OpenAI 官方安全 MCP 的本地执行与逐次审批闭环已经实现，但尚未用真实 OpenAI 账号和可信测试 MCP Server 在 Android 真机完成只读、拒绝及可逆写操作验收。Ark 与百炼仍只保存安全配置、不执行工具：前者等待真实账号验证 `store: false` 无存储续接，后者等待 Responses 提供执行前审批契约。
-- 联网搜索与语音的协议和解析已有自动化测试，但用户账号是否开通对应付费产品、真实搜索计费证据、麦克风/播放和长时间并发仍需代表性账号与 Android 真机验收。
+- 联网搜索、五大厂商原生协议（OpenAI / Anthropic / Gemini / xAI / DeepSeek）、全协议生图与语音的请求构造、流式解析和边界保护已有全量自动化单测与 E2E 覆盖，但用户账号权限、真实付费公网 API 联调、麦克风/播放、Android 真机软键盘与系统权限弹窗交互仍需按[真机手动验收清单](./docs/manual-acceptance-checklist.md)在目标设备与代表性账号上逐项核验。
 - OpenAI 官方接口不会返回原始隐藏思考链；应用只能展示接口返回的思考摘要、reasoning_content 或 Token 用量。
 - Android 安装包构建需要本机 Android 工具链，或通过 CI/EAS 等方式构建。
 
@@ -113,11 +116,16 @@ Embezzle Studio 不购买、转售、补贴或代理模型、搜索、语音、�
 
 ```powershell
 npm.cmd ci
-npm.cmd run typecheck
-npm.cmd run test
-npm.cmd run lint
+npm.cmd run check
 npm.cmd run build:web
+node tests/verify-web-dist-bundle.mjs
 npm.cmd start
+```
+
+其中 `npm.cmd run check` 会依次执行 `typecheck`、`lint`（零警告）与 `test`；如需运行全量端到端测试（包含 Tier 0–4 核心 E2E 与真实浏览器 Playwright Web 几何/性能实测），可执行：
+
+```powershell
+npm.cmd run test:e2e
 ```
 
 Web 调试可以使用：
@@ -126,7 +134,7 @@ Web 调试可以使用：
 npm.cmd run web
 ```
 
-该命令启动的转发器仅用于本机开发：它只监听 loopback，并只接受本次 Expo Web 的精确 origin。它仍可代表该页面访问任意用户配置的 HTTP(S) 上游，因此不得部署成生产代理，也不应在同一开发 origin 运行不受信任脚本。
+该命令启动的转发器（`scripts/dev-proxy.mjs`）仅用于本机开发：它只监听 loopback，仅接受本次 Expo Web 的精确 origin，并内置与 `src/services/ssrfGuard.ts` 一致的 SSRF 拦截（屏蔽云元数据、内网、IPv4 组播及 Teredo/6to4/ISATAP/NAT64/IPv6 映射地址）。它仍可代表本机调试页访问用户配置的公网 HTTPS 上游，因此不得部署成生产代理，也不应在同一开发 origin 运行不受信任脚本。
 
 Pull Request 和 `main` 分支推送会触发 `.github/workflows/quality.yml`。只有依赖安装、TypeScript 检查、测试、Lint 和 Web 构建全部通过，改动才应合并。建议把 `Quality / Typecheck, test, lint, and build web` 配置为 `main` 的必需检查。
 
@@ -259,8 +267,13 @@ GitHub Release 的多个资产上传不是事务操作。工作流仅在 owner-a
 - [Local Knowledge and Artifact Workbench](./docs/local-knowledge-workbench.md)
 - [User-owned Cloud Sync](./docs/cloud-sync.md)
 - [Native background tasks and Android share intake](./docs/NATIVE_BACKGROUND_AND_SHARE.md)
+- [真实 API 与 Android / Web 真机手动验收清单](./docs/manual-acceptance-checklist.md)
 - [Roadmap](./docs/roadmap.md)
 - [1.8.0 P0/P1 formal release checkpoint](./docs/CONTINUATION_CHECKPOINT_2026-07-14_V1.8.md)
+
+### 当前开发树生态升级与全端稳定性验证基线
+
+在 `v1.8.0` 之后的最新生态升级与稳定性重构已完成全量自动化验收：`npm run check` 通过 **92 个测试文件 / 1,344 项测试**（`tsc --noEmit` 0 errors，`eslint . --max-warnings=0` 0 warnings）；`npm run build:web` 导出 **3,496 个模块**并通过 `verify-web-dist-bundle.mjs` 6 项产物锚点校验；`npm run test:e2e` 全部通过（`test:e2e:core` **13 个文件 / 152 项核心 E2E** + 真实浏览器 Playwright Web **Mode A `dist/` 12/12 + Mode B `dev` 5/5**，覆盖无遮挡几何检查、长对话流式防卡顿与 fail-closed 拦截）。真实公网付费 API 联调与物理 Android 真机软键盘/权限弹窗验收步骤见 [真机手动验收清单](./docs/manual-acceptance-checklist.md)。
 
 ### 1.8.0 P0/P1 正式发布与剩余验证边界
 

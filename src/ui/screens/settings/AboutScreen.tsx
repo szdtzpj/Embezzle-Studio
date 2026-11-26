@@ -1,5 +1,6 @@
 import { ArrowLeft, Download, ExternalLink, RefreshCw } from 'lucide-react-native';
 import { Linking, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AnimatedPressable } from '../../components/AnimatedPressable';
 import { MotionItem } from '../../components/Motion';
 import { SectionCard, SectionHeader, TactileRow } from '../../components/settings/SettingsList';
@@ -39,6 +40,7 @@ export function AboutScreen({
   onOpenUpdateTarget,
 }: AboutScreenProps) {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = getStyles(theme);
   const repoUrl = `https://github.com/${appInfo.githubOwner}/${appInfo.githubRepo}`;
   const hasTrustedAsset = Boolean(updateInfo?.installAsset);
@@ -57,7 +59,16 @@ export function AboutScreen({
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
+      <View
+        style={[
+          styles.header,
+          {
+            paddingTop: Math.max(8, insets.top),
+            paddingLeft: Math.max(6, insets.left),
+            paddingRight: Math.max(6, insets.right),
+          },
+        ]}
+      >
         <AnimatedPressable accessibilityRole="button" onPress={onBack} style={styles.headerButton}>
           <ArrowLeft size={22} color={theme.colors.text} strokeWidth={2.2} />
         </AnimatedPressable>
@@ -67,7 +78,14 @@ export function AboutScreen({
 
       <ScrollView
         style={styles.content}
-        contentContainerStyle={styles.contentContainer}
+        contentContainerStyle={[
+          styles.contentContainer,
+          {
+            paddingBottom: Math.max(24, insets.bottom + 16),
+            paddingLeft: insets.left,
+            paddingRight: insets.right,
+          },
+        ]}
         showsVerticalScrollIndicator={false}
       >
         <MotionItem index={0}>

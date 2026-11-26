@@ -5,15 +5,18 @@ import type {
   ChatTokenUsage,
   ExternalSearchSettings,
   GenerationTaskInfo,
+  ImageGenerationOptions,
   MediaAttachment,
   ModelParameterSettings,
   ModelInfo,
   PluginManifest,
+  ProviderContinuationBlock,
   ProviderProfile,
   ReasoningEffort,
+  StreamChatCallbacks,
   ToolActivityItem,
+  WebCitation,
 } from '../domain/types';
-import { Platform } from 'react-native';
 import { isVolcengineArkProvider } from '../data/arkModels';
 import {
   createModelInfoFromId,
@@ -27,19 +30,27 @@ import {
 } from './modelCapabilities';
 import { normalizeReasoningEffort } from './reasoningEfforts';
 import { materializeAttachment, persistAttachment } from './mediaStorage';
+import { generateImages } from './imageGeneration';
 import {
   buildOpenAiResponsesRequest,
   getOpenAiResponsesEndpoint,
   isOpenAiResponsesOnlyModel,
   openAiResponsesLimits,
   parseOpenAiResponsesResponse,
+  readOpenAiResponsesStream,
+  sendOpenAiResponsesChat,
   toOpenAiResponsesInput,
 } from './openAiResponses';
 import {
   assertProviderWebSearchMessagesSupported,
+  buildDeepSeekContinuationMessagePatch,
+  buildDeepSeekServerToolActivity,
   buildProviderWebSearchRequest,
+  extractDeepSeekServerToolCalls,
+  parseDeepSeekUrlCitations,
   parseProviderWebSearchResponse,
   resolveProviderWebSearchProtocol,
+  toDeepSeekServerToolCallsBlock,
   type OpenAiWebSearchContextSize,
 } from './providerWebSearch';
 import {
@@ -62,7 +73,27 @@ import {
   upsertToolActivity,
 } from './messageActivity';
 import { getRemoteMcpExecutableReadiness } from '../plugins/contracts';
-import { isExactOfficialDeepSeekProvider, isExactOfficialOpenAiProvider } from './providerSetup';
+import {
+  buildModelDiscoveryRequest,
+  isExactOfficialDeepSeekProvider,
+  isExactOfficialOpenAiProvider,
+  isRelayOrCustomProvider,
+  parseDiscoveredModelsPayload,
+  resolveProviderAuthHeaders,
+} from './providerSetup';
+import {
+  cleanupResponseRequestAbort,
+  createAbortError,
+  createAbortPromise,
+  getResponseRequestSignal,
+  guardedApiFetch,
+  isAbortError,
+  isLoopbackHostname,
+  isWebDevelopmentProxyAllowed,
+  providerFetchWithTimeout,
+  resolveStreamAbortError,
+} from './networkTransport';
+import { safePublicHttpsUrl } from './ssrfGuard';
 import {
   providerMcpLimits,
   runOpenAiProviderMcp,
@@ -101,6 +132,7 @@ interface ChatCompletionArgs {
   reasoningEffort: ReasoningEffort;
   parameterSettings?: ModelParameterSettings;
   maxOutputTokens?: number;
+  imageOptions?: ImageGenerationOptions;
   onStreamUpdate?: (update: ChatStreamUpdate) => void;
   webSearch?: {
     enabled: boolean;
@@ -117,9 +149,13 @@ interface ChatCompletionArgs {
 interface ChatStreamUpdate {
   content: string;
   reasoningContent?: string;
+  thinkingDurationMs?: number;
   usage?: ChatTokenUsage;
+  citations?: WebCitation[];
+  webSearchTriggered?: boolean;
   toolActivity?: ToolActivityItem[];
   activityTimeline?: ActivityTimelineStep[];
+  providerContinuations?: ProviderContinuationBlock[];
   raw?: unknown;
 }
 
@@ -127,6 +163,7 @@ interface ToolLoopModelResult {
   content: string;
   reasoningContent?: string;
   usage?: ChatTokenUsage;
+  citations?: WebCitation[];
   toolCalls: Array<Record<string, any>>;
   raw: unknown;
 }
@@ -164,60 +201,16 @@ interface ArkVideoTaskResponse {
   };
 }
 
-const webDevProxyUrl = 'http://127.0.0.1:8787/proxy';
 const defaultRequestTimeoutMs = 120_000;
 const openAiProRequestTimeoutMs = 10 * 60_000;
 const discoveryRequestTimeoutMs = 30_000;
 const maxJsonResponseBytes = 5 * 1024 * 1024;
 const maxErrorResponseBytes = 64 * 1024;
-const maxGeneratedImageResponseBytes = 30 * 1024 * 1024;
 const maxStreamEventBytes = 1024 * 1024;
 const maxStreamOutputCharacters = 2_000_000;
 const bailianMaxInlineVideoDataUrlBytes = 10 * 1024 * 1024;
-const responseAbortCleanups = new WeakMap<Response, () => void>();
 
-interface WebDevelopmentProxyRuntime {
-  platform?: string;
-  development?: boolean;
-  explicitlyEnabled?: boolean;
-  location?: {
-    protocol: string;
-    hostname: string;
-  };
-}
-
-function createAbortError(message = '请求已取消。'): Error {
-  const error = new Error(message);
-  error.name = 'AbortError';
-  return error;
-}
-
-export function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'AbortError';
-}
-
-function isLoopbackHostname(hostname: string): boolean {
-  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
-  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
-}
-
-export function isWebDevelopmentProxyAllowed({
-  platform = Platform.OS,
-  development = typeof __DEV__ !== 'undefined' && __DEV__ === true,
-  explicitlyEnabled = process.env.EXPO_PUBLIC_ENABLE_WEB_DEV_PROXY === '1',
-  location = typeof window !== 'undefined'
-    ? { protocol: window.location.protocol, hostname: window.location.hostname }
-    : undefined,
-}: WebDevelopmentProxyRuntime = {}): boolean {
-  return Boolean(
-    platform === 'web' &&
-    development &&
-    explicitlyEnabled &&
-    location &&
-    (location.protocol === 'http:' || location.protocol === 'https:') &&
-    isLoopbackHostname(location.hostname)
-  );
-}
+export { guardedApiFetch, isAbortError, isWebDevelopmentProxyAllowed };
 
 function parseProviderBaseUrl(rawBaseUrl: string): URL {
   const value = rawBaseUrl.trim();
@@ -261,9 +254,16 @@ function shouldAppendOpenAiVersion(baseUrl: string, provider: ProviderProfile): 
 
 function normalizeBaseUrl(baseUrl: string, provider: ProviderProfile): string {
   const url = parseProviderBaseUrl(baseUrl);
-  url.pathname = url.pathname
+  let pathname = url.pathname
     .replace(/\/+$/, '')
-    .replace(/\/(?:chat\/completions|models)$/i, '') || '/';
+    .replace(/\/(?:chat\/completions|models)$/i, '');
+  if (url.hostname.toLowerCase().replace(/\.+$/, '') === 'generativelanguage.googleapis.com') {
+    pathname = pathname
+      .replace(/\/{2,}/g, '/')
+      .replace(/^\/v1beta\/openai(?=\/|$)/i, '/v1beta/openai')
+      .replace(/^\/openai(?=\/|$)/i, '/openai');
+  }
+  url.pathname = pathname || '/';
   const normalized = url.toString().replace(/\/+$/, '');
 
   if (normalized && shouldAppendOpenAiVersion(normalized, provider)) {
@@ -273,14 +273,44 @@ function normalizeBaseUrl(baseUrl: string, provider: ProviderProfile): string {
   return normalized;
 }
 
-function authHeaders(provider: ProviderProfile): HeadersInit {
+function setHeaderCaseInsensitive(
+  headers: Record<string, string>,
+  key: string,
+  value: string
+): void {
+  const lowerTarget = key.toLowerCase();
+  for (const existingKey of Object.keys(headers)) {
+    if (existingKey.toLowerCase() === lowerTarget && existingKey !== key) {
+      delete headers[existingKey];
+    }
+  }
+  headers[key] = value;
+}
+
+/**
+ * 统一构造请求头：合并默认 Accept/Content-Type、调用侧扩展头以及
+ * `resolveProviderAuthHeaders` 解析出的鉴权头与安全的自定义请求头（大小写不敏感覆盖）。
+ */
+function authHeaders(
+  provider: ProviderProfile,
+  extraHeaders?: Record<string, string>
+): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: 'application/json',
     'Content-Type': 'application/json',
   };
-  const apiKey = provider.apiKey?.trim();
-  if (apiKey) {
-    headers.Authorization = `Bearer ${apiKey}`;
+  if (extraHeaders) {
+    for (const [key, value] of Object.entries(extraHeaders)) {
+      setHeaderCaseInsensitive(headers, key, value);
+    }
+  }
+  const resolved = resolveProviderAuthHeaders(provider);
+  for (const [key, value] of Object.entries(resolved)) {
+    setHeaderCaseInsensitive(headers, key, value);
+  }
+  // 协议层面锁定 JSON Content-Type（除非调用方在 extraHeaders 显式覆盖）
+  if (!extraHeaders || !Object.keys(extraHeaders).some((k) => k.toLowerCase() === 'content-type')) {
+    setHeaderCaseInsensitive(headers, 'Content-Type', 'application/json');
   }
   return headers;
 }
@@ -290,24 +320,101 @@ function assertBaseUrl(provider: ProviderProfile): string {
   return baseUrl;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildPercentEncodedSecretPattern(encodedValue: string): RegExp {
+  const source = escapeRegExp(encodedValue).replace(/%([0-9a-f]{2})/gi, (_, hex: string) => {
+    const upper = hex.toUpperCase();
+    const lower = hex.toLowerCase();
+    if (upper === '20') {
+      return '(?:%20|\\+)';
+    }
+    const c0 = upper[0] === lower[0] ? upper[0] : `[${upper[0]}${lower[0]}]`;
+    const c1 = upper[1] === lower[1] ? upper[1] : `[${upper[1]}${lower[1]}]`;
+    return `%${c0}${c1}`;
+  });
+  return new RegExp(source, 'g');
+}
+
+/** 对错误文本中的 apiKey 原文及其大小写混合 URL 编码形式执行全量脱敏，防止凭据泄漏。 */
+function redactSecrets(text: string, apiKey?: string): string {
+  const trimmedKey = apiKey?.trim();
+  if (!trimmedKey || trimmedKey.length < 4) {
+    return text;
+  }
+  let sanitized = text.split(trimmedKey).join('[REDACTED]');
+  const encodedKey = encodeURIComponent(trimmedKey);
+  if (encodedKey && encodedKey !== trimmedKey) {
+    sanitized = sanitized.replace(buildPercentEncodedSecretPattern(encodedKey), '[REDACTED]');
+  }
+  return sanitized;
+}
+
+function sanitizeErrorSnippet(text: string, apiKey?: string, maxLength = 260): string {
+  return redactSecrets(text, apiKey).replace(/\s+/g, ' ').trim().slice(0, maxLength);
+}
+
+function sanitizeErrorMessage(error: unknown, apiKey?: string): Error {
+  if (error instanceof Error) {
+    const sanitized = redactSecrets(error.message, apiKey);
+    if (sanitized !== error.message) {
+      const cloned = new Error(sanitized);
+      cloned.name = error.name;
+      return cloned;
+    }
+    return error;
+  }
+  return new Error(redactSecrets(String(error), apiKey));
+}
+
 async function readLimitedResponseText(
   response: Response,
   maxBytes: number,
-  label: string
+  label: string,
+  signal?: AbortSignal
 ): Promise<string> {
+  const effectiveSignal = signal ?? getResponseRequestSignal(response);
+  if (effectiveSignal?.aborted) {
+    void response.body?.cancel().catch(() => undefined);
+    cleanupResponseRequestAbort(response);
+    throw resolveStreamAbortError(effectiveSignal);
+  }
   try {
     const contentLength = Number(response.headers.get('content-length'));
     if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      void response.body?.cancel().catch(() => undefined);
       throw new Error(`${label}响应过大（上限 ${Math.round(maxBytes / 1024 / 1024)} MB）。`);
     }
 
     const reader = response.body?.getReader();
-    if (!reader) {
-      const body = await response.text();
-      if (new TextEncoder().encode(body).byteLength > maxBytes) {
-        throw new Error(`${label}响应过大（上限 ${Math.round(maxBytes / 1024 / 1024)} MB）。`);
+    const { promise: abortPromise, cleanup: cleanupAbort } = createAbortPromise(
+      effectiveSignal,
+      () => {
+        if (reader) {
+          void reader.cancel().catch(() => undefined);
+        } else {
+          void response.body?.cancel().catch(() => undefined);
+        }
       }
-      return body;
+    );
+
+    if (!reader) {
+      try {
+        const body = abortPromise
+          ? await Promise.race([response.text(), abortPromise])
+          : await response.text();
+        if (effectiveSignal?.aborted) {
+          throw resolveStreamAbortError(effectiveSignal);
+        }
+        if (new TextEncoder().encode(body).byteLength > maxBytes) {
+          throw new Error(`${label}响应过大（上限 ${Math.round(maxBytes / 1024 / 1024)} MB）。`);
+        }
+        return body;
+      } finally {
+        cleanupAbort();
+      }
     }
 
     const decoder = new TextDecoder();
@@ -315,30 +422,47 @@ async function readLimitedResponseText(
     let body = '';
     try {
       while (true) {
-        const { value, done } = await reader.read();
+        if (effectiveSignal?.aborted) {
+          await reader.cancel().catch(() => undefined);
+          throw resolveStreamAbortError(effectiveSignal);
+        }
+        const { value, done } = abortPromise
+          ? await Promise.race([reader.read(), abortPromise])
+          : await reader.read();
+        if (effectiveSignal?.aborted) {
+          await reader.cancel().catch(() => undefined);
+          throw resolveStreamAbortError(effectiveSignal);
+        }
         if (done) {
           break;
         }
         totalBytes += value?.byteLength ?? 0;
         if (totalBytes > maxBytes) {
-          await reader.cancel();
+          await reader.cancel().catch(() => undefined);
           throw new Error(`${label}响应过大（上限 ${Math.round(maxBytes / 1024 / 1024)} MB）。`);
         }
         body += decoder.decode(value, { stream: true });
       }
       body += decoder.decode();
+      if (effectiveSignal?.aborted) {
+        throw resolveStreamAbortError(effectiveSignal);
+      }
       return body;
     } finally {
-      reader.releaseLock();
+      cleanupAbort();
+      try {
+        reader.releaseLock();
+      } catch {
+        // 流已释放或取消时忽略
+      }
     }
   } finally {
-    responseAbortCleanups.get(response)?.();
-    responseAbortCleanups.delete(response);
+    cleanupResponseRequestAbort(response);
   }
 }
 
-function compactResponseText(body: string): string {
-  return body.replace(/\s+/g, ' ').trim().slice(0, 260);
+function compactResponseText(body: string, apiKey?: string): string {
+  return sanitizeErrorSnippet(body, apiKey, 260);
 }
 
 function looksLikeHtmlResponse(body: string, contentType: string): boolean {
@@ -346,12 +470,17 @@ function looksLikeHtmlResponse(body: string, contentType: string): boolean {
   return contentType.includes('text/html') || text.startsWith('<!doctype') || text.startsWith('<html');
 }
 
-async function readJsonResponse<T>(response: Response, requestUrl: string, label: string): Promise<T> {
+async function readJsonResponse<T>(
+  response: Response,
+  requestUrl: string,
+  label: string,
+  apiKey?: string
+): Promise<T> {
   const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
   const body = await readLimitedResponseText(response, maxJsonResponseBytes, label);
 
   if (!response.ok) {
-    throw new Error(`${label}失败：${response.status} ${compactResponseText(body)}`);
+    throw new Error(`${label}失败：${response.status} ${compactResponseText(body, apiKey)}`);
   }
 
   if (looksLikeHtmlResponse(body, contentType)) {
@@ -364,25 +493,9 @@ async function readJsonResponse<T>(response: Response, requestUrl: string, label
     return JSON.parse(body) as T;
   } catch (error) {
     throw new Error(
-      `${label}返回内容不是有效 JSON：${error instanceof Error ? error.message : String(error)}。当前请求地址：${requestUrl}。响应片段：${compactResponseText(body)}`
+      `${label}返回内容不是有效 JSON：${redactSecrets(error instanceof Error ? error.message : String(error), apiKey)}。当前请求地址：${requestUrl}。响应片段：${compactResponseText(body, apiKey)}`
     );
   }
-}
-
-function headersToObject(headers: HeadersInit | undefined): Record<string, string> {
-  if (!headers) {
-    return {};
-  }
-
-  if (headers instanceof Headers) {
-    return Object.fromEntries(headers.entries());
-  }
-
-  if (Array.isArray(headers)) {
-    return Object.fromEntries(headers);
-  }
-
-  return headers as Record<string, string>;
 }
 
 async function providerFetch(
@@ -390,83 +503,8 @@ async function providerFetch(
   init: RequestInit,
   timeoutMs = defaultRequestTimeoutMs
 ): Promise<Response> {
-  const controller = new AbortController();
-  let timedOut = false;
-  const abortFromCaller = () => controller.abort(init.signal?.reason ?? createAbortError());
-  if (init.signal?.aborted) {
-    throw createAbortError();
-  }
-  init.signal?.addEventListener('abort', abortFromCaller, { once: true });
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    controller.abort(createAbortError('请求超时。'));
-  }, timeoutMs);
-  const cleanup = () => {
-    clearTimeout(timeout);
-    init.signal?.removeEventListener('abort', abortFromCaller);
-  };
-
-  try {
-    let response: Response;
-    if (Platform.OS !== 'web') {
-      response = await fetch(url, { ...init, signal: controller.signal });
-    } else {
-      if (!isWebDevelopmentProxyAllowed()) {
-        throw new Error(
-          '正式 Web 构建不会发送 API Key 或模型请求。仅可在本机通过 npm run web 显式启动受限调试代理。'
-        );
-      }
-      try {
-        response = await fetch(webDevProxyUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            url,
-            method: init.method ?? 'GET',
-            headers: headersToObject(init.headers),
-            body: typeof init.body === 'string' ? init.body : undefined,
-          }),
-          signal: controller.signal,
-        });
-      } catch (error) {
-        if (isAbortError(error) || controller.signal.aborted) {
-          throw error;
-        }
-        throw new Error('Web 调试代理未启动或不可访问。请用 npm run web 启动应用，或确认 127.0.0.1:8787 可访问。');
-      }
-    }
-
-    responseAbortCleanups.set(response, cleanup);
-    return response;
-  } catch (error) {
-    cleanup();
-    if (timedOut) {
-      const timeoutError = createAbortError(`请求超过 ${Math.round(timeoutMs / 1000)} 秒，已自动停止。`);
-      timeoutError.name = 'TimeoutError';
-      throw timeoutError;
-    }
-    if (init.signal?.aborted) {
-      throw createAbortError();
-    }
-    throw error;
-  }
+  return providerFetchWithTimeout(url, { ...init, redirect: 'error' }, timeoutMs);
 }
-
-/**
- * Shared API transport for direct native requests and the explicitly enabled
- * local Web development proxy. Production Web builds fail closed.
- */
-export const guardedApiFetch: typeof fetch = async (input, init) => {
-  const url =
-    typeof input === 'string'
-      ? input
-      : input instanceof URL
-        ? input.toString()
-        : (input as Request).url;
-  return providerFetch(url, init ?? {});
-};
 
 function imageContent(attachment: MediaAttachment) {
   if (attachment.kind !== 'image') {
@@ -589,9 +627,16 @@ function toOpenAiMessage(message: ChatMessage, provider?: ProviderProfile) {
     };
   }
 
+  // 仅向精确的 DeepSeek 官方端点回传 server_tool_calls 续接状态块；中转/非官方端点严格屏蔽。
+  const deepSeekPatch =
+    message.role === 'assistant' && provider && isExactOfficialDeepSeekProvider(provider)
+      ? buildDeepSeekContinuationMessagePatch(message.providerContinuations)
+      : undefined;
+
   return {
     role: message.role,
     content: message.content,
+    ...(deepSeekPatch ?? {}),
   };
 }
 
@@ -757,24 +802,270 @@ function readStreamReasoningDelta(payload: any): string | undefined {
   );
 }
 
-function readFinalChatPayload(payload: any): ChatCompletionResult {
+interface ChatCompletionReadOptions {
+  allowDeepSeekServerTools?: boolean;
+  apiKey?: string;
+  signal?: AbortSignal;
+}
+
+interface ChatStreamParseState {
+  content: string;
+  reasoningContent: string;
+  thinkingStartedAt?: number;
+  thinkingDurationMs?: number;
+  thinkingCompleted: boolean;
+  usage?: ChatTokenUsage;
+  annotations: unknown[];
+  serverToolCalls: unknown[];
+  toolActivity: ToolActivityItem[];
+  activityTimeline: ActivityTimelineStep[];
+  thinkingStepCount: number;
+  lastPayload?: unknown;
+  sawStreamPayload: boolean;
+  done: boolean;
+  apiKey?: string;
+  allowDeepSeekServerTools: boolean;
+}
+
+function readAnnotationsFromPayload(payload: any): unknown[] {
+  const choice = payload?.choices?.[0];
+  const deltaAnnotations = Array.isArray(choice?.delta?.annotations) ? choice.delta.annotations : [];
+  const messageAnnotations = Array.isArray(choice?.message?.annotations) ? choice.message.annotations : [];
+  return [...deltaAnnotations, ...messageAnnotations];
+}
+
+function mergeDeepSeekServerToolCalls(existing: unknown[], incoming: unknown[]): unknown[] {
+  if (!incoming.length) {
+    return existing;
+  }
+  const merged = existing.map((item) =>
+    item && typeof item === 'object' ? { ...(item as Record<string, unknown>) } : item
+  );
+  const keyToSlot = new Map<string, number>();
+
+  merged.forEach((entry, slot) => {
+    if (!entry || typeof entry !== 'object') {
+      return;
+    }
+    const record = entry as Record<string, unknown>;
+    const entryId = typeof record.id === 'string' && record.id.trim() ? record.id.trim() : undefined;
+    const entryIndex =
+      typeof record.index === 'number' && Number.isFinite(record.index) ? record.index : undefined;
+    if (entryId) {
+      keyToSlot.set(`id:${entryId}`, slot);
+    }
+    if (entryIndex !== undefined) {
+      keyToSlot.set(`index:${entryIndex}`, slot);
+    }
+  });
+
+  for (const rawItem of incoming) {
+    if (!rawItem || typeof rawItem !== 'object') {
+      continue;
+    }
+    const item = rawItem as Record<string, unknown>;
+    const itemId = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : undefined;
+    const itemIndex =
+      typeof item.index === 'number' && Number.isFinite(item.index) ? item.index : undefined;
+
+    let matchSlot = itemId ? keyToSlot.get(`id:${itemId}`) : undefined;
+    if (matchSlot === undefined && itemIndex !== undefined) {
+      matchSlot = keyToSlot.get(`index:${itemIndex}`);
+      if (
+        matchSlot === undefined &&
+        itemIndex >= 0 &&
+        itemIndex < merged.length &&
+        merged[itemIndex] &&
+        typeof merged[itemIndex] === 'object'
+      ) {
+        const candidate = merged[itemIndex] as Record<string, unknown>;
+        const candidateIndex =
+          typeof candidate.index === 'number' && Number.isFinite(candidate.index)
+            ? candidate.index
+            : undefined;
+        if (candidateIndex === undefined) {
+          matchSlot = itemIndex;
+        }
+      }
+    }
+
+    if (matchSlot !== undefined) {
+      const prev = merged[matchSlot] as Record<string, unknown>;
+      const prevId = typeof prev.id === 'string' && prev.id.trim() ? prev.id.trim() : undefined;
+      const prevType =
+        typeof prev.type === 'string' && prev.type.trim() ? prev.type.trim() : undefined;
+      const itemType =
+        typeof item.type === 'string' && item.type.trim() ? item.type.trim() : undefined;
+
+      merged[matchSlot] = {
+        ...prev,
+        ...item,
+        ...(itemId ? { id: itemId } : prevId ? { id: prevId } : {}),
+        ...(itemType ? { type: itemType } : prevType ? { type: prevType } : {}),
+        ...(prev.input || item.input
+          ? {
+              input: {
+                ...(prev.input && typeof prev.input === 'object'
+                  ? (prev.input as Record<string, unknown>)
+                  : {}),
+                ...(item.input && typeof item.input === 'object'
+                  ? (item.input as Record<string, unknown>)
+                  : {}),
+              },
+            }
+          : {}),
+        ...(prev.output || item.output
+          ? {
+              output: {
+                ...(prev.output && typeof prev.output === 'object'
+                  ? (prev.output as Record<string, unknown>)
+                  : {}),
+                ...(item.output && typeof item.output === 'object'
+                  ? (item.output as Record<string, unknown>)
+                  : {}),
+              },
+            }
+          : {}),
+      };
+      if (itemId) {
+        keyToSlot.set(`id:${itemId}`, matchSlot);
+      }
+      if (itemIndex !== undefined) {
+        keyToSlot.set(`index:${itemIndex}`, matchSlot);
+      }
+    } else {
+      const slot = merged.length;
+      merged.push({ ...item });
+      if (itemId) {
+        keyToSlot.set(`id:${itemId}`, slot);
+      }
+      if (itemIndex !== undefined) {
+        keyToSlot.set(`index:${itemIndex}`, slot);
+      }
+    }
+  }
+  return merged;
+}
+
+function mergeChatCompletionCitations(
+  annotations: unknown[],
+  serverToolCalls: unknown[],
+  text?: string
+): WebCitation[] {
+  const rawItems: unknown[] = [...annotations];
+  for (const call of serverToolCalls) {
+    if (!call || typeof call !== 'object') continue;
+    const output = (call as Record<string, unknown>).output;
+    if (!output || typeof output !== 'object') continue;
+    const outputRecord = output as Record<string, unknown>;
+    const rows = Array.isArray(outputRecord.results)
+      ? outputRecord.results
+      : Array.isArray(outputRecord.sources)
+        ? outputRecord.sources
+        : [];
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue;
+      const rowRecord = row as Record<string, unknown>;
+      if (typeof rowRecord.url === 'string') {
+        rawItems.push({
+          type: 'url_citation',
+          url: rowRecord.url,
+          ...(typeof rowRecord.title === 'string' ? { title: rowRecord.title } : {}),
+        });
+      }
+    }
+  }
+  return parseDeepSeekUrlCitations(rawItems, text);
+}
+
+function readFinalChatPayload(
+  payload: any,
+  options: ChatCompletionReadOptions = {}
+): ChatCompletionResult {
+  const rawContent = readAssistantText(payload);
+  const reasoningContent = readReasoningText(payload);
+  const messageAnnotations = Array.isArray(payload?.choices?.[0]?.message?.annotations)
+    ? payload.choices[0].message.annotations
+    : [];
+  const serverToolCalls = options.allowDeepSeekServerTools
+    ? extractDeepSeekServerToolCalls(payload)
+    : [];
+  const continuationBlock = serverToolCalls.length
+    ? toDeepSeekServerToolCallsBlock(serverToolCalls)
+    : undefined;
+  const toolActivity = serverToolCalls.length
+    ? buildDeepSeekServerToolActivity(serverToolCalls)
+    : [];
+  const content =
+    rawContent === '模型返回了空内容。' && (reasoningContent || serverToolCalls.length)
+      ? ''
+      : rawContent;
+  const citations = mergeChatCompletionCitations(messageAnnotations, serverToolCalls, content);
+  const webSearchTriggered = citations.length > 0 || serverToolCalls.length > 0;
+
+  let activityTimeline: ActivityTimelineStep[] = [];
+  if (toolActivity.length) {
+    if (reasoningContent) {
+      activityTimeline = upsertTimelineStep(activityTimeline, {
+        id: 'thinking-1',
+        kind: 'thinking',
+        sequence: 0,
+        status: 'completed',
+        title: '深度思考',
+        content: reasoningContent,
+      });
+    }
+    for (const tool of toolActivity) {
+      activityTimeline = upsertTimelineStep(activityTimeline, {
+        id: tool.id,
+        kind: 'tool',
+        sequence: nextTimelineSequence(activityTimeline),
+        status: tool.status,
+        toolName: tool.toolName,
+        title: tool.title,
+        arguments: tool.arguments,
+        summary: tool.summary,
+      });
+    }
+  }
+
   return {
-    content: readAssistantText(payload),
-    reasoningContent: readReasoningText(payload),
+    content,
+    reasoningContent,
+    ...(continuationBlock ? { providerContinuations: [continuationBlock] } : {}),
     usage: readTokenUsage(payload),
+    ...(citations.length ? { citations } : {}),
+    ...(webSearchTriggered ? { webSearchTriggered: true } : {}),
+    ...(toolActivity.length ? { toolActivity } : {}),
+    ...(activityTimeline.length ? { activityTimeline } : {}),
     raw: payload,
   };
 }
 
+function syncDeepSeekToolTimeline(state: ChatStreamParseState): void {
+  if (!state.serverToolCalls.length) {
+    return;
+  }
+  state.activityTimeline = completeOpenThinkingSteps(state.activityTimeline);
+  state.toolActivity = buildDeepSeekServerToolActivity(state.serverToolCalls);
+  for (const tool of state.toolActivity) {
+    const existing = state.activityTimeline.find((step) => step.id === tool.id);
+    state.activityTimeline = upsertTimelineStep(state.activityTimeline, {
+      id: tool.id,
+      kind: 'tool',
+      sequence: existing?.sequence ?? nextTimelineSequence(state.activityTimeline),
+      status: tool.status,
+      toolName: tool.toolName,
+      title: tool.title,
+      arguments: tool.arguments,
+      summary: tool.summary,
+    });
+  }
+}
+
 function applyStreamPayload(
   payload: any,
-  state: {
-    content: string;
-    reasoningContent: string;
-    usage?: ChatTokenUsage;
-    lastPayload?: unknown;
-    sawStreamPayload: boolean;
-  },
+  state: ChatStreamParseState,
   onStreamUpdate?: (update: ChatStreamUpdate) => void
 ) {
   state.sawStreamPayload = true;
@@ -783,13 +1074,64 @@ function applyStreamPayload(
   const contentUpdate = readStreamContentUpdate(payload);
   const reasoningDelta = readStreamReasoningDelta(payload);
   const usage = readTokenUsage(payload);
+  const deltaAnnotations = readAnnotationsFromPayload(payload);
+  const chunkServerTools = state.allowDeepSeekServerTools
+    ? extractDeepSeekServerToolCalls(payload)
+    : [];
+
+  if (typeof reasoningDelta === 'string') {
+    if (state.thinkingStartedAt === undefined) {
+      state.thinkingStartedAt = Date.now();
+    }
+    state.reasoningContent += reasoningDelta;
+    if (state.activityTimeline.length || chunkServerTools.length) {
+      const openThinking = state.activityTimeline.find(
+        (step) => step.kind === 'thinking' && step.status === 'running'
+      );
+      if (!openThinking) {
+        state.thinkingStepCount += 1;
+      }
+      const id = openThinking?.id ?? `thinking-${state.thinkingStepCount}`;
+      state.activityTimeline = upsertTimelineStep(state.activityTimeline, {
+        id,
+        kind: 'thinking',
+        sequence: openThinking?.sequence ?? nextTimelineSequence(state.activityTimeline),
+        status: 'running',
+        title: '深度思考',
+        content: state.reasoningContent,
+        startedAt: openThinking?.startedAt ?? state.thinkingStartedAt,
+      });
+    }
+  }
 
   if (contentUpdate) {
     state.content = contentUpdate.snapshot ? contentUpdate.text : state.content + contentUpdate.text;
+    if (contentUpdate.text && state.thinkingStartedAt !== undefined && !state.thinkingCompleted) {
+      state.thinkingCompleted = true;
+      state.thinkingDurationMs = Math.max(0, Date.now() - state.thinkingStartedAt);
+      state.activityTimeline = completeOpenThinkingSteps(state.activityTimeline);
+    }
   }
 
-  if (typeof reasoningDelta === 'string') {
-    state.reasoningContent += reasoningDelta;
+  if (deltaAnnotations.length) {
+    state.annotations.push(...deltaAnnotations);
+  }
+
+  if (chunkServerTools.length) {
+    if (state.reasoningContent && !state.activityTimeline.some((step) => step.kind === 'thinking')) {
+      state.thinkingStepCount += 1;
+      state.activityTimeline = upsertTimelineStep(state.activityTimeline, {
+        id: `thinking-${state.thinkingStepCount}`,
+        kind: 'thinking',
+        sequence: nextTimelineSequence(state.activityTimeline),
+        status: 'completed',
+        title: '深度思考',
+        content: state.reasoningContent,
+        startedAt: state.thinkingStartedAt,
+      });
+    }
+    state.serverToolCalls = mergeDeepSeekServerToolCalls(state.serverToolCalls, chunkServerTools);
+    syncDeepSeekToolTimeline(state);
   }
 
   if (usage) {
@@ -800,11 +1142,33 @@ function applyStreamPayload(
     throw new Error('模型输出过长，已停止接收以保护应用内存。');
   }
 
-  if (contentUpdate?.text || reasoningDelta || usage) {
+  if (
+    contentUpdate?.text ||
+    reasoningDelta ||
+    usage ||
+    chunkServerTools.length > 0 ||
+    deltaAnnotations.length > 0
+  ) {
+    const citations =
+      state.annotations.length || state.serverToolCalls.length
+        ? mergeChatCompletionCitations(state.annotations, state.serverToolCalls, state.content)
+        : [];
+    const continuationBlock = state.serverToolCalls.length
+      ? toDeepSeekServerToolCallsBlock(state.serverToolCalls)
+      : undefined;
+    const webSearchTriggered = citations.length > 0 || state.serverToolCalls.length > 0;
     onStreamUpdate?.({
       content: state.content,
       reasoningContent: state.reasoningContent || undefined,
+      ...(state.thinkingDurationMs !== undefined
+        ? { thinkingDurationMs: state.thinkingDurationMs }
+        : {}),
       usage: state.usage,
+      ...(citations.length ? { citations } : {}),
+      ...(webSearchTriggered ? { webSearchTriggered: true } : {}),
+      ...(state.toolActivity.length ? { toolActivity: state.toolActivity } : {}),
+      ...(state.activityTimeline.length ? { activityTimeline: state.activityTimeline } : {}),
+      ...(continuationBlock ? { providerContinuations: [continuationBlock] } : {}),
       raw: payload,
     });
   }
@@ -812,14 +1176,7 @@ function applyStreamPayload(
 
 function processSseBlock(
   block: string,
-  state: {
-    content: string;
-    reasoningContent: string;
-    usage?: ChatTokenUsage;
-    lastPayload?: unknown;
-    sawStreamPayload: boolean;
-    done: boolean;
-  },
+  state: ChatStreamParseState,
   onStreamUpdate?: (update: ChatStreamUpdate) => void
 ) {
   const data = block
@@ -846,69 +1203,141 @@ function processSseBlock(
   try {
     payload = JSON.parse(data);
   } catch (error) {
-    throw new Error(`无法解析模型流事件：${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `无法解析模型流事件：${redactSecrets(error instanceof Error ? error.message : String(error), state.apiKey)}`
+    );
   }
   if (payload?.error) {
     const message =
       typeof payload.error?.message === 'string'
-        ? payload.error.message
-        : compactResponseText(JSON.stringify(payload.error));
+        ? redactSecrets(payload.error.message, state.apiKey)
+        : compactResponseText(JSON.stringify(payload.error), state.apiKey);
     throw new Error(`对话流式请求失败：${message}`);
   }
   applyStreamPayload(payload, state, onStreamUpdate);
 }
 
-function finalizeStreamResult(
-  state: {
-    content: string;
-    reasoningContent: string;
-    usage?: ChatTokenUsage;
-    lastPayload?: unknown;
-    sawStreamPayload: boolean;
-  }
-): ChatCompletionResult {
+function finalizeStreamResult(state: ChatStreamParseState): ChatCompletionResult {
   if (!state.sawStreamPayload) {
     throw new Error('模型没有返回有效的流式事件。');
   }
 
+  if (state.thinkingStartedAt !== undefined && !state.thinkingCompleted) {
+    state.thinkingCompleted = true;
+    state.thinkingDurationMs = Math.max(0, Date.now() - state.thinkingStartedAt);
+  }
+  if (state.activityTimeline.length) {
+    state.activityTimeline = completeOpenThinkingSteps(state.activityTimeline);
+  }
+
+  const continuationBlock = state.serverToolCalls.length
+    ? toDeepSeekServerToolCallsBlock(state.serverToolCalls)
+    : undefined;
+  const citations =
+    state.annotations.length || state.serverToolCalls.length
+      ? mergeChatCompletionCitations(state.annotations, state.serverToolCalls, state.content)
+      : [];
+  const webSearchTriggered = citations.length > 0 || state.serverToolCalls.length > 0;
+
   return {
-    content: state.content || (state.reasoningContent ? '' : '模型返回了空内容。'),
+    content:
+      state.content ||
+      (state.reasoningContent || state.serverToolCalls.length ? '' : '模型返回了空内容。'),
     reasoningContent: state.reasoningContent || undefined,
+    ...(state.thinkingDurationMs !== undefined
+      ? { thinkingDurationMs: state.thinkingDurationMs }
+      : {}),
+    ...(continuationBlock ? { providerContinuations: [continuationBlock] } : {}),
     usage: state.usage,
+    ...(citations.length ? { citations } : {}),
+    ...(webSearchTriggered ? { webSearchTriggered: true } : {}),
+    ...(state.toolActivity.length ? { toolActivity: state.toolActivity } : {}),
+    ...(state.activityTimeline.length ? { activityTimeline: state.activityTimeline } : {}),
     raw: state.lastPayload,
+  };
+}
+
+/**
+ * 跨 chunk 规范化 SSE 换行符：保留跨边界拆分的 `\r` + `\n`，避免被误拆成 `\n\n` 空行分隔符。
+ */
+function createSseLineBreakNormalizer() {
+  let pendingTrailingCr = false;
+
+  return {
+    push(text: string): string {
+      if (!text) {
+        return '';
+      }
+      let next = text;
+      if (pendingTrailingCr) {
+        pendingTrailingCr = false;
+        next = next.startsWith('\n') ? `\n${next.slice(1)}` : `\n${next}`;
+      }
+      if (next.endsWith('\r')) {
+        pendingTrailingCr = true;
+        next = next.slice(0, -1);
+      }
+      return next ? next.replace(/\r\n/g, '\n').replace(/\r/g, '\n') : '';
+    },
+    flush(): string {
+      if (!pendingTrailingCr) {
+        return '';
+      }
+      pendingTrailingCr = false;
+      return '\n';
+    },
   };
 }
 
 async function readStreamingChatCompletion(
   response: Response,
-  onStreamUpdate?: (update: ChatStreamUpdate) => void
+  onStreamUpdate?: (update: ChatStreamUpdate) => void,
+  options: ChatCompletionReadOptions = {}
 ): Promise<ChatCompletionResult> {
+  const effectiveSignal = options.signal ?? getResponseRequestSignal(response);
+  if (effectiveSignal?.aborted) {
+    void response.body?.cancel().catch(() => undefined);
+    cleanupResponseRequestAbort(response);
+    throw resolveStreamAbortError(effectiveSignal);
+  }
+
   const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
   if (contentType.includes('application/json')) {
-    const body = await readLimitedResponseText(response, maxJsonResponseBytes, '对话');
+    const body = await readLimitedResponseText(response, maxJsonResponseBytes, '对话', effectiveSignal);
     if (looksLikeHtmlResponse(body, contentType)) {
       throw new Error('对话接口返回了 HTML 页面，请检查 Base URL。');
     }
     try {
-      return readFinalChatPayload(JSON.parse(body));
+      return readFinalChatPayload(JSON.parse(body), options);
     } catch (error) {
-      throw new Error(`对话接口返回的 JSON 无法解析：${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(
+        `对话接口返回的 JSON 无法解析：${redactSecrets(error instanceof Error ? error.message : String(error), options.apiKey)}`
+      );
     }
   }
 
-  const state = {
+  const state: ChatStreamParseState = {
     content: '',
     reasoningContent: '',
-    usage: undefined as ChatTokenUsage | undefined,
-    lastPayload: undefined as unknown,
+    thinkingCompleted: false,
+    usage: undefined,
+    annotations: [],
+    serverToolCalls: [],
+    toolActivity: [],
+    activityTimeline: [],
+    thinkingStepCount: 0,
+    lastPayload: undefined,
     sawStreamPayload: false,
     done: false,
+    apiKey: options.apiKey,
+    allowDeepSeekServerTools: Boolean(options.allowDeepSeekServerTools),
   };
   const decoder = new TextDecoder();
+  const normalizeSseChunk = createSseLineBreakNormalizer();
   let buffer = '';
 
   const consumeText = (text: string) => {
-    buffer += text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    buffer += normalizeSseChunk.push(text);
 
     if (new TextEncoder().encode(buffer).byteLength > maxStreamEventBytes) {
       throw new Error('模型流缓冲区过大或事件分隔符无效，已停止接收。');
@@ -924,22 +1353,56 @@ async function readStreamingChatCompletion(
   };
 
   const reader = response.body?.getReader();
+  const { promise: abortPromise, cleanup: cleanupAbort } = createAbortPromise(
+    effectiveSignal,
+    () => {
+      if (reader) {
+        void reader.cancel().catch(() => undefined);
+      } else {
+        void response.body?.cancel().catch(() => undefined);
+      }
+    }
+  );
 
   try {
     if (!reader) {
-      consumeText(await response.text());
+      const rawText = abortPromise
+        ? await Promise.race([response.text(), abortPromise])
+        : await response.text();
+      if (effectiveSignal?.aborted) {
+        throw resolveStreamAbortError(effectiveSignal);
+      }
+      consumeText(rawText);
     } else {
       while (!state.done) {
-        const { value, done } = await reader.read();
+        if (effectiveSignal?.aborted) {
+          await reader.cancel().catch(() => undefined);
+          throw resolveStreamAbortError(effectiveSignal);
+        }
+        const { value, done } = abortPromise
+          ? await Promise.race([reader.read(), abortPromise])
+          : await reader.read();
+        if (effectiveSignal?.aborted) {
+          await reader.cancel().catch(() => undefined);
+          throw resolveStreamAbortError(effectiveSignal);
+        }
         if (done) {
           break;
         }
         consumeText(decoder.decode(value, { stream: true }));
       }
+      if (effectiveSignal?.aborted) {
+        throw resolveStreamAbortError(effectiveSignal);
+      }
       if (state.done) {
-        await reader.cancel();
+        await reader.cancel().catch(() => undefined);
       }
       consumeText(decoder.decode());
+    }
+
+    const trailingNewline = normalizeSseChunk.flush();
+    if (trailingNewline && !state.done) {
+      consumeText(trailingNewline);
     }
 
     if (buffer.trim() && !state.done) {
@@ -948,10 +1411,95 @@ async function readStreamingChatCompletion(
 
     return finalizeStreamResult(state);
   } finally {
-    reader?.releaseLock();
-    responseAbortCleanups.get(response)?.();
-    responseAbortCleanups.delete(response);
+    cleanupAbort();
+    try {
+      reader?.releaseLock();
+    } catch {
+      // 流已释放或取消时忽略
+    }
+    cleanupResponseRequestAbort(response);
   }
+}
+
+/**
+ * 将统一 `StreamChatCallbacks` 桥接为 `ChatCompletionArgs.onStreamUpdate` 快照更新事件。
+ */
+function createStreamUpdateBridge(
+  onStreamUpdate: (update: ChatStreamUpdate) => void
+): StreamChatCallbacks {
+  let content = '';
+  let reasoningContent: string | undefined;
+  let thinkingDurationMs: number | undefined;
+  let usage: ChatTokenUsage | undefined;
+  let citations: WebCitation[] | undefined;
+  let webSearchTriggered: boolean | undefined;
+  let toolActivity: ToolActivityItem[] | undefined;
+  let activityTimeline: ActivityTimelineStep[] | undefined;
+  let providerContinuations: ProviderContinuationBlock[] | undefined;
+
+  const emit = (raw?: unknown) => {
+    onStreamUpdate({
+      content,
+      ...(reasoningContent !== undefined ? { reasoningContent } : {}),
+      ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+      ...(usage ? { usage } : {}),
+      ...(citations?.length ? { citations } : {}),
+      ...(webSearchTriggered !== undefined ? { webSearchTriggered } : {}),
+      ...(toolActivity?.length ? { toolActivity } : {}),
+      ...(activityTimeline?.length ? { activityTimeline } : {}),
+      ...(providerContinuations?.length ? { providerContinuations } : {}),
+      ...(raw !== undefined ? { raw } : {}),
+    });
+  };
+
+  return {
+    onTextDelta: (delta, snapshot) => {
+      content = snapshot ?? `${content}${delta}`;
+      emit();
+    },
+    onThinkingDelta: (delta, snapshot) => {
+      reasoningContent = snapshot ?? `${reasoningContent ?? ''}${delta}`;
+      emit();
+    },
+    onThinkingComplete: (durationMs) => {
+      thinkingDurationMs = durationMs;
+      emit();
+    },
+    onToolActivity: (items, timeline) => {
+      toolActivity = items;
+      if (timeline) {
+        activityTimeline = timeline;
+      }
+      emit();
+    },
+    onCitations: (nextCitations, triggered) => {
+      citations = nextCitations;
+      if (triggered !== undefined) {
+        webSearchTriggered = triggered;
+      }
+      emit();
+    },
+    onContinuationBlocks: (blocks) => {
+      providerContinuations = blocks;
+      emit();
+    },
+    onUsage: (nextUsage) => {
+      usage = nextUsage;
+      emit();
+    },
+    onDone: (result) => {
+      content = result.content;
+      reasoningContent = result.reasoningContent;
+      thinkingDurationMs = result.thinkingDurationMs;
+      usage = result.usage;
+      citations = result.citations;
+      webSearchTriggered = result.webSearchTriggered;
+      toolActivity = result.toolActivity;
+      activityTimeline = result.activityTimeline;
+      providerContinuations = result.providerContinuations;
+      emit(result.raw);
+    },
+  };
 }
 
 function appendStreamFragment(current: string, fragment: unknown): string {
@@ -1025,11 +1573,14 @@ function materializeStreamToolCalls(
 function readToolLoopJsonPayload(payload: any): ToolLoopModelResult {
   const message = payload?.choices?.[0]?.message ?? {};
   const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
-  const content = readAssistantText(payload);
+  const rawContent = readAssistantText(payload);
+  const content = rawContent === '模型返回了空内容。' && toolCalls.length ? '' : rawContent;
+  const citations = parseDeepSeekUrlCitations(message.annotations, content);
   return {
-    content: content === '模型返回了空内容。' && toolCalls.length ? '' : content,
+    content,
     reasoningContent: readReasoningText(payload),
     usage: readTokenUsage(payload),
+    ...(citations.length ? { citations } : {}),
     toolCalls,
     raw: payload,
   };
@@ -1037,14 +1588,28 @@ function readToolLoopJsonPayload(payload: any): ToolLoopModelResult {
 
 async function readStreamingToolLoopCompletion(
   response: Response,
-  onStreamUpdate?: (update: ChatStreamUpdate) => void
+  onStreamUpdate?: (update: ChatStreamUpdate) => void,
+  apiKey?: string,
+  signal?: AbortSignal
 ): Promise<ToolLoopModelResult> {
+  const effectiveSignal = signal ?? getResponseRequestSignal(response);
+  if (effectiveSignal?.aborted) {
+    void response.body?.cancel().catch(() => undefined);
+    cleanupResponseRequestAbort(response);
+    throw resolveStreamAbortError(effectiveSignal);
+  }
+
   const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
   if (
     contentType.includes('application/json') ||
     !contentType.includes('text/event-stream')
   ) {
-    const body = await readLimitedResponseText(response, maxJsonResponseBytes, '外部联网搜索对话');
+    const body = await readLimitedResponseText(
+      response,
+      maxJsonResponseBytes,
+      '外部联网搜索对话',
+      effectiveSignal
+    );
     if (looksLikeHtmlResponse(body, contentType)) {
       throw new Error('外部联网搜索对话返回了 HTML 页面，请检查 Base URL。');
     }
@@ -1052,7 +1617,7 @@ async function readStreamingToolLoopCompletion(
       return readToolLoopJsonPayload(JSON.parse(body));
     } catch (error) {
       throw new Error(
-        `外部联网搜索对话返回的 JSON 无法解析：${error instanceof Error ? error.message : String(error)}`
+        `外部联网搜索对话返回的 JSON 无法解析：${redactSecrets(error instanceof Error ? error.message : String(error), apiKey)}`
       );
     }
   }
@@ -1061,12 +1626,14 @@ async function readStreamingToolLoopCompletion(
     content: '',
     reasoningContent: '',
     usage: undefined as ChatTokenUsage | undefined,
+    annotations: [] as unknown[],
     lastPayload: undefined as unknown,
     sawStreamPayload: false,
     done: false,
     toolCalls: new Map<number, StreamToolCallAccumulator>(),
   };
   const decoder = new TextDecoder();
+  const normalizeSseChunk = createSseLineBreakNormalizer();
   let buffer = '';
 
   const processBlock = (block: string) => {
@@ -1088,13 +1655,15 @@ async function readStreamingToolLoopCompletion(
     try {
       payload = JSON.parse(data);
     } catch (error) {
-      throw new Error(`无法解析模型流事件：${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(
+        `无法解析模型流事件：${redactSecrets(error instanceof Error ? error.message : String(error), apiKey)}`
+      );
     }
     if (payload?.error) {
       const message =
         typeof payload.error?.message === 'string'
-          ? payload.error.message
-          : compactResponseText(JSON.stringify(payload.error));
+          ? redactSecrets(payload.error.message, apiKey)
+          : compactResponseText(JSON.stringify(payload.error), apiKey);
       throw new Error(`外部联网搜索流式请求失败：${message}`);
     }
     state.sawStreamPayload = true;
@@ -1102,6 +1671,7 @@ async function readStreamingToolLoopCompletion(
     const contentUpdate = readStreamContentUpdate(payload);
     const reasoningDelta = readStreamReasoningDelta(payload);
     const usage = readTokenUsage(payload);
+    const deltaAnnotations = readAnnotationsFromPayload(payload);
     if (contentUpdate) {
       state.content = contentUpdate.snapshot
         ? contentUpdate.text
@@ -1111,22 +1681,29 @@ async function readStreamingToolLoopCompletion(
       state.reasoningContent += reasoningDelta;
     }
     if (usage) state.usage = usage;
+    if (deltaAnnotations.length) {
+      state.annotations.push(...deltaAnnotations);
+    }
     collectStreamToolCalls(payload, state.toolCalls);
     if (state.content.length + state.reasoningContent.length > maxStreamOutputCharacters) {
       throw new Error('模型输出过长，已停止接收以保护应用内存。');
     }
-    if (contentUpdate?.text || reasoningDelta || usage) {
+    if (contentUpdate?.text || reasoningDelta || usage || deltaAnnotations.length) {
+      const citations = state.annotations.length
+        ? parseDeepSeekUrlCitations(state.annotations, state.content)
+        : [];
       onStreamUpdate?.({
         content: state.content,
         reasoningContent: state.reasoningContent || undefined,
         usage: state.usage,
+        ...(citations.length ? { citations } : {}),
         raw: payload,
       });
     }
   };
 
   const consumeText = (text: string) => {
-    buffer += text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    buffer += normalizeSseChunk.push(text);
     if (new TextEncoder().encode(buffer).byteLength > maxStreamEventBytes) {
       throw new Error('模型流缓冲区过大或事件分隔符无效，已停止接收。');
     }
@@ -1140,34 +1717,75 @@ async function readStreamingToolLoopCompletion(
   };
 
   const reader = response.body?.getReader();
+  const { promise: abortPromise, cleanup: cleanupAbort } = createAbortPromise(
+    effectiveSignal,
+    () => {
+      if (reader) {
+        void reader.cancel().catch(() => undefined);
+      } else {
+        void response.body?.cancel().catch(() => undefined);
+      }
+    }
+  );
   try {
     if (!reader) {
-      consumeText(await response.text());
+      const rawText = abortPromise
+        ? await Promise.race([response.text(), abortPromise])
+        : await response.text();
+      if (effectiveSignal?.aborted) {
+        throw resolveStreamAbortError(effectiveSignal);
+      }
+      consumeText(rawText);
     } else {
       while (!state.done) {
-        const { value, done } = await reader.read();
+        if (effectiveSignal?.aborted) {
+          await reader.cancel().catch(() => undefined);
+          throw resolveStreamAbortError(effectiveSignal);
+        }
+        const { value, done } = abortPromise
+          ? await Promise.race([reader.read(), abortPromise])
+          : await reader.read();
+        if (effectiveSignal?.aborted) {
+          await reader.cancel().catch(() => undefined);
+          throw resolveStreamAbortError(effectiveSignal);
+        }
         if (done) break;
         consumeText(decoder.decode(value, { stream: true }));
       }
-      if (state.done) await reader.cancel();
+      if (effectiveSignal?.aborted) {
+        throw resolveStreamAbortError(effectiveSignal);
+      }
+      if (state.done) await reader.cancel().catch(() => undefined);
       consumeText(decoder.decode());
+    }
+    const trailingNewline = normalizeSseChunk.flush();
+    if (trailingNewline && !state.done) {
+      consumeText(trailingNewline);
     }
     if (buffer.trim() && !state.done) processBlock(buffer);
     if (!state.sawStreamPayload) {
       throw new Error('模型没有返回有效的流式事件。');
     }
     const toolCalls = materializeStreamToolCalls(state.toolCalls);
+    const citations = state.annotations.length
+      ? parseDeepSeekUrlCitations(state.annotations, state.content)
+      : [];
     return {
       content: state.content || (toolCalls.length || state.reasoningContent ? '' : '模型返回了空内容。'),
       reasoningContent: state.reasoningContent || undefined,
       usage: state.usage,
+      ...(citations.length ? { citations } : {}),
       toolCalls,
       raw: state.lastPayload,
     };
   } finally {
-    reader?.releaseLock();
-    responseAbortCleanups.get(response)?.();
-    responseAbortCleanups.delete(response);
+    cleanupAbort();
+    try {
+      reader?.releaseLock();
+    } catch {
+      // 流已释放或取消时忽略
+    }
+    cleanupResponseRequestAbort(response);
   }
 }
 
@@ -1241,7 +1859,7 @@ function isOpenAiReasoningModelId(modelId: string): boolean {
 
 function isDeepSeekV4Model(modelId: string): boolean {
   const text = modelText(modelId);
-  return text.includes('deepseek-v4');
+  return text.includes('deepseek-v4') || text.includes('deepseek-flash');
 }
 
 function isDeepSeekReasonerAlias(modelId: string): boolean {
@@ -1656,34 +2274,67 @@ export async function fetchOpenAiCompatibleModels(
   provider: ProviderProfile,
   signal?: AbortSignal
 ): Promise<ModelInfo[]> {
-  const baseUrl = assertBaseUrl(provider);
-  const requestUrl = `${baseUrl}/models`;
-  const response = await providerFetch(requestUrl, {
-    method: 'GET',
-    headers: authHeaders(provider),
-    signal,
-  }, discoveryRequestTimeoutMs);
+  let requestUrl: string;
+  let discoveryProtocol: 'openai' | 'anthropic' | 'gemini' = 'openai';
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+  };
 
-  let payload: { data?: RemoteModel[]; error?: unknown };
   try {
-    payload = await readJsonResponse<{ data?: RemoteModel[]; error?: unknown }>(response, requestUrl, '模型列表获取');
+    const discoveryRequest = buildModelDiscoveryRequest(provider);
+    requestUrl = discoveryRequest.url;
+    discoveryProtocol = discoveryRequest.protocol;
+    for (const [key, value] of Object.entries(discoveryRequest.headers)) {
+      setHeaderCaseInsensitive(headers, key, value);
+    }
+  } catch (error) {
+    if (!isRelayOrCustomProvider(provider)) {
+      throw sanitizeErrorMessage(error, provider.apiKey);
+    }
+    const baseUrl = assertBaseUrl(provider);
+    requestUrl = `${baseUrl}/models`;
+    for (const [key, value] of Object.entries(resolveProviderAuthHeaders(provider))) {
+      setHeaderCaseInsensitive(headers, key, value);
+    }
+  }
+
+  const response = await providerFetch(
+    requestUrl,
+    {
+      method: 'GET',
+      headers,
+      signal,
+    },
+    discoveryRequestTimeoutMs
+  ).catch((error) => {
+    throw sanitizeErrorMessage(error, provider.apiKey);
+  });
+
+  let payload: { data?: RemoteModel[]; models?: RemoteModel[]; error?: unknown };
+  try {
+    payload = await readJsonResponse<{ data?: RemoteModel[]; models?: RemoteModel[]; error?: unknown }>(
+      response,
+      requestUrl,
+      '模型列表获取',
+      provider.apiKey
+    );
   } catch (error) {
     if (
       provider.kind !== 'bailian-compatible' ||
       isAbortError(error) ||
       (error instanceof Error && error.name === 'TimeoutError')
     ) {
-      throw error;
+      throw sanitizeErrorMessage(error, provider.apiKey);
     }
 
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = redactSecrets(error instanceof Error ? error.message : String(error), provider.apiKey);
     throw new Error(
       `百炼的 OpenAI 兼容 /models 接口当前不可用。请在百炼模型目录或控制台确认 Model ID 后，使用“手动添加模型”继续。详情：${detail}`
     );
   }
 
-  if ((payload as { error?: unknown }).error) {
-    const detail = compactResponseText(JSON.stringify((payload as { error: unknown }).error));
+  if (payload && typeof payload === 'object' && !Array.isArray(payload) && (payload as { error?: unknown }).error) {
+    const detail = compactResponseText(JSON.stringify((payload as { error: unknown }).error), provider.apiKey);
     if (provider.kind === 'bailian-compatible') {
       throw new Error(
         `百炼的 OpenAI 兼容 /models 接口返回错误。请在百炼模型目录或控制台确认 Model ID 后，使用“手动添加模型”继续。详情：${detail}`
@@ -1691,12 +2342,34 @@ export async function fetchOpenAiCompatibleModels(
     }
     throw new Error(`模型列表接口返回错误：${detail}`);
   }
-  if (provider.kind === 'bailian-compatible' && !Array.isArray(payload.data)) {
+  if (
+    provider.kind === 'bailian-compatible' &&
+    (!payload || typeof payload !== 'object' || !Array.isArray(payload.data))
+  ) {
     throw new Error(
       '百炼的 OpenAI 兼容 /models 响应未包含模型列表。请在百炼模型目录或控制台确认 Model ID 后，使用“手动添加模型”继续。'
     );
   }
-  const remoteModels = Array.isArray(payload.data) ? payload.data : [];
+  // 对于非 Gemini 的标准 OpenAI/Anthropic `{ data: [...] }` 列表，
+  // 严格过滤缺少有效 `id` 字段的脏条目（避免 `{ name: '...' }` 无 id 脏数据被当成模型 ID）。
+  const normalizedPayload =
+    payload &&
+    typeof payload === 'object' &&
+    !Array.isArray(payload) &&
+    Array.isArray(payload.data) &&
+    discoveryProtocol !== 'gemini'
+      ? {
+          ...payload,
+          data: payload.data.filter(
+            (item) =>
+              item &&
+              typeof item === 'object' &&
+              typeof (item as { id?: unknown }).id === 'string' &&
+              (item as { id: string }).id.trim().length > 0
+          ),
+        }
+      : payload;
+  const remoteModels = parseDiscoveredModelsPayload(provider, normalizedPayload);
   const seen = new Set<string>();
 
   return remoteModels
@@ -1716,20 +2389,6 @@ export async function fetchOpenAiCompatibleModels(
 function latestUserPrompt(messages: ChatMessage[]): string {
   const message = [...messages].reverse().find((item) => item.role === 'user' && item.content.trim());
   return message?.content.trim() ?? '';
-}
-
-function isDallEModel(modelId: string): boolean {
-  return /(?:^|[/_-])dall[·._-]?e[._-]?(?:2|3)(?:$|[/_.-])/i.test(modelId);
-}
-
-function generatedImageUrls(payload: any): string[] {
-  if (!Array.isArray(payload?.data)) {
-    return [];
-  }
-
-  return payload.data
-    .map((image: any) => nonEmptyText(image?.url) ?? nonEmptyText(image?.image_url?.url) ?? nonEmptyText(image?.b64_json))
-    .filter((url: string | undefined): url is string => Boolean(url));
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -1762,18 +2421,7 @@ function videoTaskUrl(task: ArkVideoTaskResponse): string | undefined {
 }
 
 function safeExternalMediaUrl(value: string | undefined): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-  try {
-    const url = new URL(value);
-    if (url.protocol === 'https:' || (url.protocol === 'http:' && isLoopbackHostname(url.hostname))) {
-      return url.toString();
-    }
-  } catch {
-    return undefined;
-  }
-  return undefined;
+  return safePublicHttpsUrl(value);
 }
 
 async function retrieveArkVideoTask(
@@ -1782,19 +2430,31 @@ async function retrieveArkVideoTask(
   signal?: AbortSignal
 ): Promise<ArkVideoTaskResponse> {
   const baseUrl = assertBaseUrl(provider);
-  const response = await providerFetch(`${baseUrl}/contents/generations/tasks/${encodeURIComponent(taskId)}`, {
-    method: 'GET',
-    headers: authHeaders(provider),
-    signal,
+  const response = await providerFetch(
+    `${baseUrl}/contents/generations/tasks/${encodeURIComponent(taskId)}`,
+    {
+      method: 'GET',
+      headers: authHeaders(provider),
+      signal,
+    }
+  ).catch((error) => {
+    if (isAbortError(error)) {
+      throw error;
+    }
+    throw sanitizeErrorMessage(error, provider.apiKey);
   });
 
   if (!response.ok) {
     const body = await readLimitedResponseText(response, maxErrorResponseBytes, '视频生成任务查询');
-    throw new Error(`视频生成任务查询失败：${response.status} ${body.slice(0, 240)}`);
+    throw new Error(`视频生成任务查询失败：${response.status} ${sanitizeErrorSnippet(body, provider.apiKey, 240)}`);
   }
 
   const body = await readLimitedResponseText(response, maxJsonResponseBytes, '视频生成任务查询');
-  return JSON.parse(body) as ArkVideoTaskResponse;
+  try {
+    return JSON.parse(body) as ArkVideoTaskResponse;
+  } catch (error) {
+    throw sanitizeErrorMessage(error, provider.apiKey);
+  }
 }
 
 function videoTaskAttachment(taskId: string, modelId: string, videoUrl: string): MediaAttachment {
@@ -1838,7 +2498,8 @@ export async function queryGenerationTask(
 
   const payload = await retrieveArkVideoTask(provider, task.taskId, signal);
   const status = (videoTaskStatus(payload) ?? task.status ?? 'submitted').toLowerCase();
-  const videoUrl = safeExternalMediaUrl(videoTaskUrl(payload));
+  const rawVideoUrl = videoTaskUrl(payload);
+  const videoUrl = safeExternalMediaUrl(rawVideoUrl);
   const generationTask: GenerationTaskInfo = {
     ...task,
     status,
@@ -1851,7 +2512,10 @@ export async function queryGenerationTask(
     throw new Error(`视频生成任务已取消。任务 ID：${task.taskId}`);
   }
   if (status === 'failed') {
-    throw new Error(`视频生成任务失败：${payload.error?.message ?? task.taskId}`);
+    throw new Error(`视频生成任务失败：${redactSecrets(payload.error?.message ?? task.taskId, provider.apiKey)}`);
+  }
+  if (rawVideoUrl && !videoUrl) {
+    throw new Error('视频生成返回了不安全的媒体链接，已拒绝读取。');
   }
 
   if (videoUrl) {
@@ -1871,74 +2535,6 @@ export async function queryGenerationTask(
   return {
     content: `视频生成任务尚未完成，任务 ID：${task.taskId}，当前状态：${status}。`,
     generationTask,
-    raw: payload,
-  };
-}
-
-async function sendImageGenerationRequest(
-  provider: ProviderProfile,
-  modelId: string,
-  messages: ChatMessage[],
-  signal?: AbortSignal
-): Promise<ChatCompletionResult> {
-  const baseUrl = assertBaseUrl(provider);
-  const prompt = latestUserPrompt(messages);
-
-  if (!prompt) {
-    throw new Error('请先输入图片生成提示词。');
-  }
-  if (messages.some((message) => message.attachments?.length)) {
-    throw new Error('当前图片生成适配器只支持文本生图，尚未接入参考图编辑接口。');
-  }
-
-  const requestBody: Record<string, unknown> = {
-    model: modelId,
-    prompt,
-    size: '1024x1024',
-  };
-  if (isDallEModel(modelId)) {
-    // DALL-E download URLs expire quickly; base64 lets the native client move
-    // the image into durable app storage before saving the conversation.
-    requestBody.response_format = 'b64_json';
-  } else if (/gpt[._-]?image/i.test(modelId)) {
-    // GPT Image 系列固定返回 base64，不支持 response_format。
-    requestBody.output_format = 'png';
-  }
-
-  const response = await providerFetch(`${baseUrl}/images/generations`, {
-    method: 'POST',
-    headers: authHeaders(provider),
-    body: JSON.stringify(requestBody),
-    signal,
-  });
-
-  if (!response.ok) {
-    const body = await readLimitedResponseText(response, maxErrorResponseBytes, '图片生成');
-    throw new Error(`图片生成请求失败：${response.status} ${body.slice(0, 320)}`);
-  }
-
-  const responseBody = await readLimitedResponseText(response, maxGeneratedImageResponseBytes, '图片生成');
-  const payload = JSON.parse(responseBody);
-  const persistedImages = await Promise.all(
-    generatedImageUrls(payload).map((imageUrl, index) => persistGeneratedAttachmentSafely({
-      id: `generated-image-${Date.now()}-${index}`,
-      kind: 'image',
-      uri: imageUrl.startsWith('data:') ? imageUrl : imageUrl.startsWith('http') ? imageUrl : `data:image/png;base64,${imageUrl}`,
-      name: `${modelId}-${index + 1}.png`,
-      mimeType: 'image/png',
-    }))
-  );
-  const attachments = persistedImages.map((item) => item.attachment);
-  const hasTemporaryImage = persistedImages.some((item) => !item.durable);
-
-  return {
-    content: attachments.length
-      ? hasTemporaryImage
-        ? '图片生成完成，但部分远程图片未能复制到本地，请尽快导出。'
-        : '图片生成完成。'
-      : '图片生成完成，但响应中没有可展示的图片 URL。',
-    usage: readTokenUsage(payload),
-    attachments,
     raw: payload,
   };
 }
@@ -1978,15 +2574,25 @@ async function sendArkVideoGenerationRequest(
       ],
     }),
     signal,
+  }).catch((error) => {
+    if (isAbortError(error)) {
+      throw error;
+    }
+    throw sanitizeErrorMessage(error, provider.apiKey);
   });
 
   if (!response.ok) {
     const body = await readLimitedResponseText(response, maxErrorResponseBytes, '视频生成任务提交');
-    throw new Error(`视频生成任务提交失败：${response.status} ${body.slice(0, 320)}`);
+    throw new Error(`视频生成任务提交失败：${response.status} ${sanitizeErrorSnippet(body, provider.apiKey, 320)}`);
   }
 
   const responseBody = await readLimitedResponseText(response, maxJsonResponseBytes, '视频生成任务提交');
-  const payload = JSON.parse(responseBody) as ArkVideoTaskResponse;
+  let payload: ArkVideoTaskResponse;
+  try {
+    payload = JSON.parse(responseBody) as ArkVideoTaskResponse;
+  } catch (error) {
+    throw sanitizeErrorMessage(error, provider.apiKey);
+  }
   const taskId = payload.id;
 
   if (!taskId) {
@@ -2022,7 +2628,8 @@ async function sendArkVideoGenerationRequest(
   }
 
   const status = (videoTaskStatus(task) ?? 'submitted').toLowerCase();
-  const videoUrl = safeExternalMediaUrl(videoTaskUrl(task));
+  const rawVideoUrl = videoTaskUrl(task);
+  const videoUrl = safeExternalMediaUrl(rawVideoUrl);
   const updatedTask: GenerationTaskInfo = {
     ...generationTask,
     status,
@@ -2035,7 +2642,10 @@ async function sendArkVideoGenerationRequest(
     throw new Error(`视频生成任务已取消。任务 ID：${taskId}`);
   }
   if (status === 'failed') {
-    throw new Error(`视频生成任务失败：${task.error?.message ?? taskId}`);
+    throw new Error(`视频生成任务失败：${redactSecrets(task.error?.message ?? taskId, provider.apiKey)}`);
+  }
+  if (rawVideoUrl && !videoUrl) {
+    throw new Error('视频生成返回了不安全的媒体链接，已拒绝读取。');
   }
 
   if (videoUrl) {
@@ -2203,20 +2813,19 @@ async function sendExternalSearchToolChat({
       `${baseUrl}/chat/completions`,
       {
         method: 'POST',
-        headers: {
-          ...authHeaders(provider),
-          Accept: 'text/event-stream, application/json',
-        },
+        headers: authHeaders(provider, { Accept: 'text/event-stream, application/json' }),
         body: JSON.stringify(body),
         signal,
       },
       openAiProRequestTimeoutMs
-    );
+    ).catch((error) => {
+      throw sanitizeErrorMessage(error, provider.apiKey);
+    });
     if (!response.ok) {
       const responseBody = await readLimitedResponseText(response, maxErrorResponseBytes, label);
-      throw new Error(`${label}失败：${response.status} ${compactResponseText(responseBody)}`);
+      throw new Error(`${label}失败：${response.status} ${compactResponseText(responseBody, provider.apiKey)}`);
     }
-    return readStreamingToolLoopCompletion(response, onPartial);
+    return readStreamingToolLoopCompletion(response, onPartial, provider.apiKey, signal);
   };
 
   const publish = (extra?: Partial<ChatStreamUpdate>) => {
@@ -2408,11 +3017,20 @@ async function sendExternalSearchToolChat({
           toolSummary = `返回 ${result.items.length} 条结果`;
           args = { query };
         } catch (error) {
+          if (isAbortError(error) || signal?.aborted) {
+            throw error;
+          }
+          const rawError = error instanceof Error ? error.message : String(error);
+          // 必须对外部搜索密钥与主模型服务商密钥同时执行二次脱敏，防止凭据跨服务商或向界面泄露
+          const safeError = redactSecrets(
+            redactSecrets(rawError, service.apiKey),
+            provider.apiKey
+          );
           toolContent = JSON.stringify({
-            error: error instanceof Error ? error.message : String(error),
+            error: safeError,
           });
           toolStatus = 'failed';
-          toolSummary = error instanceof Error ? error.message : '搜索失败';
+          toolSummary = error instanceof Error ? safeError : '搜索失败';
         }
       }
       const finishedAt = Date.now();
@@ -2526,6 +3144,11 @@ async function sendExternalSearchToolChat({
   };
 }
 
+function isOpenAiSearchPreviewModel(modelId: string): boolean {
+  const canonical = modelId.trim().toLowerCase().replace(/-\d{4}-\d{2}-\d{2}$/, '');
+  return canonical === 'gpt-4o-search-preview' || canonical === 'gpt-4o-mini-search-preview';
+}
+
 export async function sendOpenAiCompatibleChat({
   provider,
   modelId,
@@ -2534,6 +3157,7 @@ export async function sendOpenAiCompatibleChat({
   reasoningEffort,
   parameterSettings,
   maxOutputTokens,
+  imageOptions,
   onStreamUpdate,
   webSearch,
   externalSearch,
@@ -2557,7 +3181,38 @@ export async function sendOpenAiCompatibleChat({
   }
 
   if (task === 'image-generation') {
-    return sendImageGenerationRequest(provider, modelId, messages, signal);
+    const prompt = latestUserPrompt(messages);
+    const latestUserMsg = [...messages].reverse().find((msg) => msg.role === 'user');
+    const latestAssistantMsg = [...messages]
+      .reverse()
+      .find((msg) => msg.role === 'assistant' && msg.providerContinuations?.length);
+    const mergedRefMap = new Map<string, MediaAttachment>();
+    for (const att of imageOptions?.referenceImages ?? []) {
+      mergedRefMap.set(att.id, att);
+    }
+    for (const att of latestUserMsg?.attachments ?? []) {
+      if (!mergedRefMap.has(att.id)) {
+        mergedRefMap.set(att.id, att);
+      }
+    }
+    const mergedRefs = Array.from(mergedRefMap.values());
+    const mergedOptions: ImageGenerationOptions | undefined =
+      imageOptions || mergedRefs.length > 0
+        ? {
+            ...imageOptions,
+            ...(mergedRefs.length > 0 ? { referenceImages: mergedRefs } : {}),
+          }
+        : undefined;
+
+    return generateImages({
+      provider,
+      modelId,
+      prompt,
+      options: mergedOptions,
+      continuationBlocks: latestAssistantMsg?.providerContinuations,
+      messages,
+      signal,
+    });
   }
 
   if (task === 'video-generation') {
@@ -2685,6 +3340,111 @@ export async function sendOpenAiCompatibleChat({
     assertProviderWebSearchMessagesSupported(provider, messages);
     const requestMessages = await materializeMessagesForRequest(messages, provider);
     const searchProtocol = resolveProviderWebSearchProtocol(provider);
+    const normalizedEffort = normalizeReasoningEffort(provider, requestModel, reasoningEffort);
+
+    if (searchProtocol === 'openai-official' && isOpenAiSearchPreviewModel(modelId)) {
+      const baseUrl = assertBaseUrl(provider);
+      const body: Record<string, unknown> = {
+        model: modelId,
+        messages: requestMessages.map((message) => toOpenAiMessage(message, provider)),
+        web_search_options: {
+          search_context_size: webSearch.searchContextSize,
+        },
+        stream: true,
+        stream_options: {
+          include_usage: true,
+        },
+      };
+      applyOutputTokenLimit(body, provider, maxOutputTokens);
+      const response = await providerFetch(
+        `${baseUrl}/chat/completions`,
+        {
+          method: 'POST',
+          headers: authHeaders(provider, { Accept: 'text/event-stream, application/json' }),
+          body: JSON.stringify(body),
+          signal,
+        },
+        openAiProRequestTimeoutMs
+      ).catch((error) => {
+        throw sanitizeErrorMessage(error, provider.apiKey);
+      });
+      if (!response.ok) {
+        const responseBody = await readLimitedResponseText(response, maxErrorResponseBytes, '联网搜索');
+        throw new Error(`联网搜索请求失败：${response.status} ${compactResponseText(responseBody, provider.apiKey)}`);
+      }
+      return readStreamingChatCompletion(response, onStreamUpdate, {
+        apiKey: provider.apiKey,
+        signal,
+      });
+    }
+
+    if (searchProtocol === 'openai-official' && onStreamUpdate) {
+      try {
+        return await sendOpenAiResponsesChat(
+          {
+            provider,
+            modelId,
+            messages: requestMessages,
+            reasoningEffort: normalizedEffort,
+            reasoningSummary: 'auto',
+            ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+            stream: true,
+            webSearch: {
+              enabled: true,
+              searchContextSize: webSearch.searchContextSize,
+            },
+            signal,
+            timeoutMs: openAiProRequestTimeoutMs,
+          },
+          createStreamUpdateBridge(onStreamUpdate)
+        );
+      } catch (error) {
+        if (isAbortError(error)) {
+          throw error;
+        }
+        throw sanitizeErrorMessage(error, provider.apiKey);
+      }
+    }
+
+    if (searchProtocol === 'deepseek-official') {
+      const request = buildProviderWebSearchRequest({
+        provider,
+        modelId,
+        messages: requestMessages,
+        ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+      });
+      const body: Record<string, unknown> = {
+        ...request.body,
+        stream: true,
+        stream_options: { include_usage: true },
+      };
+      applyModelParameterOptions(body, parameterSettings, provider, requestModel, normalizedEffort);
+      applyOutputTokenLimit(body, provider, maxOutputTokens);
+      applyReasoningOptions(body, provider, modelId, normalizedEffort);
+
+      const response = await providerFetch(
+        request.url,
+        {
+          method: 'POST',
+          headers: authHeaders(provider, { Accept: 'text/event-stream, application/json' }),
+          body: JSON.stringify(body),
+          signal,
+        },
+        openAiProRequestTimeoutMs
+      ).catch((error) => {
+        throw sanitizeErrorMessage(error, provider.apiKey);
+      });
+      if (!response.ok) {
+        const responseBody = await readLimitedResponseText(response, maxErrorResponseBytes, '联网搜索');
+        throw new Error(`联网搜索请求失败：${response.status} ${compactResponseText(responseBody, provider.apiKey)}`);
+      }
+      return readStreamingChatCompletion(response, onStreamUpdate, {
+        allowDeepSeekServerTools: true,
+        apiKey: provider.apiKey,
+        signal,
+      });
+    }
+
     const request = buildProviderWebSearchRequest({
       provider,
       modelId,
@@ -2703,22 +3463,55 @@ export async function sendOpenAiCompatibleChat({
         signal,
       },
       openAiProRequestTimeoutMs
-    );
+    ).catch((error) => {
+      throw sanitizeErrorMessage(error, provider.apiKey);
+    });
+    if (!response.ok) {
+      const responseBody = await readLimitedResponseText(
+        response,
+        maxErrorResponseBytes,
+        '联网搜索'
+      );
+      throw new Error(`联网搜索请求失败：${response.status} ${compactResponseText(responseBody, provider.apiKey)}`);
+    }
+    const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+    if (contentType.includes('text/event-stream')) {
+      try {
+        return await readOpenAiResponsesStream(
+          response,
+          onStreamUpdate ? createStreamUpdateBridge(onStreamUpdate) : undefined,
+          { continuationProvider: 'openai', signal }
+        );
+      } catch (error) {
+        throw sanitizeErrorMessage(error, provider.apiKey);
+      } finally {
+        cleanupResponseRequestAbort(response);
+      }
+    }
     const responseBody = await readLimitedResponseText(
       response,
-      response.ok ? openAiResponsesLimits.maxResponseJsonBytes : maxErrorResponseBytes,
+      openAiResponsesLimits.maxResponseJsonBytes,
       '联网搜索'
     );
-    if (!response.ok) {
-      throw new Error(`联网搜索请求失败：${response.status} ${compactResponseText(responseBody)}`);
+    let result: ReturnType<typeof parseProviderWebSearchResponse>;
+    try {
+      result = parseProviderWebSearchResponse({ provider, payload: responseBody });
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw error;
+      }
+      throw sanitizeErrorMessage(error, provider.apiKey);
     }
-    const result = parseProviderWebSearchResponse({ provider, payload: responseBody });
     return {
       content: result.content,
       reasoningContent: result.reasoningContent,
       usage: result.usage,
       citations: result.citations,
       webSearchTriggered: result.webSearchTriggered,
+      ...(result.toolActivity?.length ? { toolActivity: result.toolActivity } : {}),
+      ...(result.providerContinuations?.length
+        ? { providerContinuations: result.providerContinuations }
+        : {}),
       raw: result,
     };
   }
@@ -2744,11 +3537,35 @@ export async function sendOpenAiCompatibleChat({
 
   if (isOpenAiResponsesOnlyModel(provider, modelId)) {
     const requestMessages = await materializeMessagesForRequest(messages, provider);
+    const normalizedEffort = normalizeReasoningEffort(provider, requestModel, reasoningEffort);
+    if (onStreamUpdate) {
+      try {
+        return await sendOpenAiResponsesChat(
+          {
+            provider,
+            modelId,
+            messages: requestMessages,
+            reasoningEffort: normalizedEffort,
+            reasoningSummary: 'auto',
+            ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+            stream: true,
+            signal,
+            timeoutMs: openAiProRequestTimeoutMs,
+          },
+          createStreamUpdateBridge(onStreamUpdate)
+        );
+      } catch (error) {
+        if (isAbortError(error)) {
+          throw error;
+        }
+        throw sanitizeErrorMessage(error, provider.apiKey);
+      }
+    }
     const request = buildOpenAiResponsesRequest({
       provider,
       modelId,
       messages: requestMessages,
-      reasoningEffort: normalizeReasoningEffort(provider, requestModel, reasoningEffort),
+      reasoningEffort: normalizedEffort,
       ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     });
     const response = await providerFetch(
@@ -2760,16 +3577,43 @@ export async function sendOpenAiCompatibleChat({
         signal,
       },
       openAiProRequestTimeoutMs
-    );
+    ).catch((error) => {
+      throw sanitizeErrorMessage(error, provider.apiKey);
+    });
+    if (!response.ok) {
+      const responseBody = await readLimitedResponseText(
+        response,
+        maxErrorResponseBytes,
+        'OpenAI Responses'
+      );
+      throw new Error(`OpenAI Responses 请求失败：${response.status} ${compactResponseText(responseBody, provider.apiKey)}`);
+    }
+    const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+    if (contentType.includes('text/event-stream')) {
+      try {
+        return await readOpenAiResponsesStream(response, undefined, {
+          continuationProvider: 'openai',
+          signal,
+        });
+      } catch (error) {
+        throw sanitizeErrorMessage(error, provider.apiKey);
+      } finally {
+        cleanupResponseRequestAbort(response);
+      }
+    }
     const responseBody = await readLimitedResponseText(
       response,
-      response.ok ? openAiResponsesLimits.maxResponseJsonBytes : maxErrorResponseBytes,
+      openAiResponsesLimits.maxResponseJsonBytes,
       'OpenAI Responses'
     );
-    if (!response.ok) {
-      throw new Error(`OpenAI Responses 请求失败：${response.status} ${compactResponseText(responseBody)}`);
+    try {
+      return parseOpenAiResponsesResponse(responseBody);
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw error;
+      }
+      throw sanitizeErrorMessage(error, provider.apiKey);
     }
-    return parseOpenAiResponsesResponse(responseBody);
   }
 
   const baseUrl = assertBaseUrl(provider);
@@ -2789,12 +3633,11 @@ export async function sendOpenAiCompatibleChat({
 
   const response = await providerFetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
-    headers: {
-      ...authHeaders(provider),
-      Accept: 'text/event-stream, application/json',
-    },
+    headers: authHeaders(provider, { Accept: 'text/event-stream, application/json' }),
     body: JSON.stringify(body),
     signal,
+  }).catch((error) => {
+    throw sanitizeErrorMessage(error, provider.apiKey);
   });
 
   if (!response.ok) {
@@ -2804,8 +3647,12 @@ export async function sendOpenAiCompatibleChat({
         `对话请求失败：当前模型 ID「${modelId}」不存在或当前 API Key 无权调用。请在配置页点击“获取模型”，选择接口返回的可用模型；如果火山控制台显示的是专属 Endpoint ID，请手动添加那个 ID。`
       );
     }
-    throw new Error(`对话请求失败：${response.status} ${body.slice(0, 320)}`);
+    throw new Error(`对话请求失败：${response.status} ${sanitizeErrorSnippet(body, provider.apiKey, 320)}`);
   }
 
-  return readStreamingChatCompletion(response, onStreamUpdate);
+  return readStreamingChatCompletion(response, onStreamUpdate, {
+    allowDeepSeekServerTools: isExactOfficialDeepSeekProvider(provider),
+    apiKey: provider.apiKey,
+    signal,
+  });
 }

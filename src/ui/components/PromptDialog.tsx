@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react';
 import {
   KeyboardAvoidingView,
-  Modal,
   Platform,
   Pressable,
   StyleSheet,
@@ -9,7 +8,9 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AnimatedPressable } from './AnimatedPressable';
+import { OverlayPortal } from './AppDialogHost';
 import { MotionItem } from './Motion';
 import { useKelivoTheme, type KelivoTheme } from '../theme';
 
@@ -47,21 +48,31 @@ export function PromptDialog({
   onCancel,
 }: PromptDialogProps) {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = getStyles(theme);
 
   return (
-    <Modal
+    <OverlayPortal
       visible={visible}
-      transparent
-      statusBarTranslucent
-      animationType="fade"
+      layer="dialog"
       onRequestClose={onCancel}
     >
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined}
         style={styles.keyboard}
       >
-        <Pressable style={styles.scrim} onPress={onCancel}>
+        <Pressable
+          style={[
+            styles.scrim,
+            {
+              paddingTop: Math.max(24, insets.top + 12),
+              paddingBottom: Math.max(24, insets.bottom + 12),
+              paddingLeft: Math.max(24, insets.left + 12),
+              paddingRight: Math.max(24, insets.right + 12),
+            },
+          ]}
+          onPress={onCancel}
+        >
           <MotionItem
             delay={20}
             distance={12}
@@ -112,7 +123,7 @@ export function PromptDialog({
           </MotionItem>
         </Pressable>
       </KeyboardAvoidingView>
-    </Modal>
+    </OverlayPortal>
   );
 }
 
@@ -127,12 +138,6 @@ function createStyles(theme: KelivoTheme) {
       justifyContent: 'center',
       paddingHorizontal: 24,
       backgroundColor: theme.colors.scrim,
-      ...(Platform.OS === 'web'
-        ? ({
-            position: 'fixed',
-            inset: 0,
-          } as any)
-        : {}),
     },
     dialogMotion: {
       width: '100%',

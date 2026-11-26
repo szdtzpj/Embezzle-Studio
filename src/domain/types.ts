@@ -1,5 +1,9 @@
 export type ProviderKind =
   | 'openai-compatible'
+  | 'anthropic'
+  | 'gemini'
+  | 'xai-grok'
+  | 'deepseek'
   | 'volcengine-ark'
   | 'bailian-compatible'
   | 'new-api-relay'
@@ -134,17 +138,47 @@ export interface ModelInfo {
   source: 'preset' | 'remote' | 'manual';
 }
 
+/** 服务商自定义请求头配置项。 */
+export interface ProviderCustomHeader {
+  key: string;
+  value: string;
+  enabled?: boolean;
+}
+
+/** 服务商鉴权请求头注入模式。 */
+export type ProviderAuthHeaderMode =
+  | 'auto'
+  | 'bearer'
+  | 'x-api-key'
+  | 'x-goog-api-key'
+  | 'custom';
+
+/** 服务商生图接口协议模式。 */
+export type ProviderImageApiMode =
+  | 'auto'
+  | 'openai-images'
+  | 'openai-responses'
+  | 'gemini-generate-content'
+  | 'xai-json'
+  | 'unsupported';
+
 export interface ProviderProfile {
   id: string;
   name: string;
   kind: ProviderKind;
   baseUrl: string;
   apiKey?: string;
+  customHeaders?: ProviderCustomHeader[];
+  authHeaderMode?: ProviderAuthHeaderMode;
+  imageApiMode?: ProviderImageApiMode;
   capabilities: Capability[];
   models: ModelInfo[];
   notes?: string;
   enabled?: boolean;
 }
+
+/** 契约兼容别名，等价于 ProviderProfile。 */
+export type ProviderConfig = ProviderProfile;
 
 export interface MediaAttachment {
   id: string;
@@ -158,6 +192,9 @@ export interface MediaAttachment {
   durationMs?: number | null;
   base64?: string | null;
 }
+
+/** 契约兼容别名，等价于 MediaAttachment。 */
+export type AttachmentItem = MediaAttachment;
 
 export interface ChatTokenUsage {
   inputTokens?: number;
@@ -328,10 +365,9 @@ export interface WebSearchSettings {
 }
 
 /**
- * User-supplied third-party web search, separate from provider-hosted Responses search.
- * Bing, DuckDuckGo, and Firecrawl cloud can start without an API key.
- * Firecrawl accepts an optional key for higher limits, and self-hosted endpoints
- * may likewise be configured without one.
+ * 用户自定义的第三方外部网络搜索服务（独立于模型服务商内置搜索）。
+ * Bing、DuckDuckGo、Firecrawl 与自托管 SearXNG 可在无 API Key 下运行（其中 SearXNG
+ * 必须配置合法的公网 HTTPS 实例地址）；Tavily、Brave、Grok、DeepSeek、Bocha 与 Exa 需配置 API Key。
  */
 export type ExternalSearchProviderKind =
   | 'tavily'
@@ -339,7 +375,11 @@ export type ExternalSearchProviderKind =
   | 'grok'
   | 'bing'
   | 'duckduckgo'
-  | 'firecrawl';
+  | 'firecrawl'
+  | 'deepseek'
+  | 'bocha'
+  | 'exa'
+  | 'searxng';
 
 export interface ExternalSearchService {
   id: string;
@@ -426,6 +466,88 @@ export interface ActivityTimelineStep {
   finishedAt?: number;
 }
 
+/**
+ * 多轮对话中需原样回传的服务商状态续接块（严格可 JSON 序列化）。
+ */
+export type ProviderContinuationBlock =
+  | {
+      provider: 'anthropic';
+      type: 'thinking';
+      thinking: string;
+      signature: string;
+    }
+  | {
+      provider: 'anthropic';
+      type: 'redacted_thinking';
+      data: string;
+    }
+  | {
+      provider: 'anthropic';
+      type: 'server_tool_use';
+      id: string;
+      name: string;
+      input: Record<string, unknown>;
+    }
+  | {
+      provider: 'anthropic';
+      type: 'web_search_tool_result';
+      toolUseId: string;
+      content: unknown[];
+    }
+  | {
+      provider: 'gemini';
+      type: 'thought_signature';
+      thoughtSignature: string;
+      partRole?: 'text' | 'image' | 'function_call';
+      attachmentId?: string;
+    }
+  | {
+      provider: 'openai' | 'xai';
+      type: 'reasoning_encrypted';
+      id?: string;
+      encryptedContent: string;
+      summary?: string[];
+    }
+  | {
+      provider: 'deepseek';
+      type: 'server_tool_calls';
+      serverToolCalls: unknown[];
+    };
+
+/** 生图画面比例。 */
+export type ImageAspectRatio =
+  | '1:1'
+  | '3:2'
+  | '2:3'
+  | '4:3'
+  | '3:4'
+  | '16:9'
+  | '9:16'
+  | '21:9';
+
+/** 跨协议生图请求参数。 */
+export interface ImageGenerationOptions {
+  aspectRatio?: ImageAspectRatio;
+  quality?: 'low' | 'medium' | 'high' | 'auto';
+  resolution?: '1k' | '2k' | '4k';
+  count?: number;
+  referenceImages?: MediaAttachment[];
+}
+
+/** 统一流式对话事件回调接口。 */
+export interface StreamChatCallbacks {
+  onTextDelta?: (delta: string, snapshot?: string) => void;
+  onThinkingDelta?: (delta: string, snapshot?: string) => void;
+  onThinkingComplete?: (durationMs: number) => void;
+  onToolActivity?: (items: ToolActivityItem[], timeline?: ActivityTimelineStep[]) => void;
+  onCitations?: (citations: WebCitation[], webSearchTriggered?: boolean) => void;
+  onImageGenerated?: (attachments: MediaAttachment[]) => void;
+  onContinuationBlocks?: (blocks: ProviderContinuationBlock[]) => void;
+  onUsage?: (usage: ChatTokenUsage) => void;
+  onDone?: (result: ChatCompletionResult) => void;
+  onError?: (error: Error) => void;
+}
+
 export interface ChatMessage {
   id: string;
   originMessageId?: string;
@@ -435,6 +557,8 @@ export interface ChatMessage {
   status: MessageStatus;
   attachments?: MediaAttachment[];
   reasoningContent?: string;
+  thinkingDurationMs?: number;
+  providerContinuations?: ProviderContinuationBlock[];
   usage?: ChatTokenUsage;
   citations?: WebCitation[];
   webSearchTriggered?: boolean;
@@ -521,6 +645,8 @@ export interface AppWorkspace {
 export interface ChatCompletionResult {
   content: string;
   reasoningContent?: string;
+  thinkingDurationMs?: number;
+  providerContinuations?: ProviderContinuationBlock[];
   usage?: ChatTokenUsage;
   citations?: WebCitation[];
   webSearchTriggered?: boolean;

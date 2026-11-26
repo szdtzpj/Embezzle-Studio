@@ -2,13 +2,22 @@ import type {
   Capability,
   ModelInfo,
   ModelTask,
+  ProviderCustomHeader,
   ProviderKind,
   ProviderProfile,
 } from '../domain/types';
-import { inferModelTask } from './modelCapabilities';
+import {
+  inferModelTask,
+  normalizeRemoteModelEntry,
+  type RemoteModelMetadata,
+} from './modelCapabilities';
 
 export type ProviderEndpointFamily =
   | 'openai-official'
+  | 'anthropic-official'
+  | 'gemini-official'
+  | 'xai-official'
+  | 'deepseek-official'
   | 'volcengine-ark'
   | 'bailian-payg'
   | 'bailian-coding-plan'
@@ -106,6 +115,11 @@ export interface CapabilityMatrixOptions {
 }
 
 const openAiHost = 'api.openai.com';
+const anthropicHost = 'api.anthropic.com';
+const geminiHost = 'generativelanguage.googleapis.com';
+const xaiHost = 'api.x.ai';
+const deepSeekHost = 'api.deepseek.com';
+const defaultAnthropicVersion = '2023-06-01';
 const arkHosts = new Set([
   'ark.cn-beijing.volces.com',
   'ark.cn-beijing.volcengineapi.com',
@@ -183,12 +197,14 @@ function normalizedUrl(url: URL, pathname: string): string {
 function normalizeKnownEndpointPath(
   url: URL,
   basePath: string,
-  suffixes: readonly string[]
+  suffixes: readonly string[],
+  extraExactPaths: readonly string[] = []
 ): string | undefined {
   const path = normalizedPathname(url).toLowerCase();
   const accepted = new Set([
     '',
     basePath,
+    ...extraExactPaths,
     ...suffixes.map((suffix) => `${basePath}/${suffix}`),
   ]);
   return accepted.has(path) ? normalizedUrl(url, basePath) : undefined;
@@ -205,6 +221,10 @@ function normalizeCustomEndpoint(url: URL): string {
 
 function recommendedKindForFamily(family: ProviderEndpointFamily): ProviderKind | undefined {
   if (family === 'openai-official') return 'openai-compatible';
+  if (family === 'anthropic-official') return 'anthropic';
+  if (family === 'gemini-official') return 'gemini';
+  if (family === 'xai-official') return 'xai-grok';
+  if (family === 'deepseek-official') return 'deepseek';
   if (family === 'volcengine-ark') return 'volcengine-ark';
   if (
     family === 'bailian-payg' ||
@@ -220,6 +240,10 @@ function recommendedKindForFamily(family: ProviderEndpointFamily): ProviderKind 
 function kindMatchesFamily(kind: ProviderKind | undefined, family: ProviderEndpointFamily): boolean {
   if (!kind) return true;
   if (family === 'openai-official') return kind === 'custom' || kind === 'openai-compatible';
+  if (family === 'anthropic-official') return kind === 'anthropic';
+  if (family === 'gemini-official') return kind === 'gemini';
+  if (family === 'xai-official') return kind === 'xai-grok';
+  if (family === 'deepseek-official') return kind === 'deepseek' || kind === 'custom';
   if (family === 'volcengine-ark') return kind === 'volcengine-ark';
   if (
     family === 'bailian-payg' ||
@@ -327,7 +351,57 @@ export function inspectProviderEndpoint(
     normalizedBaseUrl = normalizeKnownEndpointPath(
       url,
       '/v1',
-      ['models', 'chat/completions', 'responses', 'images/generations', 'audio/transcriptions', 'audio/speech']
+      [
+        'models',
+        'chat/completions',
+        'responses',
+        'images/generations',
+        'images/edits',
+        'audio/transcriptions',
+        'audio/speech',
+      ]
+    );
+    policy = 'allowed';
+    modelDiscoveryMode = 'official-model-list';
+  } else if (hostname === anthropicHost) {
+    family = 'anthropic-official';
+    official = true;
+    normalizedBaseUrl = normalizeKnownEndpointPath(url, '/v1', ['messages', 'models']);
+    policy = 'allowed';
+    modelDiscoveryMode = 'official-model-list';
+  } else if (hostname === geminiHost) {
+    family = 'gemini-official';
+    official = true;
+    const rawPath = normalizedPathname(url).toLowerCase();
+    normalizedBaseUrl = normalizeKnownEndpointPath(
+      url,
+      '/v1beta',
+      ['models', 'openai', 'openai/models', 'openai/chat/completions'],
+      ['/v1', '/v1/models']
+    );
+    policy = 'allowed';
+    modelDiscoveryMode = 'official-model-list';
+    if (rawPath.startsWith('/v1beta/openai')) {
+      warnings.push('已将 Gemini OpenAI 兼容路径规范化为官方原生 /v1beta 端点基础路径。');
+    }
+  } else if (hostname === xaiHost) {
+    family = 'xai-official';
+    official = true;
+    normalizedBaseUrl = normalizeKnownEndpointPath(
+      url,
+      '/v1',
+      ['models', 'chat/completions', 'responses', 'images/generations', 'images/edits']
+    );
+    policy = 'allowed';
+    modelDiscoveryMode = 'official-model-list';
+  } else if (hostname === deepSeekHost) {
+    family = 'deepseek-official';
+    official = true;
+    normalizedBaseUrl = normalizeKnownEndpointPath(
+      url,
+      '/v1',
+      ['models', 'chat/completions', 'responses'],
+      ['/anthropic', '/anthropic/v1/messages']
     );
     policy = 'allowed';
     modelDiscoveryMode = 'official-model-list';
@@ -445,24 +519,494 @@ export function isExactOfficialOpenAiProvider(
 }
 
 /**
- * Returns true only for the official DeepSeek API host. This is intentionally
- * host-based rather than provider-id-based so a renamed built-in profile still
- * receives the documented alias safeguards, while compatible relays do not.
+ * Returns true only for the exact official Anthropic API base route.
  */
-export function isExactOfficialDeepSeekProvider(
-  provider: Pick<ProviderProfile, 'baseUrl'>
+export function isExactOfficialAnthropicProvider(
+  provider: Pick<ProviderProfile, 'kind' | 'baseUrl'>
 ): boolean {
-  try {
-    const url = new URL(provider.baseUrl.trim());
-    return url.protocol === 'https:' &&
-      url.hostname.toLowerCase() === 'api.deepseek.com' &&
-      !url.username &&
-      !url.password &&
-      !url.port &&
-      (url.pathname === '/' || url.pathname === '/v1' || url.pathname === '/v1/');
-  } catch {
+  if (provider.kind !== 'anthropic') {
     return false;
   }
+  const inspection = inspectProviderEndpoint(provider.baseUrl, { kind: provider.kind });
+  return Boolean(
+    inspection.valid &&
+    inspection.official &&
+    inspection.kindCompatible &&
+    inspection.family === 'anthropic-official' &&
+    inspection.hostname === anthropicHost &&
+    inspection.normalizedBaseUrl === 'https://api.anthropic.com/v1'
+  );
+}
+
+/**
+ * Returns true only for the exact official Google Gemini API base route.
+ */
+export function isExactOfficialGeminiProvider(
+  provider: Pick<ProviderProfile, 'kind' | 'baseUrl'>
+): boolean {
+  if (provider.kind !== 'gemini') {
+    return false;
+  }
+  const inspection = inspectProviderEndpoint(provider.baseUrl, { kind: provider.kind });
+  return Boolean(
+    inspection.valid &&
+    inspection.official &&
+    inspection.kindCompatible &&
+    inspection.family === 'gemini-official' &&
+    inspection.hostname === geminiHost &&
+    inspection.normalizedBaseUrl === 'https://generativelanguage.googleapis.com/v1beta'
+  );
+}
+
+/**
+ * Returns true only for the exact official xAI Grok API base route.
+ */
+export function isExactOfficialXaiProvider(
+  provider: Pick<ProviderProfile, 'kind' | 'baseUrl'>
+): boolean {
+  if (provider.kind !== 'xai-grok') {
+    return false;
+  }
+  const inspection = inspectProviderEndpoint(provider.baseUrl, { kind: provider.kind });
+  return Boolean(
+    inspection.valid &&
+    inspection.official &&
+    inspection.kindCompatible &&
+    inspection.family === 'xai-official' &&
+    inspection.hostname === xaiHost &&
+    inspection.normalizedBaseUrl === 'https://api.x.ai/v1'
+  );
+}
+
+/**
+ * Returns true only for the official DeepSeek API host. Accepts both the dedicated
+ * `deepseek` kind and historical `custom` DeepSeek profiles (or URL-only checks),
+ * while rejecting relays, mismatched kinds, and lookalike hosts.
+ */
+export function isExactOfficialDeepSeekProvider(
+  provider: Pick<ProviderProfile, 'baseUrl'> & { kind?: ProviderKind }
+): boolean {
+  if (provider.kind !== undefined && provider.kind !== 'deepseek' && provider.kind !== 'custom') {
+    return false;
+  }
+  const inspection = inspectProviderEndpoint(
+    provider.baseUrl,
+    provider.kind ? { kind: provider.kind } : {}
+  );
+  return Boolean(
+    inspection.valid &&
+    inspection.official &&
+    inspection.kindCompatible &&
+    inspection.family === 'deepseek-official' &&
+    inspection.hostname === deepSeekHost &&
+    inspection.normalizedBaseUrl === 'https://api.deepseek.com/v1'
+  );
+}
+
+/**
+ * 判断服务商是否为中转站或自定义兼容端点（需要降级走通用 OpenAI 兼容协议）。
+ */
+export function isRelayOrCustomProvider(
+  provider: Pick<ProviderProfile, 'kind' | 'baseUrl'>
+): boolean {
+  if (provider.kind === 'new-api-relay') {
+    return true;
+  }
+  if (
+    isExactOfficialOpenAiProvider(provider) ||
+    isExactOfficialAnthropicProvider(provider) ||
+    isExactOfficialGeminiProvider(provider) ||
+    isExactOfficialXaiProvider(provider) ||
+    isExactOfficialDeepSeekProvider(provider)
+  ) {
+    return false;
+  }
+  const kindInspection = inspectProviderEndpoint(provider.baseUrl, { kind: provider.kind });
+  if (
+    (provider.kind === 'volcengine-ark' &&
+      kindInspection.valid &&
+      kindInspection.family === 'volcengine-ark') ||
+    (provider.kind === 'bailian-compatible' &&
+      kindInspection.valid &&
+      kindInspection.family === 'bailian-payg')
+  ) {
+    return false;
+  }
+  if (provider.kind === 'custom') {
+    return true;
+  }
+  // 脱离 kind 约束检验 URL 基础安全与官方归属：
+  // 凡是合法 HTTPS/本机回环且非任何官方主机的端点（包含仿冒官方域名与各类第三方中转），
+  // 均判定为中转或自定义兼容端点；错配的其他官方主机或非法/不安全 URL 返回 false。
+  const urlInspection = inspectProviderEndpoint(provider.baseUrl);
+  return urlInspection.valid && !urlInspection.official;
+}
+
+/** 服务商自定义请求头数量与长度限制（与持久化/备份层保持单源一致）。 */
+export const PROVIDER_CUSTOM_HEADER_LIMITS = Object.freeze({
+  maxCount: 32,
+  maxKeyLength: 128,
+  maxValueLength: 4096,
+});
+
+/** 敏感鉴权请求头集合（不区分大小写），导出备份时剥离，界面层提示风险并掩码展示。 */
+export const SENSITIVE_CUSTOM_HEADER_NAMES: ReadonlySet<string> = new Set([
+  'authorization',
+  'proxy-authorization',
+  'api-key',
+  'x-api-key',
+  'x-api-token',
+  'x-auth-token',
+  'x-goog-api-key',
+]);
+
+export interface CustomHeaderValidationIssue {
+  index: number;
+  key: string;
+  message: string;
+}
+
+export interface CustomHeadersValidationResult {
+  valid: boolean;
+  normalized: ProviderCustomHeader[];
+  issues: CustomHeaderValidationIssue[];
+  hasSensitiveHeaders: boolean;
+}
+
+const blockedCustomHeaderNames = new Set([
+  'accept-encoding',
+  'access-control-request-headers',
+  'access-control-request-method',
+  'cf-connecting-ip',
+  'client-ip',
+  'connection',
+  'constructor',
+  'content-length',
+  'content-type',
+  'cookie',
+  'cookie2',
+  'expect',
+  'forwarded',
+  'host',
+  'keep-alive',
+  'origin',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'prototype',
+  'referer',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'true-client-ip',
+  'upgrade',
+  'via',
+  'x-http-method',
+  'x-http-method-override',
+  'x-method-override',
+  'x-original-url',
+  'x-real-ip',
+  'x-rewrite-url',
+  '__proto__',
+]);
+
+const validHeaderNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+function isBlockedCustomHeaderName(lowerKey: string): boolean {
+  return (
+    blockedCustomHeaderNames.has(lowerKey) ||
+    lowerKey.startsWith('access-control-') ||
+    lowerKey.startsWith('proxy-') ||
+    lowerKey.startsWith('sec-') ||
+    lowerKey.startsWith('x-forwarded-')
+  );
+}
+
+/** 判断自定义请求头名称是否属于敏感鉴权凭据头。 */
+export function isSensitiveCustomHeaderName(key: string): boolean {
+  return SENSITIVE_CUSTOM_HEADER_NAMES.has(key.trim().toLowerCase());
+}
+
+function isSafeCustomHeaderEntry(key: string, value: string): boolean {
+  const trimmedKey = key.trim();
+  const lowerKey = trimmedKey.toLowerCase();
+  if (
+    !trimmedKey ||
+    trimmedKey.length > PROVIDER_CUSTOM_HEADER_LIMITS.maxKeyLength ||
+    !validHeaderNamePattern.test(trimmedKey)
+  ) {
+    return false;
+  }
+  if (/[\r\n\0]/.test(value) || value.length > PROVIDER_CUSTOM_HEADER_LIMITS.maxValueLength) {
+    return false;
+  }
+  if (isBlockedCustomHeaderName(lowerKey)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 校验并规范化服务商自定义请求头草稿列表（单源对齐运行时注入、本地持久化与备份校验规则）。
+ */
+export function validateProviderCustomHeaders(
+  headers: ReadonlyArray<ProviderCustomHeader>
+): CustomHeadersValidationResult {
+  const normalized: ProviderCustomHeader[] = [];
+  const issues: CustomHeaderValidationIssue[] = [];
+  const seenKeys = new Set<string>();
+  let hasSensitiveHeaders = false;
+
+  headers.forEach((header, index) => {
+    const rawKey = typeof header?.key === 'string' ? header.key : '';
+    const cleanKey = rawKey.trim();
+    const value = typeof header?.value === 'string' ? header.value : '';
+    const enabled = header?.enabled !== false;
+
+    // 表单中添加空行但尚未填写时，允许跳过而不阻塞保存
+    if (!cleanKey && value === '') {
+      return;
+    }
+
+    if (!cleanKey) {
+      issues.push({
+        index,
+        key: cleanKey,
+        message: `第 ${index + 1} 条自定义请求头名称不能为空。`,
+      });
+      return;
+    }
+
+    if (cleanKey.length > PROVIDER_CUSTOM_HEADER_LIMITS.maxKeyLength) {
+      issues.push({
+        index,
+        key: cleanKey,
+        message: `请求头名称不能超过 ${PROVIDER_CUSTOM_HEADER_LIMITS.maxKeyLength} 个字符。`,
+      });
+      return;
+    }
+
+    if (value.length > PROVIDER_CUSTOM_HEADER_LIMITS.maxValueLength) {
+      issues.push({
+        index,
+        key: cleanKey,
+        message: `请求头内容不能超过 ${PROVIDER_CUSTOM_HEADER_LIMITS.maxValueLength} 个字符。`,
+      });
+      return;
+    }
+
+    if (!validHeaderNamePattern.test(cleanKey)) {
+      issues.push({
+        index,
+        key: cleanKey,
+        message: `请求头名称格式无效（仅支持标准 HTTP Token 字符，不能含空格或中文）：${cleanKey}。`,
+      });
+      return;
+    }
+
+    if (/[\r\n\0]/.test(value)) {
+      issues.push({
+        index,
+        key: cleanKey,
+        message: `请求头「${cleanKey}」的值不能包含换行符或控制字符。`,
+      });
+      return;
+    }
+
+    const lowerKey = cleanKey.toLowerCase();
+    if (isBlockedCustomHeaderName(lowerKey)) {
+      issues.push({
+        index,
+        key: cleanKey,
+        message: `出于安全限制，不允许配置系统或代理控制头：${cleanKey}。`,
+      });
+      return;
+    }
+
+    if (seenKeys.has(lowerKey)) {
+      issues.push({
+        index,
+        key: cleanKey,
+        message: `存在重复的自定义请求头名称（不区分大小写）：${cleanKey}。`,
+      });
+      return;
+    }
+
+    if (normalized.length >= PROVIDER_CUSTOM_HEADER_LIMITS.maxCount) {
+      issues.push({
+        index,
+        key: cleanKey,
+        message: `自定义请求头最多支持 ${PROVIDER_CUSTOM_HEADER_LIMITS.maxCount} 条。`,
+      });
+      return;
+    }
+
+    seenKeys.add(lowerKey);
+    normalized.push({
+      key: cleanKey,
+      value,
+      enabled,
+    });
+    if (enabled && isSensitiveCustomHeaderName(cleanKey)) {
+      hasSensitiveHeaders = true;
+    }
+  });
+
+  return {
+    valid: issues.length === 0,
+    normalized,
+    issues,
+    hasSensitiveHeaders,
+  };
+}
+
+function setHeaderCaseInsensitive(headers: Record<string, string>, key: string, value: string): void {
+  const lowerTarget = key.toLowerCase();
+  for (const existingKey of Object.keys(headers)) {
+    if (existingKey.toLowerCase() === lowerTarget && existingKey !== key) {
+      delete headers[existingKey];
+    }
+  }
+  headers[key] = value;
+}
+
+function hasHeaderCaseInsensitive(headers: Record<string, string>, key: string): boolean {
+  const lowerTarget = key.toLowerCase();
+  return Object.keys(headers).some((existingKey) => existingKey.toLowerCase() === lowerTarget);
+}
+
+/**
+ * 依据服务商协议、`authHeaderMode` 与 `customHeaders` 构造安全的鉴权及自定义请求头。
+ */
+export function resolveProviderAuthHeaders(
+  provider: Pick<ProviderProfile, 'kind' | 'baseUrl' | 'apiKey' | 'authHeaderMode' | 'customHeaders'>
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const mode = provider.authHeaderMode ?? 'auto';
+  const apiKey = provider.apiKey?.trim() ?? '';
+  const inspection = inspectProviderEndpoint(provider.baseUrl, { kind: provider.kind });
+  const isRelay = provider.kind === 'new-api-relay';
+  const isAnthropicTarget =
+    provider.kind === 'anthropic' ||
+    (!isRelay && inspection.family === 'anthropic-official');
+  const isGeminiTarget =
+    provider.kind === 'gemini' ||
+    (!isRelay && inspection.family === 'gemini-official');
+
+  if (mode === 'auto') {
+    if (isAnthropicTarget) {
+      if (apiKey) {
+        headers['x-api-key'] = apiKey;
+      }
+      headers['anthropic-version'] = defaultAnthropicVersion;
+    } else if (isGeminiTarget) {
+      if (apiKey) {
+        headers['x-goog-api-key'] = apiKey;
+      }
+    } else if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+  } else if (mode === 'bearer') {
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+  } else if (mode === 'x-api-key') {
+    if (apiKey) {
+      headers['x-api-key'] = apiKey;
+    }
+    if (isAnthropicTarget) {
+      headers['anthropic-version'] = defaultAnthropicVersion;
+    }
+  } else if (mode === 'x-goog-api-key') {
+    if (apiKey) {
+      headers['x-goog-api-key'] = apiKey;
+    }
+  }
+
+  for (const header of provider.customHeaders ?? []) {
+    if (!header || header.enabled === false) {
+      continue;
+    }
+    if (typeof header.key !== 'string' || typeof header.value !== 'string') {
+      continue;
+    }
+    const cleanKey = header.key.trim();
+    if (!isSafeCustomHeaderEntry(cleanKey, header.value)) {
+      continue;
+    }
+    setHeaderCaseInsensitive(headers, cleanKey, header.value);
+  }
+
+  return headers;
+}
+
+export interface ModelDiscoveryRequest {
+  url: string;
+  headers: Record<string, string>;
+  protocol: 'openai' | 'anthropic' | 'gemini';
+}
+
+/**
+ * 为 OpenAI / xAI / DeepSeek / Anthropic / Gemini / 中转站构造统一的模型列表探测请求。
+ */
+export function buildModelDiscoveryRequest(
+  provider: Pick<ProviderProfile, 'kind' | 'baseUrl' | 'apiKey' | 'authHeaderMode' | 'customHeaders'>
+): ModelDiscoveryRequest {
+  const inspection = inspectProviderEndpoint(provider.baseUrl, { kind: provider.kind });
+  if (!inspection.valid || !inspection.normalizedBaseUrl) {
+    throw new Error(inspection.errors[0] ?? '服务商 Base URL 无效，无法探测模型列表。');
+  }
+
+  const headers = resolveProviderAuthHeaders(provider);
+  if (isExactOfficialAnthropicProvider(provider)) {
+    if (!hasHeaderCaseInsensitive(headers, 'anthropic-version')) {
+      headers['anthropic-version'] = defaultAnthropicVersion;
+    }
+    return {
+      url: `${inspection.normalizedBaseUrl}/models`,
+      headers,
+      protocol: 'anthropic',
+    };
+  }
+
+  if (isExactOfficialGeminiProvider(provider)) {
+    return {
+      url: `${inspection.normalizedBaseUrl}/models`,
+      headers,
+      protocol: 'gemini',
+    };
+  }
+
+  return {
+    url: `${inspection.normalizedBaseUrl}/models`,
+    headers,
+    protocol: 'openai',
+  };
+}
+
+/**
+ * 统一解析各厂商 `/models` 接口返回值（支持 `{ data }`, Gemini `{ models }`, 以及数组响应）。
+ */
+export function parseDiscoveredModelsPayload(
+  provider: Pick<ProviderProfile, 'kind' | 'baseUrl'>,
+  payload: unknown
+): RemoteModelMetadata[] {
+  let rawItems: unknown[] = [];
+  if (Array.isArray(payload)) {
+    rawItems = payload;
+  } else if (payload && typeof payload === 'object') {
+    const record = payload as Record<string, unknown>;
+    if (isExactOfficialGeminiProvider(provider) && Array.isArray(record.models)) {
+      rawItems = record.models;
+    } else if (Array.isArray(record.data)) {
+      rawItems = record.data;
+    } else if (Array.isArray(record.models)) {
+      rawItems = record.models;
+    }
+  }
+
+  return rawItems
+    .map((item) => normalizeRemoteModelEntry(item))
+    .filter((item): item is RemoteModelMetadata => item !== null);
 }
 
 /**
@@ -509,6 +1053,10 @@ function capabilityEvidence(model: ModelInfo, capability: Capability): Capabilit
 function hasHostedProviderAdapter(inspection: ProviderEndpointInspection): boolean {
   return inspection.valid && (
     inspection.family === 'openai-official' ||
+    inspection.family === 'anthropic-official' ||
+    inspection.family === 'gemini-official' ||
+    inspection.family === 'xai-official' ||
+    inspection.family === 'deepseek-official' ||
     inspection.family === 'volcengine-ark' ||
     inspection.family === 'bailian-payg'
   );
@@ -532,7 +1080,11 @@ function clientAdapterSupport(
     };
   }
   if (capability === 'image-input') {
-    const supported = task === 'chat' || (task === 'video-generation' && family === 'volcengine-ark');
+    const supported =
+      task === 'chat' ||
+      (task === 'image-generation' &&
+        (family === 'openai-official' || family === 'gemini-official' || family === 'xai-official')) ||
+      (task === 'video-generation' && family === 'volcengine-ark');
     return {
       supported,
       reason: supported ? '当前客户端已实现该任务的图片输入序列化。' : '当前任务没有已验证的图片输入适配器。',
@@ -540,7 +1092,7 @@ function clientAdapterSupport(
   }
   if (capability === 'video-input') {
     const supported =
-      (task === 'chat' && family === 'bailian-payg') ||
+      (task === 'chat' && (family === 'bailian-payg' || family === 'gemini-official')) ||
       (task === 'video-generation' && family === 'volcengine-ark');
     return {
       supported,
@@ -548,10 +1100,14 @@ function clientAdapterSupport(
     };
   }
   if (capability === 'file-input') {
-    const supported = task === 'chat' && family === 'openai-official';
+    const supported =
+      task === 'chat' &&
+      (family === 'openai-official' || family === 'anthropic-official' || family === 'gemini-official');
     return {
       supported,
-      reason: supported ? '文件输入仅在 OpenAI 官方协议中启用。' : '兼容中转或其他服务商的文件协议尚未适配。',
+      reason: supported
+        ? '当前服务商官方协议支持文件输入。'
+        : '兼容中转或其他服务商的文件协议尚未适配。',
     };
   }
   if (capability === 'reasoning') {
@@ -568,6 +1124,12 @@ function clientAdapterSupport(
     };
   }
   if (capability === 'image-generation') {
+    if (task === 'image-generation' && family === 'anthropic-official') {
+      return {
+        supported: false,
+        reason: 'Anthropic 官方接口不提供原生光栅生图服务，请改用 OpenAI、Gemini 或 xAI 生图模型。',
+      };
+    }
     return {
       supported: task === 'image-generation',
       reason: task === 'image-generation' ? '客户端已实现兼容图片生成请求。' : '当前模型用途不是图片生成。',

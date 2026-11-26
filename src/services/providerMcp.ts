@@ -1,4 +1,5 @@
 import type { ChatCompletionResult, ChatTokenUsage } from '../domain/types';
+import { isBlockedPublicHost } from './ssrfGuard';
 
 export type ProviderMcpWireProtocol = 'openai-official' | 'volcengine-ark';
 export type ProviderMcpApprovalDecision = 'approve' | 'deny' | 'cancel';
@@ -214,58 +215,15 @@ function normalizedModelId(value: string): string {
   return normalized;
 }
 
-function privateIpv4(hostname: string): boolean {
-  const parts = hostname.split('.');
-  if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part))) {
-    return false;
-  }
-  const octets = parts.map(Number);
-  if (octets.some((octet) => octet > 255)) {
-    return true;
-  }
-  const [a, b] = octets;
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && (b === 0 || b === 168)) ||
-    (a === 198 && (b === 18 || b === 19 || b === 51)) ||
-    (a === 203 && b === 0 && octets[2] === 113) ||
-    a >= 224
-  );
-}
-
 function unsafeServerHostname(hostname: string): boolean {
   const normalized = hostname
     .toLowerCase()
     .replace(/^\[|\]$/g, '')
     .replace(/\.+$/, '');
-  if (
-    !normalized ||
-    normalized === 'localhost' ||
-    normalized.endsWith('.localhost') ||
-    normalized.endsWith('.local') ||
-    normalized.endsWith('.internal') ||
-    normalized.endsWith('.lan') ||
-    normalized.endsWith('.home') ||
-    normalized === '::' ||
-    normalized === '::1' ||
-    normalized.startsWith('fc') ||
-    normalized.startsWith('fd') ||
-    /^fe[89ab]/.test(normalized)
-  ) {
+  if (normalized.endsWith('.home')) {
     return true;
   }
-  if (normalized.startsWith('::ffff:')) {
-    return privateIpv4(normalized.slice('::ffff:'.length));
-  }
-  if (privateIpv4(normalized)) {
-    return true;
-  }
-  return !normalized.includes('.') && !normalized.includes(':');
+  return isBlockedPublicHost(hostname);
 }
 
 function normalizedServerUrl(value: string): string {
@@ -282,6 +240,7 @@ function normalizedServerUrl(value: string): string {
     url.protocol !== 'https:' ||
     url.username ||
     url.password ||
+    (url.port && url.port !== '443') ||
     url.search ||
     url.hash ||
     unsafeServerHostname(url.hostname)

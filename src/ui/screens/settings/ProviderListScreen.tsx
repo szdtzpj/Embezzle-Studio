@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { ArrowLeft, Check, Lock, Pencil, Plus, Search, Trash2, X } from 'lucide-react-native';
 import { ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AnimatedPressable } from '../../components/AnimatedPressable';
 import { ModelAvatar } from '../../components/ModelAvatar';
 import { MotionItem, MotionSwap } from '../../components/Motion';
@@ -30,6 +31,7 @@ export function ProviderListScreen({
   onAddProvider,
 }: ProviderListScreenProps) {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = getStyles(theme);
   const [query, setQuery] = useState('');
   const [editing, setEditing] = useState(false);
@@ -45,7 +47,16 @@ export function ProviderListScreen({
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
+      <View
+        style={[
+          styles.header,
+          {
+            paddingTop: Math.max(8, insets.top),
+            paddingLeft: Math.max(6, insets.left),
+            paddingRight: Math.max(6, insets.right),
+          },
+        ]}
+      >
         <View style={styles.headerLeading}>
           <AnimatedPressable
             accessibilityRole="button"
@@ -94,7 +105,15 @@ export function ProviderListScreen({
         </View>
       </View>
 
-      <View style={styles.searchWrap}>
+      <View
+        style={[
+          styles.searchWrap,
+          {
+            paddingLeft: Math.max(12, insets.left),
+            paddingRight: Math.max(12, insets.right),
+          },
+        ]}
+      >
         <View style={styles.searchField}>
           <Search size={16} color={theme.colors.placeholder} strokeWidth={2} />
           <TextInput
@@ -128,7 +147,14 @@ export function ProviderListScreen({
 
       <ScrollView
         style={styles.content}
-        contentContainerStyle={styles.listContent}
+        contentContainerStyle={[
+          styles.listContent,
+          {
+            paddingBottom: Math.max(24, insets.bottom + 16),
+            paddingLeft: Math.max(12, insets.left),
+            paddingRight: Math.max(12, insets.right),
+          },
+        ]}
         showsVerticalScrollIndicator={filtered.length > 8}
       >
         <View style={styles.card}>

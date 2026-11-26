@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { CloudSyncError, redactSensitiveText } from '../src/services/cloudSyncTransport';
+import {
+  CloudSyncError,
+  readBoundedBytes,
+  redactSensitiveText,
+} from '../src/services/cloudSyncTransport';
 import { createS3Transport, signS3Request } from '../src/services/s3SigV4';
 import { createWebDavTransport } from '../src/services/webDavTransport';
 
@@ -22,6 +26,12 @@ describe('WebDAV cloud-sync transport', () => {
     expect(redacted).not.toContain('session');
     expect(redacted).not.toContain('Bearer value');
     expect(redacted).not.toContain('deadbeef');
+
+    const withTrailingLog = redactSensitiveText(
+      'Header Authorization: Bearer sk-secret-sync-token-999 failed at step 2'
+    );
+    expect(withTrailingLog).not.toContain('sk-secret-sync-token-999');
+    expect(withTrailingLog).toBe('Header Authorization=[redacted] failed at step 2');
   });
 
   it('keeps credentials out of the URL and sends conditional PUT over an encoded path', async () => {
@@ -170,5 +180,47 @@ describe('S3 Signature V4 cloud-sync transport', () => {
         credentials: { accessKeyId: 'id', secretAccessKey: 'secret' },
       })
     ).toThrow(CloudSyncError);
+  });
+
+  it('aborts and cancels a hanging stream immediately in readBoundedBytes and releases the stream lock', async () => {
+    let markReadingStarted: (() => void) | undefined;
+    let markCancelled: (() => void) | undefined;
+    const readingStarted = new Promise<void>((resolve) => {
+      markReadingStarted = resolve;
+    });
+    const cancelled = new Promise<void>((resolve) => {
+      markCancelled = resolve;
+    });
+    let cancelCount = 0;
+
+    const hangingResp = new Response(
+      new ReadableStream<Uint8Array>(
+        {
+          start() {
+            // 响应头返回后模拟云同步对象流挂起
+          },
+          pull() {
+            markReadingStarted?.();
+          },
+          cancel() {
+            cancelCount += 1;
+            markCancelled?.();
+          },
+        },
+        { highWaterMark: 0 }
+      ),
+      { status: 200 }
+    );
+
+    const controller = new AbortController();
+    const pending = readBoundedBytes(hangingResp, 1024 * 1024, '云同步测试', controller.signal);
+    const assertion = expect(pending).rejects.toMatchObject({ code: 'cancelled' });
+
+    await readingStarted;
+    controller.abort();
+    await assertion;
+    await cancelled;
+    expect(cancelCount).toBeGreaterThanOrEqual(1);
+    expect(hangingResp.body?.locked).toBe(false);
   });
 });

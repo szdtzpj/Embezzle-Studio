@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react';
-import { Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { OverlayPortal } from './AppDialogHost';
 import { MotionItem } from './Motion';
 import { useKelivoTheme, type KelivoTheme } from '../theme';
 
@@ -22,17 +24,27 @@ export function ActionSheetDialog({
   onClose,
 }: ActionSheetDialogProps) {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = getStyles(theme);
 
   return (
-    <Modal
+    <OverlayPortal
       visible={visible}
-      transparent
-      statusBarTranslucent
-      animationType="fade"
+      layer="dialog"
       onRequestClose={onClose}
     >
-      <Pressable style={styles.scrim} onPress={onClose}>
+      <Pressable
+        style={[
+          styles.scrim,
+          {
+            paddingTop: Math.max(24, insets.top + 12),
+            paddingBottom: Math.max(24, insets.bottom + 12),
+            paddingLeft: Math.max(24, insets.left + 12),
+            paddingRight: Math.max(24, insets.right + 12),
+          },
+        ]}
+        onPress={onClose}
+      >
         <MotionItem
           delay={20}
           distance={12}
@@ -55,7 +67,7 @@ export function ActionSheetDialog({
           </Pressable>
         </MotionItem>
       </Pressable>
-    </Modal>
+    </OverlayPortal>
   );
 }
 
@@ -67,12 +79,6 @@ function createStyles(theme: KelivoTheme) {
       justifyContent: 'center',
       paddingHorizontal: 24,
       backgroundColor: theme.colors.scrim,
-      ...(Platform.OS === 'web'
-        ? ({
-            position: 'fixed',
-            inset: 0,
-          } as any)
-        : {}),
     },
     dialogMotion: {
       width: '100%',

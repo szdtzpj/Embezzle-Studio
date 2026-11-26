@@ -5,7 +5,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // The production entry point intentionally remains an ESM JavaScript script so it can
 // still be launched directly by `node scripts/dev-proxy.mjs`.
 // @ts-ignore -- no declaration file is needed for this script-only module.
-import { createOriginPolicy, createProxyServer } from '../scripts/dev-proxy.mjs';
+import {
+  OFFICIAL_PROVIDER_HOSTS,
+  createOriginPolicy,
+  createProxyServer,
+} from '../scripts/dev-proxy.mjs';
 
 const localOrigin = 'http://localhost:8081';
 const openServers = new Set<Server>();
@@ -340,5 +344,195 @@ describe('dev proxy request handling', () => {
 
     await expect(aborted).resolves.toBeInstanceOf(Error);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('forwards multi-protocol provider headers, exposes safe rate-limit headers, and blocks set-cookie', async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Request-Id': 'req-123',
+          'Retry-After': '15',
+          'Anthropic-Ratelimit-Requests-Remaining': '42',
+          'X-Ratelimit-Remaining': '99',
+          'Set-Cookie': 'session=leak; HttpOnly',
+        },
+      })
+    );
+    const { baseUrl } = await startProxy({ fetchImpl });
+
+    const response = await fetch(`${baseUrl}/proxy`, {
+      method: 'POST',
+      headers: proxyHeaders(),
+      body: JSON.stringify({
+        url: 'https://api.anthropic.com/v1/messages',
+        method: 'POST',
+        headers: {
+          'x-api-key': 'sk-ant-test',
+          'anthropic-version': '2023-06-01',
+          'anthropic-beta': 'web-search-2025-03-05',
+          'x-goog-api-key': 'AIza-test',
+          'x-grok-conv-id': 'conv-99',
+          'X-Custom-Tag': 'hello',
+        },
+        body: JSON.stringify({ model: 'claude-sonnet-5-5' }),
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-request-id')).toBe('req-123');
+    expect(response.headers.get('retry-after')).toBe('15');
+    expect(response.headers.get('anthropic-ratelimit-requests-remaining')).toBe('42');
+    expect(response.headers.get('x-ratelimit-remaining')).toBe('99');
+    expect(response.headers.get('set-cookie')).toBeNull();
+    expect(response.headers.get('access-control-expose-headers')).toContain('x-request-id');
+
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [URL, RequestInit];
+    expect(init.headers).toEqual({
+      'x-api-key': 'sk-ant-test',
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'web-search-2025-03-05',
+      'x-goog-api-key': 'AIza-test',
+      'x-grok-conv-id': 'conv-99',
+      'x-custom-tag': 'hello',
+    });
+  });
+
+  it.each([
+    ['non-loopback plaintext http', 'http://provider.example.test/v1/models', 400],
+    ['cloud metadata IPv4', 'http://169.254.169.254/latest/meta-data/', 403],
+    ['cloud metadata IPv4 HTTPS', 'https://169.254.169.254/latest/meta-data/', 403],
+    ['Alibaba Cloud metadata IPv4 (100.64.0.0/10)', 'https://100.100.100.200/latest/meta-data', 403],
+    ['unspecified IPv4 (0.0.0.0/8)', 'https://0.0.0.0/', 403],
+    ['unspecified IPv6 (::/128)', 'https://[::]/', 403],
+    ['IPv6 ULA / AWS IPv6 IMDS (fc00::/7)', 'https://[fd00:ec2::254]/latest/meta-data', 403],
+    ['IPv6 ULA fc00::1', 'https://[fc00::1]/', 403],
+    ['IPv6 link-local (fe80::/10)', 'https://[fe80::1]/', 403],
+    ['IPv4-mapped metadata IPv6', 'http://[::ffff:169.254.169.254]/latest/meta-data/', 403],
+    ['IPv4-mapped unspecified IPv6', 'https://[::ffff:0.0.0.0]/', 403],
+    ['IPv4-mapped Alibaba metadata IPv6', 'https://[::ffff:100.100.100.200]/', 403],
+    ['IPv4-mapped spoofed loopback IPv6', 'https://[::ffff:7f00:1]/', 403],
+    ['IPv4-compatible metadata IPv6', 'https://[::169.254.169.254]/', 403],
+    ['NAT64 metadata IPv6', 'https://[64:ff9b::169.254.169.254]/', 403],
+    ['NAT64 spoofed loopback IPv6', 'https://[64:ff9b::7f00:1]/', 403],
+    ['NAT64 local-use IPv6 (64:ff9b:1::/48)', 'https://[64:ff9b:1::8.8.8.8]/', 403],
+    ['6to4 metadata IPv6', 'https://[2002:a9fe:a9fe::]/', 403],
+    ['6to4 general IPv6 (2002::/16)', 'https://[2002:0808:0808::1]/', 403],
+    ['Teredo IPv6 (2001::/32)', 'https://[2001:0000:4136:e378:8000:63bf:3fff:fdd2]/v1/models', 403],
+    ['ISATAP link-local IPv6 (*::5efe)', 'https://[fe80::5efe:169.254.169.254]/', 403],
+    ['ISATAP tunnel IPv6 (*::200:5efe)', 'https://[2001:470::200:5efe:127.0.0.1]/', 403],
+    ['IPv4-mapped public IPv6 (::ffff:0:0/96)', 'https://[::ffff:1.1.1.1]/', 403],
+    ['IPv4-compatible IPv6 (::/96)', 'https://[::1.1.1.1]/', 403],
+    ['IPv4 multicast (224.0.0.0/4)', 'https://224.0.0.1/', 403],
+    ['IPv4 reserved (240.0.0.0/4)', 'https://240.0.0.1/', 403],
+    ['IPv6 site-local (fec0::/10)', 'https://[fec0::1]/', 403],
+    ['IPv6 multicast (ff00::/8)', 'https://[ff02::1]/', 403],
+    ['GCP metadata hostname', 'https://metadata.google.internal/computeMetadata/v1/', 403],
+  ])('blocks unsafe SSRF target (%s) before contacting upstream', async (_label, targetUrl, expectedStatus) => {
+    const fetchImpl = vi.fn();
+    const { baseUrl } = await startProxy({ fetchImpl });
+
+    const response = await fetch(`${baseUrl}/proxy`, {
+      method: 'POST',
+      headers: proxyHeaders(),
+      body: JSON.stringify({ url: targetUrl, method: 'GET' }),
+    });
+
+    expect(response.status).toBe(expectedStatus);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['localhost loopback HTTP', 'http://localhost:11434/v1/models'],
+    ['IPv4 loopback HTTP', 'http://127.0.0.1:11434/v1/models'],
+    ['IPv6 loopback HTTP', 'http://[::1]:11434/v1/models'],
+    ['public HTTPS domain', 'https://api.openai.com/v1/models'],
+    ['public IPv6 HTTPS', 'https://[2606:4700:4700::1111]/v1/models'],
+  ])('allows legitimate target (%s) through SSRF policy', async (_label, targetUrl) => {
+    const fetchImpl = vi.fn(async () => new Response('{}', { status: 200 }));
+    const { baseUrl } = await startProxy({ fetchImpl });
+
+    const response = await fetch(`${baseUrl}/proxy`, {
+      method: 'POST',
+      headers: proxyHeaders(),
+      body: JSON.stringify({ url: targetUrl, method: 'GET' }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('enforces allowedTargetHosts allowlist when configured and supports OFFICIAL_PROVIDER_HOSTS', async () => {
+    const fetchImpl = vi.fn(async () => new Response('{}', { status: 200 }));
+    const { baseUrl } = await startProxy({
+      fetchImpl,
+      allowedTargetHosts: OFFICIAL_PROVIDER_HOSTS,
+    });
+
+    const allowed = await fetch(`${baseUrl}/proxy`, {
+      method: 'POST',
+      headers: proxyHeaders(),
+      body: JSON.stringify({
+        url: 'https://workspace-1.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/models',
+        method: 'GET',
+      }),
+    });
+    expect(allowed.status).toBe(200);
+
+    const denied = await fetch(`${baseUrl}/proxy`, {
+      method: 'POST',
+      headers: proxyHeaders(),
+      body: JSON.stringify({
+        url: 'https://untrusted-relay.example/v1/models',
+        method: 'GET',
+      }),
+    });
+    expect(denied.status).toBe(403);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('decodes base64 upstream bodies and rejects invalid base64 or CRLF headers', async () => {
+    const fetchImpl = vi.fn(async () => new Response('ok', { status: 200 }));
+    const { baseUrl } = await startProxy({ fetchImpl });
+    const binaryPayload = Buffer.from([1, 2, 3, 4]).toString('base64');
+
+    const ok = await fetch(`${baseUrl}/proxy`, {
+      method: 'POST',
+      headers: proxyHeaders(),
+      body: JSON.stringify({
+        url: 'https://api.openai.com/v1/images/edits',
+        method: 'POST',
+        bodyEncoding: 'base64',
+        body: binaryPayload,
+      }),
+    });
+    expect(ok.status).toBe(200);
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [URL, RequestInit];
+    expect(Buffer.isBuffer(init.body)).toBe(true);
+    expect(Array.from(init.body as Buffer)).toEqual([1, 2, 3, 4]);
+
+    const badBase64 = await fetch(`${baseUrl}/proxy`, {
+      method: 'POST',
+      headers: proxyHeaders(),
+      body: JSON.stringify({
+        url: 'https://api.openai.com/v1/images/edits',
+        method: 'POST',
+        bodyEncoding: 'base64',
+        body: '***not-base64***',
+      }),
+    });
+    expect(badBase64.status).toBe(400);
+
+    const badHeader = await fetch(`${baseUrl}/proxy`, {
+      method: 'POST',
+      headers: proxyHeaders(),
+      body: JSON.stringify({
+        url: 'https://api.openai.com/v1/models',
+        method: 'GET',
+        headers: { 'X-Inject': 'a\r\nb' },
+      }),
+    });
+    expect(badHeader.status).toBe(400);
   });
 });

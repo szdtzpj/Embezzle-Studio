@@ -27,21 +27,45 @@ function requiredGeneratedId(value: string, label: string): string {
   return id;
 }
 
+/**
+ * 递归深拷贝消息中的普通对象与数组结构（兼容 JSON 常见类型与 undefined，附带循环引用保护），
+ * 确保分支消息在 providerContinuations、toolActivity、activityTimeline、mcpActivity 等嵌套字段上与父消息完全隔离。
+ */
+function deepCloneValue<T>(value: T, seen = new WeakMap<object, unknown>()): T {
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (seen.has(value)) {
+    return seen.get(value) as T;
+  }
+  if (value instanceof Date) {
+    return new Date(value.getTime()) as T;
+  }
+  if (value instanceof Uint8Array) {
+    return new Uint8Array(value) as T;
+  }
+  if (Array.isArray(value)) {
+    const clonedArray: unknown[] = [];
+    seen.set(value, clonedArray);
+    for (const item of value) {
+      clonedArray.push(deepCloneValue(item, seen));
+    }
+    return clonedArray as T;
+  }
+  const clonedRecord: Record<string, unknown> = {};
+  seen.set(value, clonedRecord);
+  for (const [key, entryValue] of Object.entries(value)) {
+    clonedRecord[key] = deepCloneValue(entryValue, seen);
+  }
+  return clonedRecord as T;
+}
+
 function cloneMessage(message: ChatMessage, id: string): ChatMessage {
+  const cloned = deepCloneValue(message);
   return {
-    ...message,
+    ...cloned,
     id,
     originMessageId: message.originMessageId ?? message.id,
-    ...(message.attachments
-      ? { attachments: message.attachments.map((attachment) => ({ ...attachment })) }
-      : {}),
-    ...(message.usage ? { usage: { ...message.usage } } : {}),
-    ...(message.citations
-      ? { citations: message.citations.map((citation) => ({ ...citation })) }
-      : {}),
-    ...(message.requestMetrics ? { requestMetrics: { ...message.requestMetrics } } : {}),
-    ...(message.costEstimate ? { costEstimate: { ...message.costEstimate } } : {}),
-    ...(message.generationTask ? { generationTask: { ...message.generationTask } } : {}),
   };
 }
 

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   buildProviderMcpRequest,
   parseProviderMcpArguments,
+  ProviderMcpProtocolError,
   providerMcpLimits,
   runOpenAiProviderMcp,
   type ProviderMcpApprovalDecision,
@@ -210,7 +211,7 @@ describe('provider-hosted MCP request construction', () => {
           input: initialInput(),
           server: server({ allowedTools }),
         })
-      ).toThrow();
+      ).toThrow(ProviderMcpProtocolError);
     }
     expect(buildProviderMcpRequest({
       protocol: 'openai-official',
@@ -1000,5 +1001,26 @@ describe('MCP argument hardening', () => {
       })
     ).rejects.toThrow(/duplicate object key/);
     expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'https://[::ffff:a9fe:a9fe]/mcp',
+    'https://[::169.254.169.254]/mcp',
+    'https://[64:ff9b::169.254.169.254]/mcp',
+    'https://[2001:0000:4136:e378:8000:63bf:3fff:fdd2]/mcp',
+    'https://[2002:a9fe:a9fe::]/mcp',
+    'https://[fec0::1]/mcp',
+    'https://[ff02::1]/mcp',
+    'https://mcp.home/rpc',
+    'https://mcp.example.com:8443/rpc',
+  ])('rejects SSRF and non-standard MCP server URL: %s', (unsafeUrl) => {
+    expect(() =>
+      buildProviderMcpRequest({
+        protocol: 'openai-official',
+        modelId: 'gpt-5.6',
+        input: initialInput(),
+        server: server({ serverUrl: unsafeUrl }),
+      })
+    ).toThrow(ProviderMcpProtocolError);
   });
 });

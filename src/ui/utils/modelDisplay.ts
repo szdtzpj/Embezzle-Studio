@@ -6,6 +6,7 @@ export type ModelIconKey =
   | 'gemini'
   | 'qwen'
   | 'deepseek'
+  | 'grok'
   | 'doubao'
   | 'chatglm'
   | 'zhipu'
@@ -148,6 +149,13 @@ export function truncateModelLabel(value: string, maxLength = 18) {
   return value.length > maxLength ? `${value.slice(0, Math.max(1, maxLength - 3))}...` : value;
 }
 
+/** 词边界匹配 Grok 模型、xAI 品牌及 OpenAI 推理系列（o1/o3/o4），避免误匹配词根。 */
+const grokModelBoundaryPattern = /(?:^|[^a-z0-9])grok(?:[^a-z]|$)/i;
+const xaiBrandBoundaryPattern = /(?:^|[^a-z0-9])xai(?:[^a-z0-9]|$)/;
+const xaiSlugBoundaryPattern = /(?:^|[^a-z0-9])x-ai\//;
+const xaiDomainBoundaryPattern = /(?:^|[^a-z0-9])x\.ai(?:[^a-z0-9]|$)/;
+const openAiReasoningBoundaryPattern = /(?:^|[^a-z0-9])o[134](?:$|[-_.])/;
+
 export function formatCompactModelName(modelId?: string, _providerName?: string, maxLength = 18) {
   const raw = (modelId ?? '').trim();
   const lower = raw.toLowerCase();
@@ -158,53 +166,132 @@ export function formatCompactModelName(modelId?: string, _providerName?: string,
   else if (lower.includes('gpt')) compact = raw.replace(/.*gpt[- ]?/i, 'GPT-');
   else if (lower.includes('qwen')) compact = raw.replace(/.*qwen[- ]?/i, 'Qwen ');
   else if (lower.includes('deepseek')) compact = raw.replace(/.*deepseek[- ]?/i, 'DeepSeek ');
+  else if (grokModelBoundaryPattern.test(lower)) {
+    compact = raw.replace(/.*?grok[- ]?/i, 'Grok ').trim();
+  }
   else if (lower.includes('doubao')) compact = raw.replace(/.*doubao[- ]?/i, 'Doubao ');
   else if (lower.includes('kimi')) compact = raw.replace(/.*kimi[- ]?/i, 'Kimi ');
 
   return truncateModelLabel(capitalizeFirstSegment(compact), maxLength);
 }
 
-export function modelIconKey(modelId?: string, providerName?: string): ModelIconKey {
-  const modelText = (modelId ?? '').trim().toLowerCase();
-  const providerText = (providerName ?? '').trim().toLowerCase();
-  const text = `${modelText} ${providerText}`;
-
-  if (text.includes('模型未记录') || text.includes('未知服务商')) return 'unknown';
-  if (text.includes('gpt') || text.includes('openai') || text.includes('codex')) return 'openai';
-  if (text.includes('claude') || text.includes('anthropic')) return 'claude';
-  if (text.includes('gemini') || text.includes('google')) return 'gemini';
+/** 第一层：优先根据模型 ID 显式识别品牌，避免被中转或 Custom OpenAI-Compatible 服务商名称抢先命中。 */
+function matchModelIconKeyByModelId(modelText: string): ModelIconKey | null {
+  if (!modelText) return null;
+  if (
+    grokModelBoundaryPattern.test(modelText) ||
+    xaiBrandBoundaryPattern.test(modelText) ||
+    xaiSlugBoundaryPattern.test(modelText) ||
+    xaiDomainBoundaryPattern.test(modelText)
+  ) {
+    return 'grok';
+  }
+  if (modelText.includes('claude') || modelText.includes('anthropic')) return 'claude';
+  if (modelText.includes('gemini') || modelText.includes('google')) return 'gemini';
   if (
     modelText.includes('qwen') ||
     modelText.includes('qwq') ||
     modelText.includes('qvq') ||
     modelText.includes('tongyi')
-  ) return 'qwen';
-  if (text.includes('deepseek')) return 'deepseek';
+  ) {
+    return 'qwen';
+  }
+  if (modelText.includes('deepseek')) return 'deepseek';
+  if (
+    modelText.includes('gpt') ||
+    modelText.includes('openai') ||
+    modelText.includes('codex') ||
+    openAiReasoningBoundaryPattern.test(modelText)
+  ) {
+    return 'openai';
+  }
   if (modelText.includes('doubao') || modelText.includes('seed')) return 'doubao';
   if (modelText.includes('chatglm')) return 'chatglm';
   if (
-    /^glm(?:[-_.]|$)/.test(modelText) ||
-    text.includes('zhipu') ||
-    text.includes('bigmodel') ||
-    text.includes('智谱')
-  ) return 'zhipu';
-  if (text.includes('kimi') || text.includes('moonshot')) return 'kimi';
-  if (text.includes('minimax')) return 'minimax';
+    /(?:^|[^a-z0-9])glm(?:[-_.]|$)/.test(modelText) ||
+    modelText.includes('zhipu') ||
+    modelText.includes('bigmodel') ||
+    modelText.includes('智谱')
+  ) {
+    return 'zhipu';
+  }
+  if (modelText.includes('kimi') || modelText.includes('moonshot')) return 'kimi';
+  if (modelText.includes('minimax')) return 'minimax';
+  return null;
+}
+
+/** 第二层：仅在模型 ID 未识别出明确品牌时，回退依据服务商名称匹配图标。 */
+function matchModelIconKeyByProvider(providerText: string): ModelIconKey | null {
+  if (!providerText) return null;
+  // 置于 newapi / bailian / volcengine / openai 之前，确保 xAI / Grok 服务商优先识别
+  if (
+    grokModelBoundaryPattern.test(providerText) ||
+    xaiBrandBoundaryPattern.test(providerText) ||
+    xaiSlugBoundaryPattern.test(providerText) ||
+    xaiDomainBoundaryPattern.test(providerText)
+  ) {
+    return 'grok';
+  }
+  if (providerText.includes('claude') || providerText.includes('anthropic')) return 'claude';
+  if (providerText.includes('gemini') || providerText.includes('google')) return 'gemini';
+  if (providerText.includes('deepseek')) return 'deepseek';
+  if (providerText.includes('qwen') || providerText.includes('tongyi')) return 'qwen';
   if (
     providerText.includes('bailian') ||
     providerText.includes('dashscope') ||
     providerText.includes('aliyun')
-  ) return 'bailian';
+  ) {
+    return 'bailian';
+  }
   if (
     providerText.includes('volc') ||
     providerText.includes('ark') ||
     providerText.includes('huoshan')
-  ) return 'volcengine';
+  ) {
+    return 'volcengine';
+  }
   if (
     providerText.includes('new api') ||
     providerText.includes('new-api') ||
     providerText.includes('newapi')
-  ) return 'newapi';
+  ) {
+    return 'newapi';
+  }
+  if (
+    providerText.includes('zhipu') ||
+    providerText.includes('bigmodel') ||
+    providerText.includes('智谱')
+  ) {
+    return 'zhipu';
+  }
+  if (providerText.includes('kimi') || providerText.includes('moonshot')) return 'kimi';
+  if (providerText.includes('minimax')) return 'minimax';
+  if (
+    providerText.includes('gpt') ||
+    providerText.includes('openai') ||
+    providerText.includes('codex')
+  ) {
+    return 'openai';
+  }
+  return null;
+}
 
-  return 'unknown';
+export function modelIconKey(modelId?: string, providerName?: string): ModelIconKey {
+  const modelText = (modelId ?? '').trim().toLowerCase();
+  const providerText = (providerName ?? '').trim().toLowerCase();
+
+  if (
+    modelText.includes('模型未记录') ||
+    modelText.includes('未知服务商') ||
+    providerText.includes('模型未记录') ||
+    providerText.includes('未知服务商')
+  ) {
+    return 'unknown';
+  }
+
+  return (
+    matchModelIconKeyByModelId(modelText) ??
+    matchModelIconKeyByProvider(providerText) ??
+    'unknown'
+  );
 }

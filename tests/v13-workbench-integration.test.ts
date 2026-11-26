@@ -55,8 +55,9 @@ describe('v1.3 local knowledge and artifact integration', () => {
   });
 
   it('mounts the two large local tools only while open and exposes explicit capture actions', async () => {
-    const [appSource, workbenchSource] = await Promise.all([
+    const [appSource, rowSource, workbenchSource] = await Promise.all([
       source('src/features/chat/ChatPane.tsx'),
+      source('src/features/chat/internal/presentation/ChatMessageRow.tsx'),
       source('src/components/WorkspaceWorkbench.tsx'),
     ]);
 
@@ -64,12 +65,15 @@ describe('v1.3 local knowledge and artifact integration', () => {
     expect(appSource).toContain('<WorkspaceWorkbench');
     expect(appSource).toContain('{contextToolsAvailable && contextInspectorOpen && contextInspection ? (');
     expect(appSource).toContain('<ContextInspectorModal');
-    expect(appSource).toContain('onSaveArtifact={() => saveMessageAsArtifact(message)}');
-    expect(appSource).toContain('onSaveKnowledge={() => saveMessageAsKnowledge(message)}');
+    expect(appSource).toContain('saveMessageAsArtifact');
+    expect(rowSource).toContain('onSaveArtifact={() => onSaveArtifact(displayMessage)}');
+    expect(appSource).toContain('saveMessageAsKnowledge');
+    expect(rowSource).toContain('onSaveKnowledge={() => onSaveKnowledge(displayMessage)}');
     expect(appSource).toContain('onRequestCompression={generateContextCompressionDraft}');
     expect(appSource).toContain('尚未调用任何模型');
     expect(appSource).toContain('const initialChatMessageRenderLimit = 160;');
-    expect(appSource).toContain('{renderedChatMessages.map((message) => {');
+    expect(appSource).toContain('<FlatList');
+    expect(appSource).toContain('data={renderedChatMessages}');
     expect(workbenchSource).toContain("'plain-text'");
     expect(workbenchSource).toContain("'code'");
     expect(workbenchSource).toContain("'json'");

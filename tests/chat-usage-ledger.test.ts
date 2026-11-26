@@ -132,4 +132,44 @@ describe('ChatUsageLedger', () => {
     await expect(ledger.rollbackStarted([started])).rejects.toThrow(/台账回滚失败/);
     expect(workspace.providerUsageEvents).toEqual([started]);
   });
+
+  it('forwards AbortSignal to confirmCost and settles false immediately when aborted', async () => {
+    const workspace = createDefaultWorkspace();
+    const controller = new AbortController();
+    let forwardedSignal: AbortSignal | undefined;
+
+    const ledger = new ChatUsageLedger({
+      readWorkspace: () => ({
+        ...workspace,
+        costGuard: {
+          ...workspace.costGuard,
+          enabled: true,
+          confirmPotentialMultipleCharges: true,
+        },
+      }),
+      isReplacing: () => false,
+      replaceUsageEvents: async () => true,
+      flushRequired: async () => undefined,
+      confirmCost: (_reason, signal) => {
+        forwardedSignal = signal;
+        return new Promise<boolean>((resolve) => {
+          signal?.addEventListener('abort', () => resolve(false), { once: true });
+        });
+      },
+      notify: () => undefined,
+      now: () => 1_700_000_000_000,
+    });
+
+    const pending = ledger.authorize(
+      {
+        potentialMultipleCharges: true,
+        operations: [{ kind: 'chat', providerId: 'provider-1', modelId: 'model-1' }],
+      },
+      controller.signal
+    );
+
+    expect(forwardedSignal).toBe(controller.signal);
+    controller.abort();
+    await expect(pending).resolves.toBe(false);
+  });
 });

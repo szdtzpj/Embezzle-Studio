@@ -23,13 +23,19 @@ import type {
   ModelInfo,
   ModelTask,
   ExperienceMode,
+  ProviderAuthHeaderMode,
+  ProviderImageApiMode,
   ProviderKind,
   ProviderProfile,
 } from '../../../domain/types';
 import type { ModelCapabilityFilter } from '../../../services/modelCapabilities';
-import type { ProviderEndpointInspection } from '../../../services/providerSetup';
+import type {
+  CustomHeadersValidationResult,
+  ProviderEndpointInspection,
+} from '../../../services/providerSetup';
 import { isUserCreatedProvider } from '../../../data/providerCatalog';
 import { SettingsToolsSectionView } from './SettingsToolsSectionView';
+import type { ProviderCustomHeaderDraft } from './useSettingsDrafts';
 
 export type { SettingsToolsSection } from '../../../app/navigation/settingsNavigation';
 
@@ -56,6 +62,10 @@ export interface SettingsScreenModel {
     kindDraft: ProviderKind;
     baseUrlDraft: string;
     apiKeyDraft: string;
+    authHeaderModeDraft: ProviderAuthHeaderMode;
+    imageApiModeDraft: ProviderImageApiMode;
+    customHeadersDraft: ProviderCustomHeaderDraft[];
+    customHeadersValidation: CustomHeadersValidationResult;
     endpointInspection: ProviderEndpointInspection;
     select(providerId: string): Promise<boolean>;
     toggleEnabled(providerId: string): void;
@@ -64,6 +74,14 @@ export interface SettingsScreenModel {
     setNameDraft(name: string): void;
     changeBindingDraft(patch: { kind?: ProviderKind; baseUrl?: string }): void;
     setApiKeyDraft(apiKey: string): void;
+    setAuthHeaderModeDraft(mode: ProviderAuthHeaderMode): void;
+    setImageApiModeDraft(mode: ProviderImageApiMode): void;
+    addCustomHeaderDraft(): void;
+    updateCustomHeaderDraft(
+      id: string,
+      patch: Partial<Pick<ProviderCustomHeaderDraft, 'key' | 'value' | 'enabled'>>
+    ): void;
+    removeCustomHeaderDraft(id: string): void;
     saveDraft(): void;
   };
   models: {
@@ -345,12 +363,21 @@ export const SettingsScreen = forwardRef<SettingsScreenHandle, SettingsScreenMod
             kindDraft={props.providers.kindDraft}
             baseUrlDraft={props.providers.baseUrlDraft}
             apiKeyDraft={props.providers.apiKeyDraft}
+            authHeaderModeDraft={props.providers.authHeaderModeDraft}
+            imageApiModeDraft={props.providers.imageApiModeDraft}
+            customHeadersDraft={props.providers.customHeadersDraft}
+            customHeadersValidation={props.providers.customHeadersValidation}
             endpointInspection={props.providers.endpointInspection}
             onBack={pop}
             onOpenModels={() => push({ key: 'providerModels' })}
             onSetNameDraft={props.providers.setNameDraft}
             onChangeBindingDraft={props.providers.changeBindingDraft}
             onSetApiKeyDraft={props.providers.setApiKeyDraft}
+            onSetAuthHeaderModeDraft={props.providers.setAuthHeaderModeDraft}
+            onSetImageApiModeDraft={props.providers.setImageApiModeDraft}
+            onAddCustomHeaderDraft={props.providers.addCustomHeaderDraft}
+            onUpdateCustomHeaderDraft={props.providers.updateCustomHeaderDraft}
+            onRemoveCustomHeaderDraft={props.providers.removeCustomHeaderDraft}
             onSaveProviderDraft={props.providers.saveDraft}
             onRefreshModels={props.models.refresh}
             onDeleteProvider={

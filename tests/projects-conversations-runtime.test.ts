@@ -47,7 +47,12 @@ describe('ProjectsConversationsRuntime', () => {
     expect(result.ok).toBe(true);
     expect(onConversationDeleted).toHaveBeenCalledWith(conversationId);
     await session.settle();
-    expect(session.getSnapshot().conversations.some((item) => item.id === conversationId)).toBe(false);
+    const afterDelete = session.getSnapshot();
+    expect(afterDelete.conversations.some((item) => item.id === conversationId)).toBe(false);
+    expect(afterDelete.conversations.length).toBe(1);
+    expect(
+      afterDelete.conversations.some((item) => item.id === afterDelete.activeConversationId)
+    ).toBe(true);
   });
 
   it('applies every cross-feature Chat effect returned by a Projects command', () => {

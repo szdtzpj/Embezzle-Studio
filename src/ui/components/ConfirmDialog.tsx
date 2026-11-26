@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react';
 import {
   KeyboardAvoidingView,
-  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -9,8 +8,10 @@ import {
   Text,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AlertTriangle, Info, ShieldAlert, Trash2 } from 'lucide-react-native';
 import { AnimatedPressable } from './AnimatedPressable';
+import { OverlayPortal } from './AppDialogHost';
 import { MotionItem } from './Motion';
 import { useKelivoTheme, type KelivoTheme } from '../theme';
 import type { DialogTone } from './dialogService';
@@ -28,6 +29,8 @@ export interface ConfirmDialogProps {
   onCancel: () => void;
 }
 
+export type ConfirmDialogContentProps = Omit<ConfirmDialogProps, 'visible'>;
+
 function DefaultIcon({ tone }: { tone: DialogTone }) {
   const theme = useKelivoTheme();
   if (tone === 'warning') {
@@ -42,8 +45,10 @@ function DefaultIcon({ tone }: { tone: DialogTone }) {
   return <ShieldAlert size={22} color={theme.colors.error} strokeWidth={2.25} />;
 }
 
-export function ConfirmDialog({
-  visible,
+/**
+ * 确认弹窗纯内容组件：供 `AppDialogHost` 直接渲染以防止与 `OverlayPortal` 形成自注册环路。
+ */
+export function ConfirmDialogContent({
   title,
   description,
   subject,
@@ -53,91 +58,111 @@ export function ConfirmDialog({
   icon,
   onConfirm,
   onCancel,
-}: ConfirmDialogProps) {
+}: ConfirmDialogContentProps) {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = getStyles(theme, tone);
 
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      onRequestClose={onCancel}
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined}
+      style={styles.keyboard}
     >
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined}
-        style={styles.keyboard}
+      <Pressable
+        style={[
+          styles.scrim,
+          {
+            paddingTop: Math.max(24, insets.top + 12),
+            paddingBottom: Math.max(24, insets.bottom + 12),
+            paddingLeft: Math.max(24, insets.left + 12),
+            paddingRight: Math.max(24, insets.right + 12),
+          },
+        ]}
+        onPress={onCancel}
       >
-        <Pressable style={styles.scrim} onPress={onCancel}>
-          <MotionItem
-            delay={20}
-            distance={12}
-            duration={220}
-            scaleFrom={0.94}
-            style={styles.dialogMotion}
+        <MotionItem
+          delay={20}
+          distance={12}
+          duration={220}
+          scaleFrom={0.94}
+          style={styles.dialogMotion}
+        >
+          <Pressable
+            accessible={false}
+            accessibilityViewIsModal
+            style={styles.dialog}
+            onPress={(event) => event.stopPropagation()}
           >
-            <Pressable
-              accessible={false}
-              accessibilityViewIsModal
-              style={styles.dialog}
-              onPress={(event) => event.stopPropagation()}
+            <ScrollView
+              style={styles.contentScroll}
+              contentContainerStyle={styles.contentScrollBody}
+              bounces={false}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
             >
-              <ScrollView
-                style={styles.contentScroll}
-                contentContainerStyle={styles.contentScrollBody}
-                bounces={false}
-                keyboardShouldPersistTaps="handled"
-                showsVerticalScrollIndicator={false}
+              <View
+                accessible
+                accessibilityRole="alert"
+                accessibilityLiveRegion="assertive"
+                style={styles.messageBlock}
               >
-                <View
-                  accessible
-                  accessibilityRole="alert"
-                  accessibilityLiveRegion="assertive"
-                  style={styles.messageBlock}
-                >
-                  <View style={styles.iconWrap}>
-                    {icon ?? <DefaultIcon tone={tone} />}
-                  </View>
-
-                  <Text style={styles.title}>{title}</Text>
-
-                  {subject ? (
-                    <View style={styles.subjectWrap}>
-                      <Text style={styles.subject}>
-                        {subject}
-                      </Text>
-                    </View>
-                  ) : null}
-
-                  <Text style={styles.description}>{description}</Text>
+                <View style={styles.iconWrap}>
+                  {icon ?? <DefaultIcon tone={tone} />}
                 </View>
-              </ScrollView>
 
-              <View style={styles.actions}>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  accessibilityLabel={cancelLabel}
-                  onPress={onCancel}
-                  haptic="light"
-                  style={styles.cancelButton}
-                >
-                  <Text style={styles.cancelText}>{cancelLabel}</Text>
-                </AnimatedPressable>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  accessibilityLabel={confirmLabel}
-                  onPress={onConfirm}
-                  haptic={tone === 'danger' ? 'warning' : 'medium'}
-                  style={styles.confirmButton}
-                >
-                  <Text style={styles.confirmText}>{confirmLabel}</Text>
-                </AnimatedPressable>
+                <Text style={styles.title}>{title}</Text>
+
+                {subject ? (
+                  <View style={styles.subjectWrap}>
+                    <Text style={styles.subject}>
+                      {subject}
+                    </Text>
+                  </View>
+                ) : null}
+
+                <Text style={styles.description}>{description}</Text>
               </View>
-            </Pressable>
-          </MotionItem>
-        </Pressable>
-      </KeyboardAvoidingView>
-    </Modal>
+            </ScrollView>
+
+            <View style={styles.actions}>
+              <AnimatedPressable
+                accessibilityRole="button"
+                accessibilityLabel={cancelLabel}
+                onPress={onCancel}
+                haptic="light"
+                style={styles.cancelButton}
+              >
+                <Text style={styles.cancelText}>{cancelLabel}</Text>
+              </AnimatedPressable>
+              <AnimatedPressable
+                accessibilityRole="button"
+                accessibilityLabel={confirmLabel}
+                onPress={onConfirm}
+                haptic={tone === 'danger' ? 'warning' : 'medium'}
+                style={styles.confirmButton}
+              >
+                <Text style={styles.confirmText}>{confirmLabel}</Text>
+              </AnimatedPressable>
+            </View>
+          </Pressable>
+        </MotionItem>
+      </Pressable>
+    </KeyboardAvoidingView>
+  );
+}
+
+/**
+ * 声明式确认弹窗，经由 `OverlayPortal` 渲染于统一顶层宿主。
+ */
+export function ConfirmDialog({
+  visible,
+  onCancel,
+  ...rest
+}: ConfirmDialogProps) {
+  return (
+    <OverlayPortal visible={visible} layer="dialog" onRequestClose={onCancel}>
+      <ConfirmDialogContent onCancel={onCancel} {...rest} />
+    </OverlayPortal>
   );
 }
 
@@ -172,12 +197,6 @@ function createStyles(theme: KelivoTheme, tone: DialogTone) {
       paddingHorizontal: 24,
       paddingVertical: 24,
       backgroundColor: theme.colors.scrim,
-      ...(Platform.OS === 'web'
-        ? ({
-            position: 'fixed',
-            inset: 0,
-          } as any)
-        : {}),
     },
     dialogMotion: {
       width: '100%',

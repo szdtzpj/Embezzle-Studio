@@ -7,6 +7,7 @@ import {
   DeepSeek,
   Doubao,
   Gemini,
+  Grok,
   Kimi,
   Minimax,
   NewAPI,
@@ -53,6 +54,7 @@ export function ModelAvatar({ modelId, providerName, size = 18, containerSize = 
       {iconKey === 'bailian' ? <Bailian.Color size={size} /> : null}
       {iconKey === 'volcengine' ? <Volcengine.Color size={size} /> : null}
       {iconKey === 'newapi' ? <NewAPI.Color size={size} /> : null}
+      {iconKey === 'grok' ? <Grok size={size} color={theme.colors.text} /> : null}
       {iconKey === 'openai' ? <OpenAI size={size} color={theme.colors.text} /> : null}
       {iconKey === 'unknown' ? (
         <MessageSquare size={Math.max(14, size - 8)} color={theme.colors.textSecondary} strokeWidth={2} />

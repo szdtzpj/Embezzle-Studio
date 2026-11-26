@@ -1,8 +1,9 @@
 import { AlertTriangle, Ban, Check, ShieldCheck, Square } from 'lucide-react-native';
 import { useEffect, useRef, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { OverlayPortal } from '../ui/components/AppDialogHost';
 import { useKelivoTheme, type KelivoTheme } from '../ui/theme';
 
 import type { ProviderMcpApprovalDecision } from '../services/providerMcp';
@@ -66,15 +67,21 @@ export function McpApprovalModal({
   };
 
   return (
-    <Modal
+    <OverlayPortal
       visible={visible && request !== null}
-      animationType="slide"
-      presentationStyle="fullScreen"
-      statusBarTranslucent
-      navigationBarTranslucent
+      layer="fullscreen"
       onRequestClose={() => settleOnce('cancel')}
     >
-      <SafeAreaView style={styles.root}>
+      <View
+        style={[
+          styles.root,
+          {
+            paddingTop: insets.top,
+            paddingLeft: insets.left,
+            paddingRight: insets.right,
+          },
+        ]}
+      >
         <View style={styles.header}>
           <View style={styles.headerIcon}>
             <ShieldCheck size={22} color={colors.text} strokeWidth={2.2} />
@@ -88,7 +95,7 @@ export function McpApprovalModal({
         {request ? (
           <ScrollView
             style={styles.scroll}
-            contentContainerStyle={[styles.content, { paddingBottom: Math.max(24, insets.bottom + 16) }]}
+            contentContainerStyle={styles.content}
           >
             <View style={styles.warningCard} testID="mcp-approval-warning">
               <AlertTriangle size={18} color={colors.warning} strokeWidth={2.2} />
@@ -180,8 +187,8 @@ export function McpApprovalModal({
             <Text style={styles.approveButtonText}>批准一次</Text>
           </Pressable>
         </View>
-      </SafeAreaView>
-    </Modal>
+      </View>
+    </OverlayPortal>
   );
 }
 

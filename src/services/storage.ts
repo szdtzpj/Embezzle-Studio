@@ -28,6 +28,10 @@ import type {
   PluginManifest,
   PricingCurrency,
   PromptTemplate,
+  ProviderAuthHeaderMode,
+  ProviderContinuationBlock,
+  ProviderCustomHeader,
+  ProviderImageApiMode,
   ProviderKind,
   ProviderProfile,
   ProviderUsageEvent,
@@ -154,10 +158,78 @@ const INTERRUPTED_MESSAGE = '上次请求在应用退出前未完成，已标记
 
 const providerKinds = new Set<ProviderKind>([
   'openai-compatible',
+  'anthropic',
+  'gemini',
+  'xai-grok',
+  'deepseek',
   'volcengine-ark',
   'bailian-compatible',
   'new-api-relay',
   'custom',
+]);
+const providerAuthHeaderModes = new Set<ProviderAuthHeaderMode>([
+  'auto',
+  'bearer',
+  'x-api-key',
+  'x-goog-api-key',
+  'custom',
+]);
+const providerImageApiModes = new Set<ProviderImageApiMode>([
+  'auto',
+  'openai-images',
+  'openai-responses',
+  'gemini-generate-content',
+  'xai-json',
+  'unsupported',
+]);
+const forbiddenPersistedRecordKeys = new Set(['__proto__', 'constructor', 'prototype']);
+const blockedCustomHeaderNames = new Set([
+  'accept-encoding',
+  'access-control-request-headers',
+  'access-control-request-method',
+  'cf-connecting-ip',
+  'client-ip',
+  'connection',
+  'constructor',
+  'content-length',
+  'cookie',
+  'cookie2',
+  'expect',
+  'forwarded',
+  'host',
+  'keep-alive',
+  'origin',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'prototype',
+  'referer',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'true-client-ip',
+  'upgrade',
+  'via',
+  'x-http-method',
+  'x-http-method-override',
+  'x-method-override',
+  'x-original-url',
+  'x-real-ip',
+  'x-rewrite-url',
+  '__proto__',
+]);
+const validHeaderNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const MAX_PROVIDER_CUSTOM_HEADERS = 32;
+const MAX_PROVIDER_CUSTOM_HEADER_KEY_LENGTH = 128;
+const MAX_PROVIDER_CUSTOM_HEADER_VALUE_LENGTH = 4096;
+const MAX_CONTINUATION_BLOCKS = 64;
+const MAX_SINGLE_CONTINUATION_BYTES = 256 * 1024;
+const MAX_TOTAL_CONTINUATION_BYTES = 512 * 1024;
+const incrementalBuiltInProviderIds = new Set([
+  'openai',
+  'anthropic',
+  'gemini',
+  'xai-grok',
+  'deepseek',
 ]);
 const capabilities = new Set<Capability>([
   'text',
@@ -381,6 +453,61 @@ function normalizeModel(value: unknown, provider: ProviderProfile, label: string
   };
 }
 
+function isSafePersistedHeader(key: string, value: string): boolean {
+  const lower = key.toLowerCase();
+  if (
+    !key ||
+    key.length > MAX_PROVIDER_CUSTOM_HEADER_KEY_LENGTH ||
+    !validHeaderNamePattern.test(key) ||
+    /[\r\n\0]/.test(value) ||
+    value.length > MAX_PROVIDER_CUSTOM_HEADER_VALUE_LENGTH
+  ) {
+    return false;
+  }
+  return !(
+    blockedPersistedHeaderName(lower)
+  );
+}
+
+function blockedPersistedHeaderName(lower: string): boolean {
+  return (
+    blockedCustomHeaderNames.has(lower) ||
+    lower.startsWith('access-control-') ||
+    lower.startsWith('proxy-') ||
+    lower.startsWith('sec-') ||
+    lower.startsWith('x-forwarded-')
+  );
+}
+
+function normalizeProviderCustomHeaders(
+  value: unknown,
+  label: string
+): ProviderCustomHeader[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw shapeError(`${label} 必须是数组。`);
+  }
+
+  const normalized: ProviderCustomHeader[] = [];
+  for (const item of value.slice(0, MAX_PROVIDER_CUSTOM_HEADERS)) {
+    if (!isRecord(item) || typeof item.key !== 'string' || typeof item.value !== 'string') {
+      continue;
+    }
+    const key = item.key.trim();
+    if (!isSafePersistedHeader(key, item.value)) {
+      continue;
+    }
+    normalized.push({
+      key,
+      value: item.value,
+      ...(typeof item.enabled === 'boolean' ? { enabled: item.enabled } : {}),
+    });
+  }
+  return normalized.length ? normalized : undefined;
+}
+
 function normalizeProvider(value: unknown, index: number): PersistedProvider {
   if (!isRecord(value)) {
     throw shapeError(`providers[${index}] 必须是对象。`);
@@ -392,11 +519,28 @@ function normalizeProvider(value: unknown, index: number): PersistedProvider {
   const kind = typeof value.kind === 'string' && providerKinds.has(value.kind as ProviderKind)
     ? (value.kind as ProviderKind)
     : 'custom';
+  const customHeaders = normalizeProviderCustomHeaders(
+    value.customHeaders,
+    `providers[${index}].customHeaders`
+  );
+  const authHeaderMode =
+    typeof value.authHeaderMode === 'string' &&
+    providerAuthHeaderModes.has(value.authHeaderMode as ProviderAuthHeaderMode)
+      ? (value.authHeaderMode as ProviderAuthHeaderMode)
+      : undefined;
+  const imageApiMode =
+    typeof value.imageApiMode === 'string' &&
+    providerImageApiModes.has(value.imageApiMode as ProviderImageApiMode)
+      ? (value.imageApiMode as ProviderImageApiMode)
+      : undefined;
   const provider: ProviderProfile = {
     id,
     name: nonEmptyString(value.name) ?? id,
     kind,
     baseUrl: typeof value.baseUrl === 'string' ? value.baseUrl.trim() : '',
+    ...(customHeaders ? { customHeaders } : {}),
+    ...(authHeaderMode ? { authHeaderMode } : {}),
+    ...(imageApiMode ? { imageApiMode } : {}),
     capabilities: normalizeCapabilities(value.capabilities, ['text', 'streaming']),
     models: [],
     ...(typeof value.notes === 'string' ? { notes: value.notes } : {}),
@@ -411,6 +555,9 @@ function normalizeProvider(value: unknown, index: number): PersistedProvider {
 function defaultPersistedProviders(): PersistedProvider[] {
   return createDefaultWorkspace().providers.map((provider) => ({
     ...stripSecret(provider),
+    ...(provider.customHeaders
+      ? { customHeaders: provider.customHeaders.map((header) => ({ ...header })) }
+      : {}),
     capabilities: [...provider.capabilities],
     models: provider.models.map((model) => ({ ...model, capabilities: [...model.capabilities] })),
   }));
@@ -428,23 +575,22 @@ function normalizePersistedProviders(value: unknown): PersistedProvider[] {
     return defaultPersistedProviders();
   }
 
-  // Existing snapshots must retain their provider selection. Add only the
-  // DeepSeek catalog entry introduced after v6, rather than restoring every
-  // absent built-in provider from a possibly intentionally reduced snapshot.
+  // Existing snapshots retain their provider selection and existing kinds (protecting
+  // secret binding fingerprints). Only newly shipped built-in provider IDs missing from
+  // the snapshot are appended non-destructively.
   const existingIds = new Set(normalized.map((provider) => provider.id));
-  const deepSeekProvider = defaultPersistedProviders().find(
-    (provider) => provider.id === 'deepseek'
-  );
-  if (!deepSeekProvider || existingIds.has(deepSeekProvider.id)) {
+  const hasAnyEnabled = normalized.some((provider) => provider.enabled !== false);
+  const missingBuiltIns = defaultPersistedProviders()
+    .filter(
+      (provider) =>
+        incrementalBuiltInProviderIds.has(provider.id) && !existingIds.has(provider.id)
+    )
+    .map((provider) => (hasAnyEnabled ? provider : { ...provider, enabled: false }));
+
+  if (!missingBuiltIns.length) {
     return normalized;
   }
-
-  // Do not let a newly added catalog entry mask recovery of a corrupt snapshot
-  // in which every existing provider was disabled.
-  const addedDeepSeek = normalized.some((provider) => provider.enabled !== false)
-    ? deepSeekProvider
-    : { ...deepSeekProvider, enabled: false };
-  return [...normalized, addedDeepSeek];
+  return [...normalized, ...missingBuiltIns];
 }
 
 function normalizeAttachment(value: unknown, label: string): MediaAttachment {
@@ -749,6 +895,180 @@ function normalizeMcpActivity(
   };
 }
 
+function sanitizeContinuationJsonValue(value: unknown, depth = 0): unknown {
+  if (depth > 12 || value === undefined || typeof value === 'function' || typeof value === 'symbol') {
+    return undefined;
+  }
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => sanitizeContinuationJsonValue(item, depth + 1))
+      .filter((item) => item !== undefined);
+  }
+  if (typeof value === 'object') {
+    const cleanEntries: Array<[string, unknown]> = [];
+    for (const [key, entryValue] of Object.entries(value as Record<string, unknown>)) {
+      if (forbiddenPersistedRecordKeys.has(key)) {
+        continue;
+      }
+      const sanitized = sanitizeContinuationJsonValue(entryValue, depth + 1);
+      if (sanitized !== undefined) {
+        cleanEntries.push([key, sanitized]);
+      }
+    }
+    return Object.fromEntries(cleanEntries);
+  }
+  return undefined;
+}
+
+function sanitizeContinuationBlock(value: unknown): ProviderContinuationBlock | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  if (value.provider === 'anthropic') {
+    if (
+      value.type === 'thinking' &&
+      typeof value.thinking === 'string' &&
+      typeof value.signature === 'string'
+    ) {
+      return {
+        provider: 'anthropic',
+        type: 'thinking',
+        thinking: value.thinking,
+        signature: value.signature,
+      };
+    }
+    if (value.type === 'redacted_thinking' && typeof value.data === 'string') {
+      return {
+        provider: 'anthropic',
+        type: 'redacted_thinking',
+        data: value.data,
+      };
+    }
+    if (
+      value.type === 'server_tool_use' &&
+      typeof value.id === 'string' &&
+      typeof value.name === 'string' &&
+      isRecord(value.input)
+    ) {
+      const sanitizedInput = sanitizeContinuationJsonValue(value.input);
+      if (isRecord(sanitizedInput)) {
+        return {
+          provider: 'anthropic',
+          type: 'server_tool_use',
+          id: value.id,
+          name: value.name,
+          input: sanitizedInput,
+        };
+      }
+    }
+    if (
+      value.type === 'web_search_tool_result' &&
+      typeof value.toolUseId === 'string' &&
+      Array.isArray(value.content)
+    ) {
+      const sanitizedContent = sanitizeContinuationJsonValue(value.content);
+      if (Array.isArray(sanitizedContent)) {
+        return {
+          provider: 'anthropic',
+          type: 'web_search_tool_result',
+          toolUseId: value.toolUseId,
+          content: sanitizedContent,
+        };
+      }
+    }
+    return undefined;
+  }
+
+  if (
+    value.provider === 'gemini' &&
+    value.type === 'thought_signature' &&
+    typeof value.thoughtSignature === 'string'
+  ) {
+    const partRole =
+      value.partRole === 'text' || value.partRole === 'image' || value.partRole === 'function_call'
+        ? value.partRole
+        : undefined;
+    return {
+      provider: 'gemini',
+      type: 'thought_signature',
+      thoughtSignature: value.thoughtSignature,
+      ...(partRole ? { partRole } : {}),
+      ...(typeof value.attachmentId === 'string' ? { attachmentId: value.attachmentId } : {}),
+    };
+  }
+
+  if (
+    (value.provider === 'openai' || value.provider === 'xai') &&
+    value.type === 'reasoning_encrypted' &&
+    typeof value.encryptedContent === 'string'
+  ) {
+    const summary = Array.isArray(value.summary)
+      ? value.summary.filter((item): item is string => typeof item === 'string')
+      : undefined;
+    return {
+      provider: value.provider,
+      type: 'reasoning_encrypted',
+      ...(typeof value.id === 'string' ? { id: value.id } : {}),
+      encryptedContent: value.encryptedContent,
+      ...(summary?.length ? { summary } : {}),
+    };
+  }
+
+  if (
+    value.provider === 'deepseek' &&
+    value.type === 'server_tool_calls' &&
+    Array.isArray(value.serverToolCalls)
+  ) {
+    const sanitizedCalls = sanitizeContinuationJsonValue(value.serverToolCalls);
+    if (Array.isArray(sanitizedCalls)) {
+      return {
+        provider: 'deepseek',
+        type: 'server_tool_calls',
+        serverToolCalls: sanitizedCalls,
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeProviderContinuations(
+  value: unknown,
+  label: string
+): ProviderContinuationBlock[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw shapeError(`${label} 必须是数组。`);
+  }
+
+  const blocks: ProviderContinuationBlock[] = [];
+  let totalBytes = 0;
+  for (const item of value.slice(0, MAX_CONTINUATION_BLOCKS)) {
+    const block = sanitizeContinuationBlock(item);
+    if (!block) {
+      continue;
+    }
+    const serializedBytes = new TextEncoder().encode(JSON.stringify(block)).byteLength;
+    if (
+      serializedBytes > MAX_SINGLE_CONTINUATION_BYTES ||
+      totalBytes + serializedBytes > MAX_TOTAL_CONTINUATION_BYTES
+    ) {
+      continue;
+    }
+    totalBytes += serializedBytes;
+    blocks.push(block);
+  }
+  return blocks.length ? blocks : undefined;
+}
+
 function normalizeMessage(value: unknown, label: string, fallbackCreatedAt: number): ChatMessage {
   if (!isRecord(value)) {
     throw shapeError(`${label} 必须是对象。`);
@@ -766,6 +1086,11 @@ function normalizeMessage(value: unknown, label: string, fallbackCreatedAt: numb
     : arrayField(value.attachments, `${label}.attachments`).map((attachment, index) =>
         normalizeAttachment(attachment, `${label}.attachments[${index}]`)
       );
+  const thinkingDurationMs = nonNegativeFiniteNumber(value.thinkingDurationMs);
+  const providerContinuations = normalizeProviderContinuations(
+    value.providerContinuations,
+    `${label}.providerContinuations`
+  );
   const usage = normalizeTokenUsage(value.usage, `${label}.usage`);
   const citations = normalizeCitations(value.citations, `${label}.citations`);
   const generationTask = normalizeGenerationTask(value.generationTask, `${label}.generationTask`);
@@ -786,6 +1111,8 @@ function normalizeMessage(value: unknown, label: string, fallbackCreatedAt: numb
     status: interrupted ? 'error' : storedStatus,
     ...(attachments ? { attachments } : {}),
     ...(typeof value.reasoningContent === 'string' ? { reasoningContent: value.reasoningContent } : {}),
+    ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+    ...(providerContinuations ? { providerContinuations } : {}),
     ...(usage ? { usage } : {}),
     ...(citations ? { citations } : {}),
     ...(typeof value.webSearchTriggered === 'boolean'

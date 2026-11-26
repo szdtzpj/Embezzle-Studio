@@ -1,6 +1,8 @@
 import { Platform } from 'react-native';
 
 import type { MediaAttachment } from '../domain/types';
+import { guardedApiFetch } from './networkTransport';
+import { safePublicHttpsUrl } from './ssrfGuard';
 
 const attachmentDirectoryName = 'embezzle-attachments';
 const webAttachmentDatabaseName = 'embezzle-studio-attachments';
@@ -51,7 +53,18 @@ function dataUriBase64(value: string): string | undefined {
 }
 
 function isRemoteUri(uri: string): boolean {
-  return /^https?:\/\//i.test(uri);
+  return /^https?:\/\//i.test(uri.trim());
+}
+
+/**
+ * 校验远程媒体下载地址是否为无凭据、443 端口的公网 HTTPS URL（拦截内网与 IMDS SSRF）。
+ */
+function normalizePublicHttpsMediaUrl(uri: string): string {
+  const normalized = safePublicHttpsUrl(uri);
+  if (!normalized) {
+    throw new Error('远程附件地址无效或不安全，仅允许公开 HTTPS 地址。');
+  }
+  return normalized;
 }
 
 function maxRemoteDownloadBytes(attachment: MediaAttachment): number {
@@ -160,11 +173,17 @@ async function webAttachmentBlob(
       ? inline
       : `data:${attachment.mimeType ?? 'application/octet-stream'};base64,${inline}`
     : attachment.uri;
-  const response = await fetch(source);
+  const remoteDownload = isRemoteUri(source);
+  const response = remoteDownload
+    ? await guardedApiFetch(normalizePublicHttpsMediaUrl(source), {
+        method: 'GET',
+        redirect: 'error',
+      })
+    : await fetch(source);
   if (!response.ok) {
     throw new Error(`附件“${attachment.name}”读取失败：HTTP ${response.status}`);
   }
-  if (isRemoteUri(source)) {
+  if (remoteDownload) {
     assertRemoteDownloadMetadata(response, attachment);
   }
   const blob = await response.blob();
@@ -217,7 +236,8 @@ export async function persistAttachment(
     if (!options.downloadRemote) {
       return { ...attachment, base64: null };
     }
-    await File.downloadFileAsync(attachment.uri, destination, { idempotent: true });
+    const safeUrl = normalizePublicHttpsMediaUrl(attachment.uri);
+    await File.downloadFileAsync(safeUrl, destination, { idempotent: true });
     if ((destination.size ?? 0) > maxRemoteDownloadBytes(attachment)) {
       destination.delete();
       throw new Error(`远程附件「${attachment.name}」超过安全下载上限。`);

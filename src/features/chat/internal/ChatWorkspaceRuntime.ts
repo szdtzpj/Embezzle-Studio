@@ -1,10 +1,16 @@
+import { useMemo, useSyncExternalStore } from 'react';
+
 import type {
+  ActivityTimelineStep,
   AppWorkspace,
   ChatMessage,
+  ChatTokenUsage,
   MediaAttachment,
   ModelParameterSettings,
   ProviderUsageEvent,
   ReasoningEffort,
+  ToolActivityItem,
+  WebCitation,
 } from '../../../domain/types';
 import {
   isWorkspaceCommitRejectedError,
@@ -25,6 +31,201 @@ import {
   cleanupIntentsForMessages,
   recordGenerationTaskCleanupIntents,
 } from '../../../services/generationTaskCleanupJournal';
+
+/** 流式期间隔离的草稿增量切片（不落盘、不广播 WorkspaceSession）。 */
+export interface StreamingMessageDraft {
+  conversationId: string;
+  messageId: string;
+  content: string;
+  reasoningContent?: string;
+  thinkingDurationMs?: number;
+  usage?: ChatTokenUsage;
+  citations?: WebCitation[];
+  webSearchTriggered?: boolean;
+  toolActivity?: ToolActivityItem[];
+  activityTimeline?: ActivityTimelineStep[];
+  status: 'pending';
+  updatedAt: number;
+}
+
+/** 兼容 Partial<ChatMessage> 与极简流式补丁；存储层统一归一为 pending 状态。 */
+export type StreamingDraftPatch = Partial<
+  Pick<
+    ChatMessage,
+    | 'content'
+    | 'reasoningContent'
+    | 'thinkingDurationMs'
+    | 'usage'
+    | 'citations'
+    | 'webSearchTriggered'
+    | 'toolActivity'
+    | 'activityTimeline'
+    | 'status'
+  >
+>;
+
+export interface StreamingDraftStore {
+  publish(conversationId: string, messageId: string, patch: StreamingDraftPatch): void;
+  get(conversationId: string, messageId: string): StreamingMessageDraft | null;
+  clear(conversationId: string, messageId?: string): void;
+  clearAll(): void;
+  subscribe(conversationId: string, messageId: string, listener: () => void): () => void;
+}
+
+/**
+ * 创建独立的流式草稿外部存储，按 (conversationId, messageId) 精确通知订阅者，
+ * 避免流式增量写入污染 WorkspaceSession 或触发整树重渲染。
+ */
+export function createStreamingDraftStore(): StreamingDraftStore {
+  const draftsByConversation = new Map<string, Map<string, StreamingMessageDraft>>();
+  const listenersByConversation = new Map<string, Map<string, Set<() => void>>>();
+
+  const getDraft = (conversationId: string, messageId: string): StreamingMessageDraft | null => {
+    if (!conversationId || !messageId) return null;
+    return draftsByConversation.get(conversationId)?.get(messageId) ?? null;
+  };
+
+  const notifyMessageListeners = (conversationId: string, messageId: string): void => {
+    const listeners = listenersByConversation.get(conversationId)?.get(messageId);
+    if (!listeners || listeners.size === 0) return;
+    // 复制监听者快照再通知，避免回调内部取消订阅影响迭代
+    for (const listener of [...listeners]) {
+      listener();
+    }
+  };
+
+  return {
+    publish(conversationId: string, messageId: string, patch: StreamingDraftPatch): void {
+      if (!conversationId || !messageId) return;
+      const prev = getDraft(conversationId, messageId);
+      const next: StreamingMessageDraft = {
+        ...(prev ?? {}),
+        ...patch,
+        conversationId,
+        messageId,
+        content: patch.content ?? prev?.content ?? '',
+        status: 'pending',
+        updatedAt: Date.now(),
+      };
+      let convDrafts = draftsByConversation.get(conversationId);
+      if (!convDrafts) {
+        convDrafts = new Map<string, StreamingMessageDraft>();
+        draftsByConversation.set(conversationId, convDrafts);
+      }
+      convDrafts.set(messageId, next);
+      notifyMessageListeners(conversationId, messageId);
+    },
+
+    get: getDraft,
+
+    clear(conversationId: string, messageId?: string): void {
+      if (!conversationId) return;
+      const convDrafts = draftsByConversation.get(conversationId);
+      if (!convDrafts || convDrafts.size === 0) return;
+
+      if (messageId !== undefined) {
+        if (!convDrafts.delete(messageId)) return;
+        if (convDrafts.size === 0) {
+          draftsByConversation.delete(conversationId);
+        }
+        notifyMessageListeners(conversationId, messageId);
+        return;
+      }
+
+      const clearedIds = [...convDrafts.keys()];
+      draftsByConversation.delete(conversationId);
+      for (const id of clearedIds) {
+        notifyMessageListeners(conversationId, id);
+      }
+    },
+
+    clearAll(): void {
+      if (draftsByConversation.size === 0) return;
+      const targets: Array<[string, string]> = [];
+      for (const [conversationId, convDrafts] of draftsByConversation) {
+        for (const messageId of convDrafts.keys()) {
+          targets.push([conversationId, messageId]);
+        }
+      }
+      draftsByConversation.clear();
+      for (const [conversationId, messageId] of targets) {
+        notifyMessageListeners(conversationId, messageId);
+      }
+    },
+
+    subscribe(conversationId: string, messageId: string, listener: () => void): () => void {
+      if (!conversationId || !messageId) {
+        return () => undefined;
+      }
+      let convListeners = listenersByConversation.get(conversationId);
+      if (!convListeners) {
+        convListeners = new Map<string, Set<() => void>>();
+        listenersByConversation.set(conversationId, convListeners);
+      }
+      let msgListeners = convListeners.get(messageId);
+      if (!msgListeners) {
+        msgListeners = new Set<() => void>();
+        convListeners.set(messageId, msgListeners);
+      }
+      msgListeners.add(listener);
+
+      return () => {
+        const currentConvListeners = listenersByConversation.get(conversationId);
+        const currentMsgListeners = currentConvListeners?.get(messageId);
+        if (!currentMsgListeners) return;
+        currentMsgListeners.delete(listener);
+        if (currentMsgListeners.size === 0) {
+          currentConvListeners?.delete(messageId);
+        }
+        if (currentConvListeners && currentConvListeners.size === 0) {
+          listenersByConversation.delete(conversationId);
+        }
+      };
+    },
+  };
+}
+
+/** 全局流式草稿单例存储。 */
+export const streamingDraftStore = createStreamingDraftStore();
+
+/** 向指定会话与消息发布流式增量草稿。 */
+export function publishStreamingDraft(
+  conversationId: string,
+  messageId: string,
+  patch: StreamingDraftPatch
+): void {
+  streamingDraftStore.publish(conversationId, messageId, patch);
+}
+
+/** 清理指定会话或单条消息的流式草稿。 */
+export function clearStreamingDraft(conversationId: string, messageId?: string): void {
+  streamingDraftStore.clear(conversationId, messageId);
+}
+
+/**
+ * 订阅单条消息的流式草稿切片；仅当该 (conversationId, messageId) 草稿变化时触发组件更新。
+ * 注意：仅使用 useMemo 与 useSyncExternalStore，保持快照订阅引用稳定且兼容精简测试桩。
+ */
+export function useStreamingDraftSelector(
+  conversationId: string | undefined,
+  messageId: string | undefined
+): StreamingMessageDraft | null {
+  const subscribe = useMemo(
+    () => (listener: () => void) =>
+      conversationId && messageId
+        ? streamingDraftStore.subscribe(conversationId, messageId, listener)
+        : () => undefined,
+    [conversationId, messageId]
+  );
+  const getSnapshot = useMemo(
+    () => () =>
+      conversationId && messageId
+        ? streamingDraftStore.get(conversationId, messageId)
+        : null,
+    [conversationId, messageId]
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
 
 export type ChatWorkspaceCommand =
   | { type: 'model.select'; providerId: string; modelId: string; activateProvider?: boolean }
@@ -465,6 +666,7 @@ export class ChatWorkspaceRuntime {
       const intents = cleanupIntentsForChatCommand(before, command);
       if (intents.length) await recordGenerationTaskCleanupIntents(intents);
       await this.commit.execute(command, options);
+      clearStreamingDraftsForCommittedCommand(before, command);
       return true;
     } catch (error) {
       if (isWorkspaceCommitRejectedError(error)) return false;
@@ -477,6 +679,50 @@ export class ChatWorkspaceRuntime {
       reason: 'chat',
       propagateFailure: options.propagateFailure,
     });
+  }
+}
+
+/** 终态或覆盖/删除指令提交成功后，联动清理对应流式草稿防止残影复用。 */
+function clearStreamingDraftsForCommittedCommand(
+  before: AppWorkspace,
+  command: ChatWorkspaceCommand
+): void {
+  const activeConversationId = before.activeConversationId || 'conversation-default';
+  switch (command.type) {
+    case 'message.update': {
+      if (command.patch.status && command.patch.status !== 'pending') {
+        streamingDraftStore.clear(
+          command.conversationId ?? activeConversationId,
+          command.messageId
+        );
+      }
+      return;
+    }
+    case 'conversation.set-messages': {
+      streamingDraftStore.clear(command.conversationId);
+      return;
+    }
+    case 'message.remove-through':
+    case 'message.edit-through': {
+      const index = before.messages.findIndex((message) => message.id === command.messageId);
+      if (index >= 0) {
+        for (const message of before.messages.slice(index)) {
+          streamingDraftStore.clear(activeConversationId, message.id);
+        }
+      }
+      return;
+    }
+    case 'message.remove-everywhere': {
+      streamingDraftStore.clear(activeConversationId, command.messageId);
+      for (const conversation of before.conversations) {
+        if (conversation.messages.some((message) => message.id === command.messageId)) {
+          streamingDraftStore.clear(conversation.id, command.messageId);
+        }
+      }
+      return;
+    }
+    default:
+      return;
   }
 }
 

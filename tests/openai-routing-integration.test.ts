@@ -843,3 +843,215 @@ describe('provider Responses Web Search integration', () => {
     expect(result.content).toBe('Search result.');
   });
 });
+
+describe('Tier 2 security & abort regressions (external search redaction & hanging SSE abort)', () => {
+  it('redacts external search apiKey (raw and percent-encoded) and provider apiKey before sending tool errors to LLM or UI activity', async () => {
+    const searchKey = 'tvly-secret+leak/tool=7788';
+    const encodedSearchKey = encodeURIComponent(searchKey);
+    const modelProviderKey = 'sk-main+provider/key=1122';
+    const customProvider: ProviderProfile = {
+      ...provider,
+      apiKey: modelProviderKey,
+    };
+
+    const sse = (events: unknown[]) => {
+      const payload = events.map((item) => `data: ${JSON.stringify(item)}\n\n`).join('') + 'data: [DONE]\n\n';
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(payload));
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } }
+      );
+    };
+
+    let round = 0;
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === 'https://api.tavily.com/search') {
+        return new Response(
+          JSON.stringify({
+            detail: `Invalid Tavily key: ${searchKey} and ${encodedSearchKey} and ${modelProviderKey}`,
+          }),
+          { status: 401 }
+        );
+      }
+      round += 1;
+      capturedBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>);
+      if (round === 1) {
+        return sse([
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call-leak-1',
+                      function: { name: 'search_web', arguments: '{"query":"test"}' },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ]);
+      }
+      return sse([{ choices: [{ delta: { content: 'Fallback response.' } }] }]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const streamSnapshots: Array<{ toolActivity?: unknown; activityTimeline?: unknown }> = [];
+    const result = await sendOpenAiCompatibleChat({
+      provider: customProvider,
+      modelId: 'gpt-4.1',
+      model: createModelInfoFromId(customProvider, 'gpt-4.1', 'manual'),
+      messages: [message],
+      reasoningEffort: 'off',
+      externalSearch: {
+        enabled: true,
+        selectedServiceId: 'tav-leak',
+        maxResults: 3,
+        maxToolRounds: 2,
+        services: [{ id: 'tav-leak', kind: 'tavily', name: 'Tavily', apiKey: searchKey }],
+      },
+      onStreamUpdate: (update) => {
+        streamSnapshots.push({
+          toolActivity: update.toolActivity,
+          activityTimeline: update.activityTimeline,
+        });
+      },
+    });
+
+    expect(result.content).toBe('Fallback response.');
+    expect(capturedBodies).toHaveLength(2);
+    const secondPayloadText = JSON.stringify(capturedBodies[1]);
+    expect(secondPayloadText).not.toContain(searchKey);
+    expect(secondPayloadText).not.toContain(encodedSearchKey);
+    expect(secondPayloadText).not.toContain(modelProviderKey);
+    expect(secondPayloadText).toContain('[REDACTED]');
+
+    const activityText = JSON.stringify({
+      toolActivity: result.toolActivity,
+      activityTimeline: result.activityTimeline,
+      streamSnapshots,
+    });
+    expect(activityText).not.toContain(searchKey);
+    expect(activityText).not.toContain(encodedSearchKey);
+    expect(activityText).not.toContain(modelProviderKey);
+    expect(activityText).toContain('[REDACTED]');
+  });
+
+  it('aborts hanging SSE streams immediately without leaking abort event listeners in chat and tool-loop paths', async () => {
+    const createHangingResponse = () => {
+      let cancelCount = 0;
+      let markReadingStarted: (() => void) | undefined;
+      let markCancelled: (() => void) | undefined;
+      const readingStarted = new Promise<void>((resolve) => {
+        markReadingStarted = resolve;
+      });
+      const cancelled = new Promise<void>((resolve) => {
+        markCancelled = resolve;
+      });
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(': keep-alive\n\n'));
+        },
+        pull() {
+          markReadingStarted?.();
+        },
+        cancel() {
+          cancelCount += 1;
+          markCancelled?.();
+        },
+      });
+      const response = new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+      return {
+        response,
+        getCancelCount: () => cancelCount,
+        waitUntilReading: () => readingStarted,
+        waitUntilCancelled: () => cancelled,
+      };
+    };
+
+    const trackAbortSignal = (ctrl: AbortController) => {
+      let added = 0;
+      let removed = 0;
+      const signal = ctrl.signal;
+      const origAdd = signal.addEventListener.bind(signal);
+      const origRemove = signal.removeEventListener.bind(signal);
+      vi.spyOn(signal, 'addEventListener').mockImplementation((...args) => {
+        if (args[0] === 'abort') added += 1;
+        return origAdd(...args);
+      });
+      vi.spyOn(signal, 'removeEventListener').mockImplementation((...args) => {
+        if (args[0] === 'abort') removed += 1;
+        return origRemove(...args);
+      });
+      return { getAdded: () => added, getRemoved: () => removed };
+    };
+
+    // 1) 普通 Chat Completions 流式挂起
+    const chatCtrl = new AbortController();
+    const chatTracker = trackAbortSignal(chatCtrl);
+    const hangingChat = createHangingResponse();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(hangingChat.response));
+
+    const chatPromise = sendOpenAiCompatibleChat({
+      provider,
+      modelId: 'gpt-4.1',
+      model: createModelInfoFromId(provider, 'gpt-4.1', 'manual'),
+      messages: [message],
+      reasoningEffort: 'off',
+      signal: chatCtrl.signal,
+    });
+    const chatExpect = expect(chatPromise).rejects.toMatchObject({ name: 'AbortError' });
+    await hangingChat.waitUntilReading();
+    const abortedAt = Date.now();
+    chatCtrl.abort();
+    await chatExpect;
+    expect(Date.now() - abortedAt).toBeLessThan(250);
+    await hangingChat.waitUntilCancelled();
+    expect(hangingChat.getCancelCount()).toBeGreaterThanOrEqual(1);
+    expect(hangingChat.response.body?.locked).toBe(false);
+    expect(chatTracker.getRemoved()).toBe(chatTracker.getAdded());
+
+    // 2) Tool Loop 流式挂起
+    const toolCtrl = new AbortController();
+    const toolTracker = trackAbortSignal(toolCtrl);
+    const hangingTool = createHangingResponse();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(hangingTool.response));
+
+    const toolPromise = sendOpenAiCompatibleChat({
+      provider,
+      modelId: 'gpt-4.1',
+      model: createModelInfoFromId(provider, 'gpt-4.1', 'manual'),
+      messages: [message],
+      reasoningEffort: 'off',
+      externalSearch: {
+        enabled: true,
+        selectedServiceId: 'bing-1',
+        maxResults: 3,
+        maxToolRounds: 2,
+        services: [{ id: 'bing-1', kind: 'bing', name: 'Bing' }],
+      },
+      signal: toolCtrl.signal,
+    });
+    const toolExpect = expect(toolPromise).rejects.toMatchObject({ name: 'AbortError' });
+    await hangingTool.waitUntilReading();
+    const toolAbortedAt = Date.now();
+    toolCtrl.abort();
+    await toolExpect;
+    expect(Date.now() - toolAbortedAt).toBeLessThan(250);
+    await hangingTool.waitUntilCancelled();
+    expect(hangingTool.getCancelCount()).toBeGreaterThanOrEqual(1);
+    expect(hangingTool.response.body?.locked).toBe(false);
+    expect(toolTracker.getRemoved()).toBe(toolTracker.getAdded());
+  });
+});

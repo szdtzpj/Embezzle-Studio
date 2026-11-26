@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
-  Modal,
   Platform,
   ScrollView,
   StyleSheet,
@@ -19,12 +18,12 @@ import {
   Sparkles,
   X,
 } from 'lucide-react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useWorkspaceSelector, useWorkspaceStatus } from '../../app/workspace/WorkspaceSessionProvider';
 import { useWorkspaceSession } from '../../app/workspace/internal/WorkspaceSessionContext';
 import { useChatConfigurationActions } from '../chat';
-import type { ModelInfo, OnboardingStep, ProviderProfile } from '../../domain/types';
+import type { ModelInfo, OnboardingStep, ProviderKind, ProviderProfile } from '../../domain/types';
 import { refreshProviderModels } from '../../services/modelDiscovery';
 import { inferModelTask } from '../../services/modelCapabilities';
 import { isAbortError } from '../../services/openAiCompatible';
@@ -34,6 +33,7 @@ import {
 } from '../../services/providerSetup';
 import { classifyProviderConnectionError } from '../../services/providerDiagnostics';
 import { AnimatedPressable } from '../../ui/components/AnimatedPressable';
+import { OverlayPortal } from '../../ui/components/AppDialogHost';
 import { useKelivoTheme, type KelivoTheme } from '../../ui/theme';
 import { SettingsWorkspaceRuntime } from './internal/SettingsWorkspaceRuntime';
 
@@ -57,12 +57,31 @@ const stageLabels: Record<WizardStage, string> = {
 
 const samplePrompt = '请用三句话介绍你最擅长帮助我完成哪些工作，并给出一个可以立刻开始的例子。';
 
+/** 穷尽覆盖全部 9 大服务商协议类型的首次配置引导说明。 */
+const providerKindDescriptions: Record<ProviderKind, string> = {
+  'volcengine-ark': '火山方舟 · 视频与多模态',
+  'bailian-compatible': '阿里百炼 · Qwen 与兼容模型',
+  'openai-compatible': 'OpenAI 官方接口 · Responses、搜索与生图',
+  anthropic: 'Anthropic Claude · 原生 Messages 与思考',
+  gemini: 'Google Gemini · 原生多模态、搜索与生图',
+  'xai-grok': 'xAI Grok · Responses 与 Web / X 搜索',
+  deepseek: 'DeepSeek · 深度推理与官方联网',
+  'new-api-relay': 'New API / One API 中转',
+  custom: '自定义 OpenAI 兼容接口',
+};
+
 function providerDescription(provider: ProviderProfile): string {
-  if (provider.kind === 'volcengine-ark') return '火山方舟 · 视频与多模态';
-  if (provider.kind === 'bailian-compatible') return '阿里百炼 · Qwen 与兼容模型';
-  if (provider.kind === 'openai-compatible') return 'OpenAI 官方兼容接口';
-  if (provider.kind === 'new-api-relay') return 'New API / One API 中转';
-  return '自定义 OpenAI 兼容接口';
+  return providerKindDescriptions[provider.kind];
+}
+
+function providerAuthSummary(kind: ProviderKind): string {
+  if (kind === 'anthropic') {
+    return '鉴权方式：默认使用 x-api-key 与 anthropic-version 请求头，密钥不进入备份。';
+  }
+  if (kind === 'gemini') {
+    return '鉴权方式：默认使用 x-goog-api-key 请求头传递密钥，不通过 URL 查询参数明文传输。';
+  }
+  return '鉴权方式：默认使用 Authorization: Bearer 请求头，密钥仅保存在本机。';
 }
 
 function scoreRecommendedModel(model: ModelInfo): number {
@@ -97,19 +116,23 @@ export function FirstRunSetupWizard({
   onClose,
 }: FirstRunSetupWizardProps): React.ReactElement | null {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const session = useWorkspaceSession();
-  const workspace = useWorkspaceSelector((snapshot) => snapshot);
+  const providers = useWorkspaceSelector((snapshot) => snapshot.providers);
+  const activeProviderId = useWorkspaceSelector((snapshot) => snapshot.activeProviderId);
+  const onboarding = useWorkspaceSelector((snapshot) => snapshot.onboarding);
+  const experienceMode = useWorkspaceSelector((snapshot) => snapshot.experienceMode);
   const status = useWorkspaceStatus();
   const runtime = useMemo(() => new SettingsWorkspaceRuntime(session), [session]);
   const configuration = useChatConfigurationActions();
-  const enabledProviders = workspace.providers.filter((provider) => provider.enabled !== false);
-  const initialProvider = enabledProviders.find((provider) => provider.id === workspace.activeProviderId)
+  const enabledProviders = providers.filter((provider) => provider.enabled !== false);
+  const initialProvider = enabledProviders.find((provider) => provider.id === activeProviderId)
     ?? enabledProviders[0]
-    ?? workspace.providers[0];
+    ?? providers[0];
   const [stage, setStage] = useState<WizardStage>('provider');
   const [providerId, setProviderId] = useState(initialProvider?.id ?? '');
-  const selectedProvider = workspace.providers.find((provider) => provider.id === providerId)
+  const selectedProvider = providers.find((provider) => provider.id === providerId)
     ?? initialProvider;
   const [baseUrl, setBaseUrl] = useState(selectedProvider?.baseUrl ?? '');
   const [apiKey, setApiKey] = useState(selectedProvider?.apiKey ?? '');
@@ -124,8 +147,8 @@ export function FirstRunSetupWizard({
     if (!visible || !selectedProvider) return;
     setBaseUrl(selectedProvider.baseUrl);
     setApiKey(selectedProvider.apiKey ?? '');
-    const currentStep = workspace.onboarding.status === 'pending'
-      ? workspace.onboarding.lastStep
+    const currentStep = onboarding.status === 'pending'
+      ? onboarding.lastStep
       : 'provider';
     setStage(currentStep);
   }, [selectedProvider?.id, visible]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -140,7 +163,7 @@ export function FirstRunSetupWizard({
   if (!visible || !selectedProvider) return null;
 
   const writable = status.phase === 'ready';
-  const showEndpoint = workspace.experienceMode === 'advanced' || selectedProvider.kind === 'custom' || selectedProvider.kind === 'new-api-relay';
+  const showEndpoint = experienceMode === 'advanced' || selectedProvider.kind === 'custom' || selectedProvider.kind === 'new-api-relay';
   const models = recommendedModels(candidates);
   const stageIndex = stageOrder.indexOf(stage);
 
@@ -297,8 +320,21 @@ export function FirstRunSetupWizard({
   }
 
   return (
-    <Modal visible animationType="fade" onRequestClose={() => void dismiss()}>
-      <SafeAreaView style={styles.safe}>
+    <OverlayPortal
+      visible={visible && Boolean(selectedProvider)}
+      layer="fullscreen"
+      onRequestClose={() => void dismiss()}
+    >
+      <View
+        style={[
+          styles.safe,
+          {
+            paddingTop: insets.top,
+            paddingLeft: insets.left,
+            paddingRight: insets.right,
+          },
+        ]}
+      >
         <View style={styles.header}>
           <View style={styles.brandRow}>
             <Image source={require('../../../assets/splash-icon.png')} style={styles.logo} />
@@ -330,14 +366,20 @@ export function FirstRunSetupWizard({
           ))}
         </View>
 
-        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+        <ScrollView
+          contentContainerStyle={[
+            styles.content,
+            { paddingBottom: Math.max(40, insets.bottom + 20) },
+          ]}
+          keyboardShouldPersistTaps="handled"
+        >
           {stage === 'provider' ? (
             <View style={styles.stageBlock}>
               <Server size={28} color={theme.colors.accent} strokeWidth={2} />
               <Text style={styles.stageTitle}>选择你已经开通的服务商</Text>
               <Text style={styles.body}>Embezzle Studio 不销售 API，也不会替你充值。选择后仍可随时在设置中修改。</Text>
               <View style={styles.optionList}>
-                {workspace.providers.map((provider) => {
+                {providers.map((provider) => {
                   const selected = provider.id === selectedProvider.id;
                   return (
                     <AnimatedPressable
@@ -381,6 +423,7 @@ export function FirstRunSetupWizard({
                 <View style={styles.endpointSummary}>
                   <Text style={styles.fieldLabel}>官方 Endpoint</Text>
                   <Text selectable style={styles.endpointText}>{baseUrl}</Text>
+                  <Text style={styles.endpointText}>{providerAuthSummary(selectedProvider.kind)}</Text>
                 </View>
               )}
               <View style={styles.fieldGroup}>
@@ -449,7 +492,7 @@ export function FirstRunSetupWizard({
                   onChangeText={setManualModelId}
                   autoCapitalize="none"
                   autoCorrect={false}
-                  placeholder="例如 qwen-plus 或 ep-xxxxxxxx"
+                  placeholder="例如 gpt-5.4、claude-sonnet-5-5、grok-4.7 或 ep-xxxxxxxx"
                   placeholderTextColor={theme.colors.placeholder}
                   style={styles.input}
                 />
@@ -485,8 +528,8 @@ export function FirstRunSetupWizard({
             <ArrowRight size={15} color={theme.colors.accent} strokeWidth={2.2} />
           </AnimatedPressable>
         </ScrollView>
-      </SafeAreaView>
-    </Modal>
+      </View>
+    </OverlayPortal>
   );
 }
 

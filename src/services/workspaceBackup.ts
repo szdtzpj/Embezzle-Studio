@@ -14,6 +14,10 @@ import type {
   ModelTargetRef,
   PluginManifest,
   PromptTemplate,
+  ProviderAuthHeaderMode,
+  ProviderContinuationBlock,
+  ProviderCustomHeader,
+  ProviderImageApiMode,
   ProviderKind,
   ProviderProfile,
   ProjectKnowledgeSource,
@@ -45,7 +49,11 @@ import {
   MAX_PROJECT_KNOWLEDGE_TITLE_CHARACTERS,
   MAX_PROJECT_KNOWLEDGE_TOTAL_BYTES,
 } from './projectKnowledge';
-import { externalSearchProviderKinds } from './externalSearch';
+import {
+  allExternalSearchProviderKinds,
+  allExternalSearchProviderLabels,
+  validateExternalSearchEndpoint,
+} from './externalSearch';
 import { providerEndpointFingerprint } from './providerSetup';
 import { unicodeCharacterLengthExceeds } from './textBounds';
 import {
@@ -95,11 +103,78 @@ for (let index = 0; index < base64Alphabet.length; index += 1) {
 
 const providerKinds = new Set<ProviderKind>([
   'openai-compatible',
+  'anthropic',
+  'gemini',
+  'xai-grok',
+  'deepseek',
   'volcengine-ark',
   'bailian-compatible',
   'new-api-relay',
   'custom',
 ]);
+const providerAuthHeaderModes = new Set<ProviderAuthHeaderMode>([
+  'auto',
+  'bearer',
+  'x-api-key',
+  'x-goog-api-key',
+  'custom',
+]);
+const providerImageApiModes = new Set<ProviderImageApiMode>([
+  'auto',
+  'openai-images',
+  'openai-responses',
+  'gemini-generate-content',
+  'xai-json',
+  'unsupported',
+]);
+const backupBlockedHeaderNames = new Set([
+  'accept-encoding',
+  'access-control-request-headers',
+  'access-control-request-method',
+  'cf-connecting-ip',
+  'client-ip',
+  'connection',
+  'constructor',
+  'content-length',
+  'cookie',
+  'cookie2',
+  'expect',
+  'forwarded',
+  'host',
+  'keep-alive',
+  'origin',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'prototype',
+  'referer',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'true-client-ip',
+  'upgrade',
+  'via',
+  'x-http-method',
+  'x-http-method-override',
+  'x-method-override',
+  'x-original-url',
+  'x-real-ip',
+  'x-rewrite-url',
+  '__proto__',
+]);
+const backupRedactedSecretHeaderNames = new Set([
+  'authorization',
+  'proxy-authorization',
+  'api-key',
+  'x-api-key',
+  'x-api-token',
+  'x-auth-token',
+  'x-goog-api-key',
+]);
+const backupHeaderNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const MAX_BACKUP_CUSTOM_HEADERS = 32;
+const MAX_BACKUP_CONTINUATION_BLOCKS = 64;
+const MAX_BACKUP_SINGLE_CONTINUATION_BYTES = 256 * 1024;
+const MAX_BACKUP_TOTAL_CONTINUATION_BYTES = 512 * 1024;
 const capabilities = new Set<Capability>([
   'text',
   'image-input',
@@ -432,12 +507,167 @@ function requireExactKeysWithOptional(
   }
 }
 
+function isValidCustomHeaderEntry(key: string, value: string): boolean {
+  const trimmedKey = key.trim();
+  const lower = trimmedKey.toLowerCase();
+  if (
+    !trimmedKey ||
+    trimmedKey.length > 128 ||
+    !backupHeaderNamePattern.test(trimmedKey) ||
+    /[\r\n\0]/.test(value) ||
+    value.length > 4096
+  ) {
+    return false;
+  }
+  return !(
+    backupBlockedHeaderNames.has(lower) ||
+    lower.startsWith('access-control-') ||
+    lower.startsWith('proxy-') ||
+    lower.startsWith('sec-') ||
+    lower.startsWith('x-forwarded-')
+  );
+}
+
+function validateCustomHeaders(value: unknown, path: string): void {
+  const headers = requireArray(value, path, MAX_BACKUP_CUSTOM_HEADERS);
+  headers.forEach((entry, index) => {
+    const itemPath = `${path}[${index}]`;
+    const record = requireRecord(entry, itemPath);
+    requireExactKeysWithOptional(record, ['key', 'value'], ['enabled'], itemPath);
+    const key = requireString(record.key, `${itemPath}.key`, { nonEmpty: true, max: 128 });
+    const headerValue = requireString(record.value, `${itemPath}.value`, { max: 4096 });
+    if (!isValidCustomHeaderEntry(key, headerValue)) {
+      invalidFormat(`${itemPath} 包含不允许或格式非法的请求头。`);
+    }
+    if (record.enabled !== undefined) {
+      requireBoolean(record.enabled, `${itemPath}.enabled`);
+    }
+  });
+}
+
+function validateJsonValueSafe(value: unknown, path: string, depth = 0): void {
+  if (depth > 12) {
+    invalidFormat(`${path} 嵌套深度超过限制。`);
+  }
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+    return;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      invalidFormat(`${path} 包含非有限数字。`);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => validateJsonValueSafe(item, `${path}[${index}]`, depth + 1));
+    return;
+  }
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    for (const [key, item] of Object.entries(record)) {
+      if (forbiddenRecordKeys.has(key)) {
+        invalidFormat(`${path} 包含不安全的键。`);
+      }
+      validateJsonValueSafe(item, `${path}.${key}`, depth + 1);
+    }
+    return;
+  }
+  invalidFormat(`${path} 包含不可序列化的值。`);
+}
+
+function validateProviderContinuations(value: unknown, path: string): void {
+  const blocks = requireArray(value, path, MAX_BACKUP_CONTINUATION_BLOCKS);
+  let totalBytes = 0;
+  blocks.forEach((entry, index) => {
+    const blockPath = `${path}[${index}]`;
+    const block = requireRecord(entry, blockPath);
+    if (block.provider === 'anthropic') {
+      if (block.type === 'thinking') {
+        requireExactKeys(block, ['provider', 'type', 'thinking', 'signature'], blockPath);
+        requireString(block.thinking, `${blockPath}.thinking`);
+        requireString(block.signature, `${blockPath}.signature`);
+      } else if (block.type === 'redacted_thinking') {
+        requireExactKeys(block, ['provider', 'type', 'data'], blockPath);
+        requireString(block.data, `${blockPath}.data`);
+      } else if (block.type === 'server_tool_use') {
+        requireExactKeys(block, ['provider', 'type', 'id', 'name', 'input'], blockPath);
+        requireString(block.id, `${blockPath}.id`);
+        requireString(block.name, `${blockPath}.name`);
+        requireRecord(block.input, `${blockPath}.input`);
+        validateJsonValueSafe(block.input, `${blockPath}.input`);
+      } else if (block.type === 'web_search_tool_result') {
+        requireExactKeys(block, ['provider', 'type', 'toolUseId', 'content'], blockPath);
+        requireString(block.toolUseId, `${blockPath}.toolUseId`);
+        requireArray(block.content, `${blockPath}.content`, 1_000);
+        validateJsonValueSafe(block.content, `${blockPath}.content`);
+      } else {
+        invalidFormat(`${blockPath}.type 无效。`);
+      }
+    } else if (block.provider === 'gemini') {
+      requireExactKeysWithOptional(
+        block,
+        ['provider', 'type', 'thoughtSignature'],
+        ['partRole', 'attachmentId'],
+        blockPath
+      );
+      if (block.type !== 'thought_signature') {
+        invalidFormat(`${blockPath}.type 无效。`);
+      }
+      requireString(block.thoughtSignature, `${blockPath}.thoughtSignature`);
+      if (
+        block.partRole !== undefined &&
+        block.partRole !== 'text' &&
+        block.partRole !== 'image' &&
+        block.partRole !== 'function_call'
+      ) {
+        invalidFormat(`${blockPath}.partRole 无效。`);
+      }
+      requireOptionalString(block.attachmentId, `${blockPath}.attachmentId`);
+    } else if (block.provider === 'openai' || block.provider === 'xai') {
+      requireExactKeysWithOptional(
+        block,
+        ['provider', 'type', 'encryptedContent'],
+        ['id', 'summary'],
+        blockPath
+      );
+      if (block.type !== 'reasoning_encrypted') {
+        invalidFormat(`${blockPath}.type 无效。`);
+      }
+      requireString(block.encryptedContent, `${blockPath}.encryptedContent`);
+      requireOptionalString(block.id, `${blockPath}.id`);
+      if (block.summary !== undefined) {
+        requireArray(block.summary, `${blockPath}.summary`, 1_000).forEach((item, summaryIndex) => {
+          requireString(item, `${blockPath}.summary[${summaryIndex}]`);
+        });
+      }
+    } else if (block.provider === 'deepseek') {
+      requireExactKeys(block, ['provider', 'type', 'serverToolCalls'], blockPath);
+      if (block.type !== 'server_tool_calls') {
+        invalidFormat(`${blockPath}.type 无效。`);
+      }
+      requireArray(block.serverToolCalls, `${blockPath}.serverToolCalls`, 1_000);
+      validateJsonValueSafe(block.serverToolCalls, `${blockPath}.serverToolCalls`);
+    } else {
+      invalidFormat(`${blockPath}.provider 无效。`);
+    }
+
+    const bytes = utf8ToBytes(JSON.stringify(block)).byteLength;
+    if (bytes > MAX_BACKUP_SINGLE_CONTINUATION_BYTES) {
+      invalidFormat(`${blockPath} 体积超过限制。`);
+    }
+    totalBytes += bytes;
+    if (totalBytes > MAX_BACKUP_TOTAL_CONTINUATION_BYTES) {
+      invalidFormat(`${path} 总体积超过限制。`);
+    }
+  });
+}
+
 function validateProvider(value: unknown, path: string): string {
   const provider = requireRecord(value, path);
   requireExactKeysWithOptional(
     provider,
     ['id', 'name', 'kind', 'baseUrl', 'capabilities', 'models'],
-    ['notes', 'enabled'],
+    ['customHeaders', 'authHeaderMode', 'imageApiMode', 'notes', 'enabled'],
     path
   );
   const id = requireLegacyId(provider.id, `${path}.id`);
@@ -453,6 +683,21 @@ function validateProvider(value: unknown, path: string): string {
     invalidFormat(
       `${path}.baseUrl 必须使用 HTTPS（本机回环可使用 HTTP），且不能包含用户名、密码、查询参数或片段。`
     );
+  }
+  if (provider.customHeaders !== undefined) {
+    validateCustomHeaders(provider.customHeaders, `${path}.customHeaders`);
+  }
+  if (
+    provider.authHeaderMode !== undefined &&
+    !providerAuthHeaderModes.has(provider.authHeaderMode as ProviderAuthHeaderMode)
+  ) {
+    invalidFormat(`${path}.authHeaderMode 无效。`);
+  }
+  if (
+    provider.imageApiMode !== undefined &&
+    !providerImageApiModes.has(provider.imageApiMode as ProviderImageApiMode)
+  ) {
+    invalidFormat(`${path}.imageApiMode 无效。`);
   }
   validateEnumArray(provider.capabilities, capabilities, `${path}.capabilities`);
   requireOptionalString(provider.notes, `${path}.notes`);
@@ -508,6 +753,8 @@ function validateMessage(value: unknown, path: string): string {
     ['id', 'role', 'content', 'createdAt', 'status'],
     [
       'reasoningContent',
+      'thinkingDurationMs',
+      'providerContinuations',
       'usage',
       'citations',
       'originMessageId',
@@ -533,6 +780,15 @@ function validateMessage(value: unknown, path: string): string {
   requireFiniteNumber(message.createdAt, `${path}.createdAt`);
   if (!['ready', 'pending', 'error', 'cancelled'].includes(String(message.status))) invalidFormat(`${path}.status 无效。`);
   requireOptionalString(message.reasoningContent, `${path}.reasoningContent`);
+  if (message.thinkingDurationMs !== undefined) {
+    const duration = requireFiniteNumber(message.thinkingDurationMs, `${path}.thinkingDurationMs`);
+    if (duration < 0) {
+      invalidFormat(`${path}.thinkingDurationMs 不能为负数。`);
+    }
+  }
+  if (message.providerContinuations !== undefined) {
+    validateProviderContinuations(message.providerContinuations, `${path}.providerContinuations`);
+  }
   if (message.usage !== undefined) validateTokenUsage(message.usage, `${path}.usage`);
   if (message.citations !== undefined) {
     requireArray(message.citations, `${path}.citations`, 1_000).forEach((citation, index) => {
@@ -1394,9 +1650,24 @@ function validateBackupWorkspace(value: unknown): asserts value is SanitizedWork
 
   if (workspace.externalSearch !== undefined) {
     const externalSearch = requireRecord(workspace.externalSearch, 'workspace.externalSearch');
+    requireExactKeysWithOptional(
+      externalSearch,
+      ['enabled'],
+      ['selectedServiceId', 'maxResults', 'maxToolRounds', 'services'],
+      'workspace.externalSearch'
+    );
     requireBoolean(externalSearch.enabled, 'workspace.externalSearch.enabled');
+    let selectedServiceId: string | undefined;
     if (externalSearch.selectedServiceId !== undefined) {
-      requireString(externalSearch.selectedServiceId, 'workspace.externalSearch.selectedServiceId', { nonEmpty: true });
+      const rawSelectedServiceId = requireString(
+        externalSearch.selectedServiceId,
+        'workspace.externalSearch.selectedServiceId',
+        { nonEmpty: true }
+      );
+      selectedServiceId = rawSelectedServiceId.trim();
+      if (rawSelectedServiceId !== selectedServiceId) {
+        invalidFormat('workspace.externalSearch.selectedServiceId 不能包含首尾空白。');
+      }
     }
     if (externalSearch.maxResults !== undefined) {
       const maxResults = Number(externalSearch.maxResults);
@@ -1410,21 +1681,60 @@ function validateBackupWorkspace(value: unknown): asserts value is SanitizedWork
         invalidFormat('workspace.externalSearch.maxToolRounds 无效。');
       }
     }
+    const externalServiceIds = new Set<string>();
     requireArray(externalSearch.services ?? [], 'workspace.externalSearch.services', 16).forEach((service, index) => {
-      const row = requireRecord(service, `workspace.externalSearch.services[${index}]`);
-      requireString(row.id, `workspace.externalSearch.services[${index}].id`, { nonEmpty: true });
-      requireString(row.kind, `workspace.externalSearch.services[${index}].kind`, { nonEmpty: true });
+      const servicePath = `workspace.externalSearch.services[${index}]`;
+      const row = requireRecord(service, servicePath);
+      requireExactKeysWithOptional(
+        row,
+        ['id', 'kind', 'name'],
+        ['apiKey', 'endpoint', 'model'],
+        servicePath
+      );
+      const rawServiceId = requireString(row.id, `${servicePath}.id`, { nonEmpty: true });
+      const serviceId = rawServiceId.trim();
+      if (rawServiceId !== serviceId) {
+        invalidFormat(`${servicePath}.id 不能包含首尾空白。`);
+      }
+      if (externalServiceIds.has(serviceId)) {
+        invalidFormat(`${servicePath}.id 重复：${serviceId}`);
+      }
+      externalServiceIds.add(serviceId);
+      const kind = requireString(row.kind, `${servicePath}.kind`, { nonEmpty: true });
       if (
-        !externalSearchProviderKinds.includes(
-          String(row.kind) as (typeof externalSearchProviderKinds)[number]
+        !allExternalSearchProviderKinds.includes(
+          kind as (typeof allExternalSearchProviderKinds)[number]
         )
       ) {
-        invalidFormat(`workspace.externalSearch.services[${index}].kind 无效。`);
+        invalidFormat(`${servicePath}.kind 无效。`);
       }
       if (row.apiKey !== undefined) {
         invalidFormat('外部搜索 API Key 不得进入备份。');
       }
+      requireString(row.name, `${servicePath}.name`, { nonEmpty: true, max: 120 });
+      if (row.model !== undefined) {
+        requireString(row.model, `${servicePath}.model`, { max: 200 });
+      }
+      const endpoint =
+        row.endpoint !== undefined
+          ? requireString(row.endpoint, `${servicePath}.endpoint`, {
+              nonEmpty: true,
+              max: 2048,
+            })
+          : undefined;
+      if (row.endpoint !== undefined || kind === 'searxng') {
+        const endpointCheck = validateExternalSearchEndpoint(
+          kind as (typeof allExternalSearchProviderKinds)[number],
+          endpoint
+        );
+        if (!endpointCheck.ok) {
+          invalidFormat(`${servicePath}.endpoint 无效：${endpointCheck.error}`);
+        }
+      }
     });
+    if (selectedServiceId !== undefined && !externalServiceIds.has(selectedServiceId)) {
+      invalidFormat('workspace.externalSearch.selectedServiceId 不存在。');
+    }
   }
 
   const voice = requireRecord(workspace.voice, 'workspace.voice');
@@ -1448,12 +1758,100 @@ function sanitizeModel(model: ModelInfo): ModelInfo {
   };
 }
 
+function sanitizeCustomHeaders(
+  headers: readonly ProviderCustomHeader[] | undefined
+): ProviderCustomHeader[] | undefined {
+  if (!headers?.length) {
+    return undefined;
+  }
+  const sanitized: ProviderCustomHeader[] = [];
+  for (const header of headers.slice(0, MAX_BACKUP_CUSTOM_HEADERS)) {
+    if (!header || typeof header.key !== 'string' || typeof header.value !== 'string') {
+      continue;
+    }
+    const key = header.key.trim();
+    if (!isValidCustomHeaderEntry(key, header.value)) {
+      continue;
+    }
+    if (backupRedactedSecretHeaderNames.has(key.toLowerCase())) {
+      continue;
+    }
+    sanitized.push({
+      key,
+      value: header.value,
+      ...(typeof header.enabled === 'boolean' ? { enabled: header.enabled } : {}),
+    });
+  }
+  return sanitized.length ? sanitized : undefined;
+}
+
+function cloneJsonSafe(value: unknown, depth = 0): unknown {
+  if (depth > 12) {
+    return undefined;
+  }
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : 0;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => cloneJsonSafe(item, depth + 1))
+      .filter((item) => item !== undefined);
+  }
+  if (typeof value === 'object') {
+    const entries: Array<[string, unknown]> = [];
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (forbiddenRecordKeys.has(key) || item === undefined) {
+        continue;
+      }
+      const cloned = cloneJsonSafe(item, depth + 1);
+      if (cloned !== undefined) {
+        entries.push([key, cloned]);
+      }
+    }
+    return Object.fromEntries(entries);
+  }
+  return undefined;
+}
+
+function sanitizeProviderContinuations(
+  blocks: readonly ProviderContinuationBlock[] | undefined
+): ProviderContinuationBlock[] | undefined {
+  if (!blocks?.length) {
+    return undefined;
+  }
+  const sanitized: ProviderContinuationBlock[] = [];
+  let totalBytes = 0;
+  for (const block of blocks.slice(0, MAX_BACKUP_CONTINUATION_BLOCKS)) {
+    const cloned = cloneJsonSafe(block) as ProviderContinuationBlock | undefined;
+    if (!cloned || typeof cloned !== 'object') {
+      continue;
+    }
+    const bytes = utf8ToBytes(JSON.stringify(cloned)).byteLength;
+    if (
+      bytes > MAX_BACKUP_SINGLE_CONTINUATION_BYTES ||
+      totalBytes + bytes > MAX_BACKUP_TOTAL_CONTINUATION_BYTES
+    ) {
+      continue;
+    }
+    totalBytes += bytes;
+    sanitized.push(cloned);
+  }
+  return sanitized.length ? sanitized : undefined;
+}
+
 function sanitizeProvider(provider: ProviderProfile): BackupProvider {
+  const customHeaders = sanitizeCustomHeaders(provider.customHeaders);
   return {
     id: provider.id,
     name: provider.name,
     kind: provider.kind,
     baseUrl: requireSafeProviderBaseUrlForBackup(provider.baseUrl),
+    ...(customHeaders ? { customHeaders } : {}),
+    ...(provider.authHeaderMode !== undefined ? { authHeaderMode: provider.authHeaderMode } : {}),
+    ...(provider.imageApiMode !== undefined ? { imageApiMode: provider.imageApiMode } : {}),
     capabilities: [...provider.capabilities],
     models: provider.models.map(sanitizeModel),
     enabled: provider.enabled !== false,
@@ -1462,6 +1860,13 @@ function sanitizeProvider(provider: ProviderProfile): BackupProvider {
 }
 
 function sanitizeMessage(message: ChatMessage): BackupMessage {
+  const thinkingDurationMs =
+    typeof message.thinkingDurationMs === 'number' &&
+    Number.isFinite(message.thinkingDurationMs) &&
+    message.thinkingDurationMs >= 0
+      ? message.thinkingDurationMs
+      : undefined;
+  const providerContinuations = sanitizeProviderContinuations(message.providerContinuations);
   return {
     id: message.id,
     ...(message.originMessageId !== undefined ? { originMessageId: message.originMessageId } : {}),
@@ -1470,6 +1875,8 @@ function sanitizeMessage(message: ChatMessage): BackupMessage {
     createdAt: message.createdAt,
     status: message.status,
     ...(message.reasoningContent !== undefined ? { reasoningContent: message.reasoningContent } : {}),
+    ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+    ...(providerContinuations ? { providerContinuations } : {}),
     ...(message.usage ? { usage: { ...message.usage } } : {}),
     ...(message.citations ? { citations: message.citations.map((citation) => ({ ...citation })) } : {}),
     ...(message.comparisonGroupId !== undefined ? { comparisonGroupId: message.comparisonGroupId } : {}),
@@ -1890,13 +2297,20 @@ function mergeImportedWorkspace(
       canonicalBindingUrl(current.baseUrl) === importedBinding
         ? current.apiKey
         : undefined;
-    return {
+    const customHeaders = sanitizeCustomHeaders(provider.customHeaders);
+    const mergedProvider: ProviderProfile = {
       ...provider,
       enabled: provider.enabled !== false,
       models: provider.models.map(sanitizeModel),
       capabilities: [...provider.capabilities],
       ...(apiKey !== undefined ? { apiKey } : {}),
     };
+    if (customHeaders) {
+      mergedProvider.customHeaders = customHeaders;
+    } else {
+      delete mergedProvider.customHeaders;
+    }
+    return mergedProvider;
   });
   const recoveredFromAllProvidersDisabled = !providers.some(
     (provider) => provider.enabled !== false
@@ -2000,7 +2414,18 @@ function mergeImportedWorkspace(
     ...(conversation.knowledgeSourceIds?.length
       ? { knowledgeSourceIds: [...conversation.knowledgeSourceIds] }
       : {}),
-    messages: conversation.messages.map((message): ChatMessage => ({ ...message })),
+    messages: conversation.messages.map((message): ChatMessage => {
+      const providerContinuations = sanitizeProviderContinuations(message.providerContinuations);
+      const mergedMessage: ChatMessage = {
+        ...message,
+      };
+      if (providerContinuations) {
+        mergedMessage.providerContinuations = providerContinuations;
+      } else {
+        delete mergedMessage.providerContinuations;
+      }
+      return mergedMessage;
+    }),
   }));
   const artifacts: WorkspaceArtifact[] = (imported.artifacts ?? []).map((artifact) => ({
     ...artifact,
@@ -2055,25 +2480,43 @@ function mergeImportedWorkspace(
       ...imported.webSearch,
       enabled: recoveredFromAllProvidersDisabled ? false : imported.webSearch.enabled,
     },
-    externalSearch: {
-      enabled: false,
-      maxResults:
-        typeof imported.externalSearch?.maxResults === 'number'
-          ? imported.externalSearch.maxResults
-          : 5,
-      maxToolRounds:
-        typeof imported.externalSearch?.maxToolRounds === 'number'
-          ? imported.externalSearch.maxToolRounds
-          : 3,
-      selectedServiceId: imported.externalSearch?.selectedServiceId,
-      services: (imported.externalSearch?.services ?? []).map((service) => ({
-        id: service.id,
-        kind: service.kind,
-        name: service.name,
-        ...(service.endpoint ? { endpoint: service.endpoint } : {}),
-        ...(service.model ? { model: service.model } : {}),
-      })),
-    },
+    externalSearch: (() => {
+      const normalizedExternalServices = (imported.externalSearch?.services ?? []).map((service) => {
+        const endpointCheck = service.endpoint
+          ? validateExternalSearchEndpoint(service.kind, service.endpoint)
+          : undefined;
+        const normalizedEndpoint =
+          endpointCheck?.ok && endpointCheck.endpoint
+            ? endpointCheck.endpoint
+            : service.endpoint?.trim().replace(/\/+$/, '');
+        return {
+          id: service.id.trim(),
+          kind: service.kind,
+          name: service.name?.trim() || allExternalSearchProviderLabels[service.kind],
+          ...(normalizedEndpoint ? { endpoint: normalizedEndpoint } : {}),
+          ...(service.model ? { model: service.model } : {}),
+        };
+      });
+      const rawSelectedExternalServiceId = imported.externalSearch?.selectedServiceId?.trim();
+      const selectedExternalServiceId =
+        rawSelectedExternalServiceId &&
+        normalizedExternalServices.some((service) => service.id === rawSelectedExternalServiceId)
+          ? rawSelectedExternalServiceId
+          : normalizedExternalServices[0]?.id;
+      return {
+        enabled: false,
+        maxResults:
+          typeof imported.externalSearch?.maxResults === 'number'
+            ? imported.externalSearch.maxResults
+            : 5,
+        maxToolRounds:
+          typeof imported.externalSearch?.maxToolRounds === 'number'
+            ? imported.externalSearch.maxToolRounds
+            : 3,
+        selectedServiceId: selectedExternalServiceId,
+        services: normalizedExternalServices,
+      };
+    })(),
     voice: {
       ...(transcriptionTarget ? { transcriptionTarget } : {}),
       ...(speechTarget ? { speechTarget } : {}),

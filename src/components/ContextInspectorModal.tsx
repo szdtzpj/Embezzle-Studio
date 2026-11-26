@@ -1,8 +1,9 @@
 import { AlertTriangle, BookOpen, Check, EyeOff, FileText, Pin, Search, Send, X } from 'lucide-react-native';
 import { useEffect, useMemo, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { OverlayPortal } from '../ui/components/AppDialogHost';
 import { useKelivoTheme, type KelivoTheme } from '../ui/theme';
 
 import type { ChatMessage, ProjectKnowledgeSource } from '../domain/types';
@@ -112,15 +113,21 @@ export function ContextInspectorModal({
   }, [visible]);
 
   return (
-    <Modal
+    <OverlayPortal
       visible={visible}
-      animationType="slide"
-      presentationStyle="fullScreen"
-      statusBarTranslucent
-      navigationBarTranslucent
+      layer="fullscreen"
       onRequestClose={onClose}
     >
-      <SafeAreaView style={styles.root}>
+      <View
+        style={[
+          styles.root,
+          {
+            paddingTop: insets.top,
+            paddingLeft: insets.left,
+            paddingRight: insets.right,
+          },
+        ]}
+      >
         <View style={styles.header}>
           <View style={styles.headerText}>
             <Text style={styles.title}>本次请求上下文</Text>
@@ -133,7 +140,7 @@ export function ContextInspectorModal({
 
         <ScrollView
           style={styles.scroll}
-          contentContainerStyle={[styles.content, { paddingBottom: Math.max(24, insets.bottom + 16) }]}
+          contentContainerStyle={styles.content}
           keyboardShouldPersistTaps="handled"
         >
           <View style={styles.summaryCard} testID="context-inspector-summary">
@@ -338,8 +345,8 @@ export function ContextInspectorModal({
             </Pressable>
           ) : null}
         </View>
-      </SafeAreaView>
-    </Modal>
+      </View>
+    </OverlayPortal>
   );
 }
 

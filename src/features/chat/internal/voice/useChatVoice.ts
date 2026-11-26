@@ -6,7 +6,15 @@ import {
   useAudioRecorder,
   useAudioRecorderState,
 } from 'expo-audio';
-import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from 'react';
 import { AppState } from 'react-native';
 
 import {
@@ -50,9 +58,9 @@ export function useChatVoice(options: {
   notify(message: string): void;
 }): ChatVoiceController {
   const workspaceSession = useWorkspaceSession();
-  const workspace = useWorkspaceSelector((snapshot) => snapshot);
-  const workspaceRef = useRef(workspace);
-  workspaceRef.current = workspace;
+  // 仅订阅语音能力判定所需的最小字段切片，其余事件回调按需读取最新快照
+  const providers = useWorkspaceSelector((snapshot) => snapshot.providers);
+  const voice = useWorkspaceSelector((snapshot) => snapshot.voice);
   const orchestration = useChatOrchestrationController();
   const audioAdapter = useChatAdapters().audio;
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
@@ -70,11 +78,15 @@ export function useChatVoice(options: {
   const notifyRef = useRef(options.notify);
   notifyRef.current = options.notify;
 
+  const audioTargetWorkspace = useMemo(() => ({ providers, voice }), [providers, voice]);
   const configuredTranscriptionTarget = resolveConfiguredProviderAudioTarget(
-    workspace,
+    audioTargetWorkspace,
     'transcription'
   );
-  const configuredSpeechTarget = resolveConfiguredProviderAudioTarget(workspace, 'speech');
+  const configuredSpeechTarget = resolveConfiguredProviderAudioTarget(
+    audioTargetWorkspace,
+    'speech'
+  );
 
   const finishOperation = useCallback(
     (active: ActiveVoiceOperation): void => {
@@ -209,7 +221,7 @@ export function useChatVoice(options: {
         if (!uri) throw new Error('没有生成可转写的录音文件。');
         recordedUri = uri;
         const target = resolveConfiguredProviderAudioTarget(
-          workspaceRef.current,
+          workspaceSession.getSnapshot(),
           'transcription'
         );
         if (!target) throw new Error('请先在设置中选择语音转写模型。');
@@ -267,7 +279,7 @@ export function useChatVoice(options: {
                 modelId: target.modelId,
                 usage: result.usage,
               },
-              workspaceRef.current.modelPricing
+              workspaceSession.getSnapshot().modelPricing
                 .filter(
                   (pricing) =>
                     pricing.providerId === target.provider.id &&
@@ -315,7 +327,7 @@ export function useChatVoice(options: {
     }
 
     const target = resolveConfiguredProviderAudioTarget(
-      workspaceRef.current,
+      workspaceSession.getSnapshot(),
       'transcription'
     );
     if (!target) {
@@ -386,7 +398,7 @@ export function useChatVoice(options: {
     }
     const text = message.content.trim();
     if (!text) return;
-    const target = resolveConfiguredProviderAudioTarget(workspaceRef.current, 'speech');
+    const target = resolveConfiguredProviderAudioTarget(workspaceSession.getSnapshot(), 'speech');
     if (!target) {
       options.notify('请先在设置中选择语音合成模型。');
       return;
@@ -444,12 +456,13 @@ export function useChatVoice(options: {
     options.notify('正在使用你的服务商账号生成 AI 合成语音…');
     let generatedUri: string | null = null;
     try {
+      const currentVoice = workspaceSession.getSnapshot().voice;
       const result = await audioAdapter.synthesize({
         provider: target.provider,
         modelId: target.modelId,
         text,
-        voice: workspaceRef.current.voice.speechVoice,
-        responseFormat: workspaceRef.current.voice.speechFormat,
+        voice: currentVoice.speechVoice,
+        responseFormat: currentVoice.speechFormat,
         signal: next.controller.signal,
       });
       generatedUri = result.uri;

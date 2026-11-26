@@ -709,4 +709,98 @@ describe('provider audio injected I/O', () => {
     ).rejects.toThrow(/Content-Length/);
     expect(files.writeCacheBytes).not.toHaveBeenCalled();
   });
+
+  it.each([
+    'https://[::1]/audio.mp3',
+    'https://[::]/audio.mp3',
+    'https://[::1.1.1.1]/audio.mp3',
+    'https://[::ffff:1.1.1.1]/audio.mp3',
+    'https://[2001:0000:4136:e378::1]/audio.mp3',
+    'https://[2002:0101:0101::1]/audio.mp3',
+    'https://[64:ff9b::1.1.1.1]/audio.mp3',
+    'https://[64:ff9b:1::1]/audio.mp3',
+    'https://[2001:470::5efe:127.0.0.1]/audio.mp3',
+    'https://[fec0::1]/audio.mp3',
+    'https://[ff02::1]/audio.mp3',
+    'https://224.0.0.1/audio.mp3',
+    'https://240.0.0.1/audio.mp3',
+  ])('blocks IPv6 transition, site-local, multicast, and loopback SSRF download URL: %s', (unsafeUrl) => {
+    expect(() => validateProviderAudioDownloadUrl(unsafeUrl)).toThrow(ProviderAudioProtocolError);
+  });
+
+  it('redacts raw and percent-encoded apiKey in upstream HTTP errors and cancels hanging audio streams on abort', async () => {
+    const secretKey = 'sk-audio+secret/leak=9999&test';
+    const encodedKey = encodeURIComponent(secretKey);
+    const files = injectedFiles();
+    const leakErrorFetch: ProviderAudioFetch = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ error: `Invalid key raw=${secretKey} enc=${encodedKey.toLowerCase()}` }),
+        { status: 401, headers: { 'content-type': 'application/json' } }
+      )
+    );
+
+    const caughtError = await synthesizeSpeech({
+      provider: provider('custom', 'https://api.openai.com/v1', { apiKey: secretKey }),
+      modelId: 'gpt-4o-mini-tts',
+      text: 'Test secret redaction.',
+      voice: 'coral',
+      platform: 'android',
+      fileAdapter: files,
+      fetchImpl: leakErrorFetch,
+    }).catch((err: Error) => err);
+
+    expect(caughtError).toBeInstanceOf(ProviderAudioProtocolError);
+    expect((caughtError as Error).message).toContain('[REDACTED]');
+    expect((caughtError as Error).message).not.toContain(secretKey);
+    expect((caughtError as Error).message.toLowerCase()).not.toContain(encodedKey.toLowerCase());
+
+    let markReadingStarted: (() => void) | undefined;
+    let markCancelled: (() => void) | undefined;
+    const readingStarted = new Promise<void>((resolve) => {
+      markReadingStarted = resolve;
+    });
+    const cancelled = new Promise<void>((resolve) => {
+      markCancelled = resolve;
+    });
+    let cancelCount = 0;
+
+    const hangingResp = new Response(
+      new ReadableStream<Uint8Array>(
+        {
+          start() {
+            // 响应头返回后模拟音频流挂起
+          },
+          pull() {
+            markReadingStarted?.();
+          },
+          cancel() {
+            cancelCount += 1;
+            markCancelled?.();
+          },
+        },
+        { highWaterMark: 0 }
+      ),
+      { status: 200, headers: { 'content-type': 'audio/mpeg' } }
+    );
+
+    const controller = new AbortController();
+    const pending = synthesizeSpeech({
+      provider: openAi,
+      modelId: 'gpt-4o-mini-tts',
+      text: 'Abort hanging audio stream.',
+      voice: 'coral',
+      platform: 'android',
+      signal: controller.signal,
+      fileAdapter: files,
+      fetchImpl: vi.fn(async () => hangingResp),
+    });
+
+    const assertion = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    await readingStarted;
+    controller.abort();
+    await assertion;
+    await cancelled;
+    expect(cancelCount).toBeGreaterThanOrEqual(1);
+    expect(hangingResp.body?.locked).toBe(false);
+  });
 });
