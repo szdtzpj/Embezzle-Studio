@@ -1339,4 +1339,142 @@ describe('strict backup validation', () => {
 
     expect(() => validateWorkspaceBackupEnvelope(envelope)).toThrow(WorkspaceBackupError);
   });
+
+  it('round-trips 2026 provider fields, customHeaders, thinkingDurationMs, and providerContinuations while redacting secret headers', async () => {
+    const workspace = createDefaultWorkspace();
+    const anthropicIndex = workspace.providers.findIndex((item) => item.id === 'anthropic');
+    workspace.providers[anthropicIndex] = {
+      ...workspace.providers[anthropicIndex],
+      authHeaderMode: 'x-api-key',
+      imageApiMode: 'unsupported',
+      customHeaders: [
+        { key: 'anthropic-beta', value: 'web-search-2025-03-05', enabled: true },
+        { key: 'Authorization', value: 'Bearer SECRET-IN-HEADER' },
+      ],
+    };
+    const msg: ChatMessage = {
+      id: 'backup-cont-msg',
+      role: 'assistant',
+      content: 'Done',
+      createdAt: 500,
+      status: 'ready',
+      thinkingDurationMs: 1200,
+      providerContinuations: [
+        {
+          provider: 'gemini',
+          type: 'thought_signature',
+          thoughtSignature: 'sig-gem-1',
+          partRole: 'text',
+        },
+      ],
+    };
+    workspace.conversations = [{ ...workspace.conversations[0], messages: [msg] }];
+    workspace.messages = [msg];
+
+    const envelope = createWorkspaceBackupEnvelope(workspace, 1_700_000_000_000);
+    expect(JSON.stringify(envelope)).not.toContain('SECRET-IN-HEADER');
+    expect(validateWorkspaceBackupEnvelope(envelope)).toBe(envelope);
+
+    const encrypted = await exportEncryptedWorkspaceBackup(workspace, password, {
+      now: 1_700_000_000_000,
+      randomBytes: deterministicRandom(15),
+    });
+    const imported = await importEncryptedWorkspaceBackup(encrypted, password, createDefaultWorkspace());
+    const importedAnthropic = imported.providers.find((item) => item.id === 'anthropic');
+    expect(importedAnthropic).toMatchObject({
+      kind: 'anthropic',
+      authHeaderMode: 'x-api-key',
+      imageApiMode: 'unsupported',
+      customHeaders: [{ key: 'anthropic-beta', value: 'web-search-2025-03-05', enabled: true }],
+    });
+    expect(imported.conversations[0].messages[0]).toMatchObject({
+      thinkingDurationMs: 1200,
+      providerContinuations: [
+        { provider: 'gemini', type: 'thought_signature', thoughtSignature: 'sig-gem-1', partRole: 'text' },
+      ],
+    });
+  }, 20_000);
+
+  it('rejects invalid customHeaders or prototype-polluted providerContinuations during strict validation', () => {
+    const envelope = createWorkspaceBackupEnvelope(createDefaultWorkspace(), 1_700_000_000_000);
+    envelope.workspace.providers[0].customHeaders = [{ key: 'Host', value: 'evil.example' }];
+    expect(() => validateWorkspaceBackupEnvelope(envelope)).toThrow(WorkspaceBackupError);
+
+    const pollutedEnvelope = createWorkspaceBackupEnvelope(createDefaultWorkspace(), 1_700_000_000_000);
+    pollutedEnvelope.workspace.conversations[0].messages[0].providerContinuations = [
+      JSON.parse('{"provider":"anthropic","type":"server_tool_use","id":"1","name":"s","input":{"__proto__":{"x":1}}}'),
+    ];
+    expect(() => validateWorkspaceBackupEnvelope(pollutedEnvelope)).toThrow(WorkspaceBackupError);
+  });
+
+  it('redacts api-key, x-api-token, and x-auth-token case-insensitively on export and merge', () => {
+    const workspace = createDefaultWorkspace();
+    workspace.providers[0] = {
+      ...workspace.providers[0],
+      customHeaders: [
+        { key: 'api-key', value: 'AZURE-SECRET-1' },
+        { key: 'Api-Key', value: 'AZURE-SECRET-2' },
+        { key: 'X-Api-Token', value: 'GATEWAY-TOKEN-SECRET' },
+        { key: 'x-auth-token', value: 'AUTH-TOKEN-SECRET' },
+        { key: 'X-Org-Id', value: 'org-safe-123' },
+        { key: 'X-Custom-Header', value: 'safe-value', enabled: true },
+      ],
+    };
+
+    const envelope = createWorkspaceBackupEnvelope(workspace, 1_700_000_000_000);
+    const serialized = JSON.stringify(envelope);
+    expect(serialized).not.toContain('AZURE-SECRET-1');
+    expect(serialized).not.toContain('AZURE-SECRET-2');
+    expect(serialized).not.toContain('GATEWAY-TOKEN-SECRET');
+    expect(serialized).not.toContain('AUTH-TOKEN-SECRET');
+    expect(envelope.workspace.providers[0].customHeaders).toEqual([
+      { key: 'X-Org-Id', value: 'org-safe-123' },
+      { key: 'X-Custom-Header', value: 'safe-value', enabled: true },
+    ]);
+
+    const handCrafted = structuredClone(envelope);
+    handCrafted.workspace.providers[0].customHeaders = [
+      { key: 'Api-Key', value: 'IMPORTED-AZURE-SECRET' },
+      { key: 'X-Org-Id', value: 'org-safe-123' },
+    ];
+    const merged = mergeValidatedWorkspaceBackupEnvelope(handCrafted, createDefaultWorkspace());
+    expect(merged.providers[0].customHeaders).toEqual([{ key: 'X-Org-Id', value: 'org-safe-123' }]);
+  });
+
+  it('prunes over-deep nested continuation payloads above depth 12 and deletes empty providerContinuations on merge', () => {
+    const workspace = createDefaultWorkspace();
+    let deepInput: Record<string, unknown> = { leafTooDeep: 'PRUNED-DEEP-VALUE' };
+    for (let depth = 13; depth >= 1; depth -= 1) {
+      deepInput = { [`level${depth}`]: deepInput };
+    }
+    const msg: ChatMessage = {
+      id: 'deep-cont-msg',
+      role: 'assistant',
+      content: 'Deep check',
+      createdAt: 501,
+      status: 'ready',
+      providerContinuations: [
+        {
+          provider: 'anthropic',
+          type: 'server_tool_use',
+          id: 'tool-1',
+          name: 'search',
+          input: deepInput,
+        },
+      ],
+    };
+    workspace.conversations = [{ ...workspace.conversations[0], messages: [msg] }];
+    workspace.messages = [msg];
+
+    const envelope = createWorkspaceBackupEnvelope(workspace, 1_700_000_000_000);
+    expect(JSON.stringify(envelope)).not.toContain('PRUNED-DEEP-VALUE');
+    expect(() => validateWorkspaceBackupEnvelope(envelope)).not.toThrow();
+
+    const emptyContEnvelope = createWorkspaceBackupEnvelope(createDefaultWorkspace(), 1_700_000_000_000);
+    emptyContEnvelope.workspace.conversations[0].messages[0].providerContinuations = [];
+    const merged = mergeValidatedWorkspaceBackupEnvelope(emptyContEnvelope, createDefaultWorkspace());
+    const mergedMessage = merged.conversations[0].messages[0];
+    expect('providerContinuations' in mergedMessage).toBe(false);
+    expect(mergedMessage.providerContinuations).toBeUndefined();
+  });
 });

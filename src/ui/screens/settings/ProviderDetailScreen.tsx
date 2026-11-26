@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   Boxes,
+  Check,
+  ChevronDown,
+  ChevronUp,
   Eye,
   EyeOff,
   Plus,
@@ -17,6 +20,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AnimatedPressable } from '../../components/AnimatedPressable';
 import { CandidateModelRow } from '../../components/CandidateModelRow';
 import { ModelAvatar } from '../../components/ModelAvatar';
@@ -30,14 +34,22 @@ import type {
   ExperienceMode,
   ModelInfo,
   ModelTask,
+  ProviderAuthHeaderMode,
+  ProviderImageApiMode,
   ProviderKind,
   ProviderProfile,
 } from '../../../domain/types';
+import type { ProviderCustomHeaderDraft } from '../../../features/settings/internal/useSettingsDrafts';
 import {
   inferModelTask,
   type ModelCapabilityFilter,
 } from '../../../services/modelCapabilities';
-import type { ProviderEndpointInspection } from '../../../services/providerSetup';
+import {
+  isSensitiveCustomHeaderName,
+  PROVIDER_CUSTOM_HEADER_LIMITS,
+  type CustomHeadersValidationResult,
+  type ProviderEndpointInspection,
+} from '../../../services/providerSetup';
 import {
   configurableModelCapabilities,
   configurableModelTasks,
@@ -45,10 +57,32 @@ import {
 } from '../../utils/modelDisplay';
 
 const providerKindOptions: Array<{ key: ProviderKind; label: string }> = [
+  { key: 'openai-compatible', label: 'OpenAI' },
+  { key: 'anthropic', label: 'Anthropic Claude' },
+  { key: 'gemini', label: 'Google Gemini' },
+  { key: 'xai-grok', label: 'xAI Grok' },
+  { key: 'deepseek', label: 'DeepSeek' },
   { key: 'volcengine-ark', label: '火山方舟' },
   { key: 'bailian-compatible', label: '阿里百炼' },
-  { key: 'openai-compatible', label: 'OpenAI' },
+  { key: 'new-api-relay', label: 'New API 中转' },
   { key: 'custom', label: '兼容接口' },
+];
+
+const authHeaderModeOptions: Array<{ key: ProviderAuthHeaderMode; label: string }> = [
+  { key: 'auto', label: '自动匹配协议' },
+  { key: 'bearer', label: 'Authorization: Bearer' },
+  { key: 'x-api-key', label: 'x-api-key' },
+  { key: 'x-goog-api-key', label: 'x-goog-api-key' },
+  { key: 'custom', label: '仅使用自定义请求头' },
+];
+
+const imageApiModeOptions: Array<{ key: ProviderImageApiMode; label: string }> = [
+  { key: 'auto', label: '自动匹配生图协议' },
+  { key: 'openai-images', label: 'OpenAI /v1/images' },
+  { key: 'openai-responses', label: 'OpenAI Responses 生图' },
+  { key: 'gemini-generate-content', label: 'Gemini 原生生图' },
+  { key: 'xai-json', label: 'xAI Grok Imagine JSON' },
+  { key: 'unsupported', label: '不支持原生生图' },
 ];
 
 export interface ProviderDetailScreenProps {
@@ -64,12 +98,24 @@ export interface ProviderDetailScreenProps {
   kindDraft: ProviderKind;
   baseUrlDraft: string;
   apiKeyDraft: string;
+  authHeaderModeDraft: ProviderAuthHeaderMode;
+  imageApiModeDraft: ProviderImageApiMode;
+  customHeadersDraft: ProviderCustomHeaderDraft[];
+  customHeadersValidation: CustomHeadersValidationResult;
   endpointInspection: ProviderEndpointInspection;
   onBack: () => void;
   onOpenModels: () => void;
   onSetNameDraft: (name: string) => void;
   onChangeBindingDraft: (patch: { kind?: ProviderKind; baseUrl?: string }) => void;
   onSetApiKeyDraft: (apiKey: string) => void;
+  onSetAuthHeaderModeDraft: (mode: ProviderAuthHeaderMode) => void;
+  onSetImageApiModeDraft: (mode: ProviderImageApiMode) => void;
+  onAddCustomHeaderDraft: () => void;
+  onUpdateCustomHeaderDraft: (
+    id: string,
+    patch: Partial<Pick<ProviderCustomHeaderDraft, 'key' | 'value' | 'enabled'>>
+  ) => void;
+  onRemoveCustomHeaderDraft: (id: string) => void;
   onSaveProviderDraft: () => void;
   onRefreshModels: () => void;
   onDeleteProvider?: () => void;
@@ -118,17 +164,27 @@ export function ProviderDetailScreen({
   kindDraft,
   baseUrlDraft,
   apiKeyDraft,
+  authHeaderModeDraft,
+  imageApiModeDraft,
+  customHeadersDraft,
+  customHeadersValidation,
   endpointInspection,
   onBack,
   onOpenModels,
   onSetNameDraft,
   onChangeBindingDraft,
   onSetApiKeyDraft,
+  onSetAuthHeaderModeDraft,
+  onSetImageApiModeDraft,
+  onAddCustomHeaderDraft,
+  onUpdateCustomHeaderDraft,
+  onRemoveCustomHeaderDraft,
   onSaveProviderDraft,
   onRefreshModels,
   onDeleteProvider,
 }: ProviderDetailScreenProps) {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = getStyles(theme);
   const [showKey, setShowKey] = useState(false);
 
@@ -138,7 +194,16 @@ export function ProviderDetailScreen({
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
+      <View
+        style={[
+          styles.header,
+          {
+            paddingTop: Math.max(8, insets.top),
+            paddingLeft: Math.max(6, insets.left),
+            paddingRight: Math.max(6, insets.right),
+          },
+        ]}
+      >
         <AnimatedPressable
           accessibilityRole="button"
           accessibilityLabel="返回服务商列表"
@@ -194,6 +259,10 @@ export function ProviderDetailScreen({
         kindDraft={kindDraft}
         baseUrlDraft={baseUrlDraft}
         apiKeyDraft={apiKeyDraft}
+        authHeaderModeDraft={authHeaderModeDraft}
+        imageApiModeDraft={imageApiModeDraft}
+        customHeadersDraft={customHeadersDraft}
+        customHeadersValidation={customHeadersValidation}
         endpointInspection={endpointInspection}
         refreshingModels={refreshingModels}
         addedModelCount={addedModelCount}
@@ -203,6 +272,11 @@ export function ProviderDetailScreen({
         onSetNameDraft={onSetNameDraft}
         onChangeBindingDraft={onChangeBindingDraft}
         onSetApiKeyDraft={onSetApiKeyDraft}
+        onSetAuthHeaderModeDraft={onSetAuthHeaderModeDraft}
+        onSetImageApiModeDraft={onSetImageApiModeDraft}
+        onAddCustomHeaderDraft={onAddCustomHeaderDraft}
+        onUpdateCustomHeaderDraft={onUpdateCustomHeaderDraft}
+        onRemoveCustomHeaderDraft={onRemoveCustomHeaderDraft}
         onSaveProviderDraft={onSaveProviderDraft}
         onRefreshModels={onRefreshModels}
       />
@@ -218,6 +292,10 @@ function ConfigTab({
   kindDraft,
   baseUrlDraft,
   apiKeyDraft,
+  authHeaderModeDraft,
+  imageApiModeDraft,
+  customHeadersDraft,
+  customHeadersValidation,
   endpointInspection,
   refreshingModels,
   addedModelCount,
@@ -227,6 +305,11 @@ function ConfigTab({
   onSetNameDraft,
   onChangeBindingDraft,
   onSetApiKeyDraft,
+  onSetAuthHeaderModeDraft,
+  onSetImageApiModeDraft,
+  onAddCustomHeaderDraft,
+  onUpdateCustomHeaderDraft,
+  onRemoveCustomHeaderDraft,
   onSaveProviderDraft,
   onRefreshModels,
 }: {
@@ -237,6 +320,10 @@ function ConfigTab({
   kindDraft: ProviderKind;
   baseUrlDraft: string;
   apiKeyDraft: string;
+  authHeaderModeDraft: ProviderAuthHeaderMode;
+  imageApiModeDraft: ProviderImageApiMode;
+  customHeadersDraft: ProviderCustomHeaderDraft[];
+  customHeadersValidation: CustomHeadersValidationResult;
   endpointInspection: ProviderEndpointInspection;
   refreshingModels: boolean;
   addedModelCount: number;
@@ -246,18 +333,56 @@ function ConfigTab({
   onSetNameDraft: (name: string) => void;
   onChangeBindingDraft: (patch: { kind?: ProviderKind; baseUrl?: string }) => void;
   onSetApiKeyDraft: (apiKey: string) => void;
+  onSetAuthHeaderModeDraft: (mode: ProviderAuthHeaderMode) => void;
+  onSetImageApiModeDraft: (mode: ProviderImageApiMode) => void;
+  onAddCustomHeaderDraft: () => void;
+  onUpdateCustomHeaderDraft: (
+    id: string,
+    patch: Partial<Pick<ProviderCustomHeaderDraft, 'key' | 'value' | 'enabled'>>
+  ) => void;
+  onRemoveCustomHeaderDraft: (id: string) => void;
   onSaveProviderDraft: () => void;
   onRefreshModels: () => void;
 }) {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = getStyles(theme);
   const showAdvancedEndpoint =
     experienceMode === 'advanced' || kindDraft === 'custom' || kindDraft === 'new-api-relay';
+  const hasNonDefaultAdvancedConfig =
+    customHeadersDraft.length > 0 ||
+    authHeaderModeDraft !== 'auto' ||
+    imageApiModeDraft !== 'auto';
+  const shouldAutoExpandAdvanced =
+    showAdvancedEndpoint || hasNonDefaultAdvancedConfig;
+  // 记录用户在当前服务商内手动切换的折叠覆盖状态；切换 provider.id 时随 ConfigTab 重建自动清空
+  const [userExpandedOverride, setUserExpandedOverride] = useState<boolean | undefined>(undefined);
+  const advancedExpanded = userExpandedOverride ?? shouldAutoExpandAdvanced;
+  const [visibleSecretIds, setVisibleSecretIds] = useState<Set<string>>(() => new Set());
+
+  const toggleSecretVisible = (id: string) => {
+    setVisibleSecretIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
 
   return (
     <ScrollView
       style={styles.tabContent}
-      contentContainerStyle={styles.tabContentInner}
+      contentContainerStyle={[
+        styles.tabContentInner,
+        {
+          paddingBottom: Math.max(24, insets.bottom + 16),
+          paddingLeft: Math.max(12, insets.left),
+          paddingRight: Math.max(12, insets.right),
+        },
+      ]}
       showsVerticalScrollIndicator={false}
       keyboardShouldPersistTaps="handled"
     >
@@ -357,6 +482,236 @@ function ConfigTab({
             ) : null}
           </View>
 
+          <View style={styles.advancedSection}>
+            <AnimatedPressable
+              accessibilityRole="button"
+              accessibilityLabel="高级协议与自定义请求头"
+              accessibilityState={{ expanded: advancedExpanded }}
+              testID="provider-advanced-headers-toggle"
+              onPress={() =>
+                setUserExpandedOverride((current) => !(current ?? shouldAutoExpandAdvanced))
+              }
+              style={styles.advancedToggle}
+            >
+              <View style={styles.advancedToggleTextWrap}>
+                <Text style={styles.inputLabel}>高级协议与自定义请求头</Text>
+                <Text style={styles.inputHint}>
+                  {hasNonDefaultAdvancedConfig
+                    ? `鉴权：${authHeaderModeDraft} · 生图：${imageApiModeDraft} · 请求头 ${customHeadersDraft.length} 条`
+                    : '按需覆盖鉴权请求头、生图协议与透传请求头'}
+                </Text>
+              </View>
+              {advancedExpanded ? (
+                <ChevronUp size={18} color={theme.colors.textSecondary} strokeWidth={2.1} />
+              ) : (
+                <ChevronDown size={18} color={theme.colors.textSecondary} strokeWidth={2.1} />
+              )}
+            </AnimatedPressable>
+
+            {advancedExpanded ? (
+              <View style={styles.advancedBody}>
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>鉴权请求头模式</Text>
+                  <SettingsSelect
+                    value={authHeaderModeDraft}
+                    options={authHeaderModeOptions}
+                    disabled={readOnly}
+                    accessibilityLabel="鉴权请求头模式"
+                    onChange={onSetAuthHeaderModeDraft}
+                  />
+                  {authHeaderModeDraft === 'custom' ? (
+                    <Text style={styles.inputHint}>
+                      仅发送下方启用的自定义请求头，不会自动附带 API Key。
+                    </Text>
+                  ) : null}
+                </View>
+
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>生图接口协议</Text>
+                  <SettingsSelect
+                    value={imageApiModeDraft}
+                    options={imageApiModeOptions}
+                    disabled={readOnly}
+                    accessibilityLabel="生图接口协议"
+                    onChange={onSetImageApiModeDraft}
+                  />
+                  {(kindDraft === 'anthropic' || kindDraft === 'deepseek') && endpointInspection.official ? (
+                    <Text style={styles.warningText}>
+                      • 官方直连暂不支持原生光栅生图，生图请求会被本地安全拦截并引导切换。
+                    </Text>
+                  ) : null}
+                </View>
+
+                <View style={styles.inputGroup}>
+                  <View style={styles.cardHeader}>
+                    <Text style={styles.inputLabel}>
+                      自定义请求头（{customHeadersDraft.length} / {PROVIDER_CUSTOM_HEADER_LIMITS.maxCount}）
+                    </Text>
+                    <AnimatedPressable
+                      accessibilityRole="button"
+                      accessibilityLabel="添加自定义请求头"
+                      accessibilityState={{
+                        disabled:
+                          readOnly ||
+                          customHeadersDraft.length >= PROVIDER_CUSTOM_HEADER_LIMITS.maxCount,
+                      }}
+                      disabled={
+                        readOnly ||
+                        customHeadersDraft.length >= PROVIDER_CUSTOM_HEADER_LIMITS.maxCount
+                      }
+                      testID="provider-custom-header-add"
+                      onPress={onAddCustomHeaderDraft}
+                      style={[
+                        styles.addHeaderButton,
+                        (readOnly ||
+                          customHeadersDraft.length >= PROVIDER_CUSTOM_HEADER_LIMITS.maxCount) &&
+                          styles.buttonDisabled,
+                      ]}
+                    >
+                      <Plus size={14} color={theme.colors.primary} strokeWidth={2.2} />
+                      <Text style={styles.addHeaderButtonText}>添加请求头</Text>
+                    </AnimatedPressable>
+                  </View>
+
+                  {customHeadersDraft.length === 0 ? (
+                    <Text style={styles.inputHint}>
+                      暂无自定义请求头；可用于添加 anthropic-beta、租户路由或中转站自定义鉴权头。
+                    </Text>
+                  ) : (
+                    <View style={styles.listGap}>
+                      {customHeadersDraft.map((item, index) => {
+                        const sensitive = isSensitiveCustomHeaderName(item.key);
+                        const secretVisible = visibleSecretIds.has(item.id);
+                        const rowIssues = customHeadersValidation.issues.filter(
+                          (issue) => issue.index === index
+                        );
+                        return (
+                          <View
+                            key={item.id}
+                            style={[
+                              styles.customHeaderCard,
+                              !item.enabled && styles.customHeaderCardDisabled,
+                            ]}
+                          >
+                            <View style={styles.customHeaderTopRow}>
+                              <TextInput
+                                testID={`provider-custom-header-key-${index}`}
+                                autoCapitalize="none"
+                                autoCorrect={false}
+                                editable={!readOnly}
+                                value={item.key}
+                                onChangeText={(text) =>
+                                  onUpdateCustomHeaderDraft(item.id, { key: text })
+                                }
+                                placeholder="Header Name（如 x-tenant-id）"
+                                placeholderTextColor={theme.colors.textTertiary}
+                                style={[styles.input, styles.customHeaderKeyInput]}
+                              />
+                              <AnimatedPressable
+                                accessibilityRole="switch"
+                                accessibilityLabel={`启用自定义请求头 ${item.key || index + 1}`}
+                                accessibilityState={{ checked: item.enabled, disabled: readOnly }}
+                                disabled={readOnly}
+                                testID={`provider-custom-header-toggle-${index}`}
+                                onPress={() =>
+                                  onUpdateCustomHeaderDraft(item.id, { enabled: !item.enabled })
+                                }
+                                style={[
+                                  styles.headerSwitchChip,
+                                  item.enabled && styles.headerSwitchChipActive,
+                                  readOnly && styles.buttonDisabled,
+                                ]}
+                              >
+                                {item.enabled ? (
+                                  <Check size={14} color={theme.colors.textOnAccent} strokeWidth={2.4} />
+                                ) : null}
+                                <Text
+                                  style={[
+                                    styles.headerSwitchText,
+                                    item.enabled && styles.headerSwitchTextActive,
+                                  ]}
+                                >
+                                  {item.enabled ? '启用' : '停用'}
+                                </Text>
+                              </AnimatedPressable>
+                              <AnimatedPressable
+                                accessibilityRole="button"
+                                accessibilityLabel={`删除自定义请求头 ${item.key || index + 1}`}
+                                accessibilityState={{ disabled: readOnly }}
+                                disabled={readOnly}
+                                testID={`provider-custom-header-delete-${index}`}
+                                onPress={() => onRemoveCustomHeaderDraft(item.id)}
+                                style={[styles.iconButton, readOnly && styles.buttonDisabled]}
+                              >
+                                <Trash2 size={16} color={theme.colors.error} strokeWidth={2} />
+                              </AnimatedPressable>
+                            </View>
+
+                            <View style={styles.keyInputWrap}>
+                              <TextInput
+                                testID={`provider-custom-header-value-${index}`}
+                                autoCapitalize="none"
+                                autoCorrect={false}
+                                editable={!readOnly}
+                                secureTextEntry={sensitive && !secretVisible}
+                                value={item.value}
+                                onChangeText={(text) =>
+                                  onUpdateCustomHeaderDraft(item.id, { value: text })
+                                }
+                                placeholder="Header Value"
+                                placeholderTextColor={theme.colors.textTertiary}
+                                style={[styles.input, styles.keyInput]}
+                              />
+                              {sensitive ? (
+                                <AnimatedPressable
+                                  accessibilityRole="button"
+                                  accessibilityLabel={
+                                    secretVisible ? '隐藏敏感请求头内容' : '显示敏感请求头内容'
+                                  }
+                                  accessibilityState={{ disabled: readOnly }}
+                                  disabled={readOnly}
+                                  testID={`provider-custom-header-secret-toggle-${index}`}
+                                  onPress={() => toggleSecretVisible(item.id)}
+                                  style={styles.eyeButton}
+                                >
+                                  {secretVisible ? (
+                                    <EyeOff
+                                      size={16}
+                                      color={theme.colors.textSecondary}
+                                      strokeWidth={2}
+                                    />
+                                  ) : (
+                                    <Eye
+                                      size={16}
+                                      color={theme.colors.textSecondary}
+                                      strokeWidth={2}
+                                    />
+                                  )}
+                                </AnimatedPressable>
+                              ) : null}
+                            </View>
+
+                            {sensitive ? (
+                              <Text style={styles.warningText}>
+                                • 敏感鉴权头将覆盖默认 API Key 同名请求头；加密备份导出时会自动剥离。
+                              </Text>
+                            ) : null}
+
+                            {rowIssues.map((issue) => (
+                              <Text key={`${index}-${issue.message}`} style={styles.errorText}>
+                                • {issue.message}
+                              </Text>
+                            ))}
+                          </View>
+                        );
+                      })}
+                    </View>
+                  )}
+                </View>
+              </View>
+            ) : null}
+          </View>
+
           {endpointInspection.errors.map((error) => (
             <Text key={error} style={styles.errorText}>• {error}</Text>
           ))}
@@ -368,6 +723,7 @@ function ConfigTab({
             accessibilityRole="button"
             accessibilityState={{ disabled: readOnly }}
             disabled={readOnly}
+            testID="provider-save-draft"
             onPress={onSaveProviderDraft}
             style={[styles.secondaryButton, readOnly && styles.buttonDisabled]}
           >
@@ -378,6 +734,7 @@ function ConfigTab({
             accessibilityRole="button"
             accessibilityState={{ disabled: readOnly || refreshingModels, busy: refreshingModels }}
             disabled={readOnly || refreshingModels}
+            testID="provider-refresh-models"
             onPress={onRefreshModels}
             style={[styles.primaryButton, (readOnly || refreshingModels) && styles.buttonDisabled]}
           >
@@ -437,6 +794,7 @@ export function ProviderModelsScreen({
   onLoadMoreCandidates,
 }: ProviderModelsScreenProps) {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = getStyles(theme);
   const providerName = provider.name;
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -472,7 +830,16 @@ export function ProviderModelsScreen({
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
+      <View
+        style={[
+          styles.header,
+          {
+            paddingTop: Math.max(8, insets.top),
+            paddingLeft: Math.max(6, insets.left),
+            paddingRight: Math.max(6, insets.right),
+          },
+        ]}
+      >
         <AnimatedPressable
           accessibilityRole="button"
           accessibilityLabel="返回服务商配置"
@@ -498,6 +865,11 @@ export function ProviderModelsScreen({
         contentContainerStyle={[
           styles.tabContentInner,
           (!hasModels && !hasCandidates) && styles.tabContentCenter,
+          {
+            paddingBottom: 16,
+            paddingLeft: Math.max(12, insets.left),
+            paddingRight: Math.max(12, insets.right),
+          },
         ]}
         showsVerticalScrollIndicator={false}
       >
@@ -732,7 +1104,13 @@ export function ProviderModelsScreen({
         visible={showManualInput}
         direction="up"
         distance={10}
-        style={styles.manualInputBar}
+        style={[
+          styles.manualInputBar,
+          {
+            paddingLeft: Math.max(12, insets.left),
+            paddingRight: Math.max(12, insets.right),
+          },
+        ]}
       >
         <TextInput
           autoCapitalize="none"
@@ -756,7 +1134,16 @@ export function ProviderModelsScreen({
         </AnimatedPressable>
       </MotionPresence>
 
-      <View style={styles.bottomActionBar}>
+      <View
+        style={[
+          styles.bottomActionBar,
+          {
+            marginBottom: Math.max(18, insets.bottom + 8),
+            marginLeft: Math.max(16, insets.left + 8),
+            marginRight: Math.max(16, insets.right + 8),
+          },
+        ]}
+      >
         <AnimatedPressable
           accessibilityRole="button"
           accessibilityLabel={refreshingModels ? '正在获取模型' : '获取模型'}
@@ -939,6 +1326,93 @@ function createStyles(theme: KelivoTheme) {
   eyeIconSwap: {
     width: 18,
     height: 18,
+  },
+  advancedSection: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: theme.colors.outlineVariant,
+    backgroundColor: theme.colors.surface,
+    overflow: 'hidden',
+  },
+  advancedToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+  },
+  advancedToggleTextWrap: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  advancedBody: {
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+    paddingTop: 4,
+    gap: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: theme.colors.divider,
+  },
+  addHeaderButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: theme.radius.pill,
+    borderWidth: 1,
+    borderColor: theme.colors.outline,
+    backgroundColor: theme.colors.card,
+  },
+  addHeaderButtonText: {
+    color: theme.colors.primary,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  customHeaderCard: {
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: theme.colors.outlineVariant,
+    backgroundColor: theme.colors.card,
+    padding: 10,
+    gap: 8,
+  },
+  customHeaderCardDisabled: {
+    opacity: 0.72,
+  },
+  customHeaderTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  customHeaderKeyInput: {
+    flex: 1,
+    minWidth: 0,
+  },
+  headerSwitchChip: {
+    minHeight: 34,
+    paddingHorizontal: 10,
+    borderRadius: theme.radius.pill,
+    borderWidth: 1,
+    borderColor: theme.colors.outline,
+    backgroundColor: theme.colors.surface,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  headerSwitchChipActive: {
+    borderColor: theme.colors.primary,
+    backgroundColor: theme.colors.primary,
+  },
+  headerSwitchText: {
+    color: theme.colors.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  headerSwitchTextActive: {
+    color: theme.colors.textOnAccent,
   },
   secondaryButton: {
     height: 40,

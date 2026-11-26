@@ -15,7 +15,7 @@ import {
   WorkspaceSessionContext,
   type WorkspaceSessionContextValue,
 } from './internal/WorkspaceSessionContext';
-import type { WorkspaceStatus } from './workspaceStatus';
+import type { WorkspacePhase, WorkspaceStatus } from './workspaceStatus';
 
 export interface WorkspaceSessionProviderAdapters {
   persistence: WorkspacePersistenceAdapter;
@@ -98,5 +98,61 @@ export function useWorkspaceStatus(): WorkspaceStatus {
   }
   const subscribe = useMemo(() => session.subscribe.bind(session), [session]);
   const getSnapshot = useMemo(() => () => session.getStatus(), [session]);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/** 仅订阅工作区阶段标量，避免因 dirty 或 revision 变化触发整树冗余重渲染。 */
+export function useWorkspacePhase(): WorkspacePhase {
+  const session = useContext(WorkspaceSessionContext)?.session;
+  if (!session) {
+    throw new Error('useWorkspacePhase requires WorkspaceSessionProvider.');
+  }
+  const subscribe = useMemo(() => session.subscribe.bind(session), [session]);
+  const getSnapshot = useMemo(() => () => session.getStatus().phase, [session]);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/** 仅订阅只读恢复失败错误信息；无错误时稳定返回 null。 */
+export function useWorkspacePersistenceLoadError(): string | null {
+  const session = useContext(WorkspaceSessionContext)?.session;
+  if (!session) {
+    throw new Error('useWorkspacePersistenceLoadError requires WorkspaceSessionProvider.');
+  }
+  const subscribe = useMemo(() => session.subscribe.bind(session), [session]);
+  const getSnapshot = useMemo(
+    () => () => {
+      const status = session.getStatus();
+      return status.phase === 'read-only' ? status.issue ?? null : null;
+    },
+    [session]
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/** 仅订阅就绪态脏写保存错误信息；正常落盘切换 dirty 时稳定返回 null。 */
+export function useWorkspacePersistenceSaveError(): string | null {
+  const session = useContext(WorkspaceSessionContext)?.session;
+  if (!session) {
+    throw new Error('useWorkspacePersistenceSaveError requires WorkspaceSessionProvider.');
+  }
+  const subscribe = useMemo(() => session.subscribe.bind(session), [session]);
+  const getSnapshot = useMemo(
+    () => () => {
+      const status = session.getStatus();
+      return status.phase === 'ready' && status.dirty ? status.issue ?? null : null;
+    },
+    [session]
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/** 仅订阅一次性工作区恢复提示；无提示时稳定返回 null。 */
+export function useWorkspaceRecoveryNotice(): string | null {
+  const session = useContext(WorkspaceSessionContext)?.session;
+  if (!session) {
+    throw new Error('useWorkspaceRecoveryNotice requires WorkspaceSessionProvider.');
+  }
+  const subscribe = useMemo(() => session.subscribe.bind(session), [session]);
+  const getSnapshot = useMemo(() => () => session.getStatus().recoveryNotice ?? null, [session]);
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }

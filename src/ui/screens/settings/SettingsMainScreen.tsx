@@ -22,6 +22,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AnimatedPressable } from '../../components/AnimatedPressable';
 import { MotionItem } from '../../components/Motion';
 import { SectionHeader, SectionCard, TactileRow, RowDivider } from '../../components/settings/SettingsList';
@@ -70,6 +71,7 @@ export function SettingsMainScreen({
   onAbout,
 }: SettingsMainScreenProps) {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = getStyles(theme);
   const iconColor = theme.colors.text;
   const scrollRef = useRef<ScrollView>(null);
@@ -95,7 +97,16 @@ export function SettingsMainScreen({
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
+      <View
+        style={[
+          styles.header,
+          {
+            paddingTop: Math.max(8, insets.top),
+            paddingLeft: Math.max(6, insets.left),
+            paddingRight: Math.max(6, insets.right),
+          },
+        ]}
+      >
         <AnimatedPressable accessibilityRole="button" onPress={onBack} style={styles.headerButton}>
           <ArrowLeft size={22} color={theme.colors.text} strokeWidth={2.2} />
         </AnimatedPressable>
@@ -106,7 +117,14 @@ export function SettingsMainScreen({
       <ScrollView
         ref={scrollRef}
         style={styles.scroll}
-        contentContainerStyle={styles.content}
+        contentContainerStyle={[
+          styles.content,
+          {
+            paddingBottom: Math.max(32, insets.bottom + 16),
+            paddingLeft: insets.left,
+            paddingRight: insets.right,
+          },
+        ]}
         keyboardShouldPersistTaps="handled"
         scrollEventThrottle={16}
         onScroll={handleScroll}

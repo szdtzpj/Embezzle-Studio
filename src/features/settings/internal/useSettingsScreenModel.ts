@@ -7,11 +7,13 @@ import {
 } from '../../../app/workspace/WorkspaceSessionProvider';
 import { useWorkspaceSession } from '../../../app/workspace/internal/WorkspaceSessionContext';
 import { appInfo } from '../../../data/appInfo';
+import { defaultProviders } from '../../../data/providerCatalog';
 import type {
   Capability,
   ExperienceMode,
   ModelInfo,
   ModelTask,
+  ProviderKind,
   ProviderProfile,
 } from '../../../domain/types';
 import {
@@ -33,7 +35,10 @@ import { removeProviderFromWorkspace } from '../../../services/providerLifecycle
 import {
   compareProviderEndpointBinding,
   inspectProviderEndpoint,
+  isSensitiveCustomHeaderName,
+  PROVIDER_CUSTOM_HEADER_LIMITS,
   providerEndpointFingerprint,
+  validateProviderCustomHeaders,
 } from '../../../services/providerSetup';
 import {
   isProviderEnabled,
@@ -42,7 +47,10 @@ import {
 import { createId } from '../../../services/id';
 import { useAppearance } from '../../../ui/appearance/AppearanceProvider';
 import type { SettingsScreenModel } from './SettingsScreen';
-import { useSettingsScreenDrafts } from './useSettingsDrafts';
+import {
+  useSettingsScreenDrafts,
+  type ProviderCustomHeaderDraft,
+} from './useSettingsDrafts';
 import { SettingsWorkspaceRuntime } from './SettingsWorkspaceRuntime';
 
 const candidateModelFilters: Array<{ key: ModelCapabilityFilter; label: string }> = [
@@ -57,6 +65,26 @@ const candidateModelFilters: Array<{ key: ModelCapabilityFilter; label: string }
 ];
 
 const candidateModelPageSize = 60;
+
+const defaultBaseUrlByKind: Partial<Record<ProviderKind, string>> = Object.fromEntries(
+  defaultProviders.map((provider) => [provider.kind, provider.baseUrl])
+);
+
+const presetDefaultBaseUrls = new Set<string>([
+  ...defaultProviders.map((provider) => provider.baseUrl),
+  'https://your-provider.example.com/v1',
+]);
+
+function toCustomHeaderDrafts(
+  headers?: ProviderProfile['customHeaders']
+): ProviderCustomHeaderDraft[] {
+  return (headers ?? []).map((header, index) => ({
+    id: createId(`hdr-${index}`),
+    key: header.key,
+    value: header.value,
+    enabled: header.enabled !== false,
+  }));
+}
 
 function getSelectableModels(provider: ProviderProfile): ModelInfo[] {
   return provider.models.filter((model) => model.source !== 'remote');
@@ -77,7 +105,16 @@ export function useSettingsScreenModel(onClose: () => void): SettingsScreenModel
   const appearance = useAppearance();
   const session = useWorkspaceSession();
   const status = useWorkspaceStatus();
-  const workspace = useWorkspaceSelector((snapshot) => snapshot);
+  // 拆分为最小独立字段切片，避免任意工作区变动引发设置模型全量重计算
+  const providers = useWorkspaceSelector((snapshot) => snapshot.providers);
+  const activeProviderId = useWorkspaceSelector((snapshot) => snapshot.activeProviderId);
+  const activeModelIdByProvider = useWorkspaceSelector(
+    (snapshot) => snapshot.activeModelIdByProvider
+  );
+  const modelCandidatesByProvider = useWorkspaceSelector(
+    (snapshot) => snapshot.modelCandidatesByProvider
+  );
+  const experienceMode = useWorkspaceSelector((snapshot) => snapshot.experienceMode);
   const runtime = useMemo(() => new SettingsWorkspaceRuntime(session), [session]);
   const execute = runtime.execute.bind(runtime);
   const activity = useChatActivity();
@@ -100,6 +137,12 @@ export function useSettingsScreenModel(onClose: () => void): SettingsScreenModel
     setProviderApiKeyDraft,
     providerKeyBindingFingerprint,
     setProviderKeyBindingFingerprint,
+    providerAuthHeaderModeDraft,
+    setProviderAuthHeaderModeDraft,
+    providerImageApiModeDraft,
+    setProviderImageApiModeDraft,
+    providerCustomHeadersDraft,
+    setProviderCustomHeadersDraft,
     modelSearchQuery,
     setModelSearchQuery,
     modelCapabilityFilter,
@@ -116,8 +159,8 @@ export function useSettingsScreenModel(onClose: () => void): SettingsScreenModel
 
   const workspaceReadOnly = status.phase !== 'ready';
   const activeProvider = useMemo(
-    () => resolveEnabledProvider(workspace.providers, workspace.activeProviderId),
-    [workspace.activeProviderId, workspace.providers]
+    () => resolveEnabledProvider(providers, activeProviderId),
+    [activeProviderId, providers]
   );
 
   useEffect(() => {
@@ -129,10 +172,16 @@ export function useSettingsScreenModel(onClose: () => void): SettingsScreenModel
     setProviderKeyBindingFingerprint(
       activeProvider.apiKey ? providerEndpointFingerprint(activeProvider) ?? null : null
     );
+    setProviderAuthHeaderModeDraft(activeProvider.authHeaderMode ?? 'auto');
+    setProviderImageApiModeDraft(activeProvider.imageApiMode ?? 'auto');
+    setProviderCustomHeadersDraft(toCustomHeaderDrafts(activeProvider.customHeaders));
   }, [
     activeProvider,
     setProviderApiKeyDraft,
+    setProviderAuthHeaderModeDraft,
     setProviderBaseUrlDraft,
+    setProviderCustomHeadersDraft,
+    setProviderImageApiModeDraft,
     setProviderKeyBindingFingerprint,
     setProviderKindDraft,
     setProviderNameDraft,
@@ -143,7 +192,7 @@ export function useSettingsScreenModel(onClose: () => void): SettingsScreenModel
     [activeProvider]
   );
   const savedActiveModelId = activeProvider
-    ? workspace.activeModelIdByProvider[activeProvider.id]
+    ? activeModelIdByProvider[activeProvider.id]
     : '';
   const activeModelId = activeProvider
     ? addedModels.some((model) => model.id === savedActiveModelId)
@@ -159,9 +208,13 @@ export function useSettingsScreenModel(onClose: () => void): SettingsScreenModel
       }),
     [providerApiKeyDraft, providerBaseUrlDraft, providerKindDraft]
   );
+  const customHeadersValidation = useMemo(
+    () => validateProviderCustomHeaders(providerCustomHeadersDraft),
+    [providerCustomHeadersDraft]
+  );
   const modelCandidates = useMemo(
-    () => (activeProvider ? workspace.modelCandidatesByProvider[activeProvider.id] ?? [] : []),
-    [activeProvider, workspace.modelCandidatesByProvider]
+    () => (activeProvider ? modelCandidatesByProvider[activeProvider.id] ?? [] : []),
+    [activeProvider, modelCandidatesByProvider]
   );
   const addedModelIds = useMemo(
     () => new Set(addedModels.map((model) => model.id)),
@@ -202,6 +255,12 @@ export function useSettingsScreenModel(onClose: () => void): SettingsScreenModel
 
   function providerFromDraft(): ProviderProfile | null {
     if (!activeProvider) return null;
+    if (!customHeadersValidation.valid) {
+      setNotice(
+        customHeadersValidation.issues[0]?.message ?? '自定义请求头包含无效或受限字段，请检查后重试。'
+      );
+      return null;
+    }
     const inspection = inspectProviderEndpoint(providerBaseUrlDraft, {
       kind: providerKindDraft,
       apiKey: providerApiKeyDraft,
@@ -224,15 +283,24 @@ export function useSettingsScreenModel(onClose: () => void): SettingsScreenModel
       setNotice('API Key 不是在当前最终端点下输入的；为防止跨端点发送，请确认地址后重新输入对应 Key。');
       return null;
     }
-    return {
+    const nextProvider: ProviderProfile = {
       ...activeProvider,
       name: providerNameDraft.trim() || activeProvider.name,
       kind: providerKindDraft,
       baseUrl: inspection.normalizedBaseUrl,
       apiKey: providerApiKeyDraft.trim() || undefined,
+      authHeaderMode: providerAuthHeaderModeDraft,
+      imageApiMode: providerImageApiModeDraft,
       models: binding.mustClearModels ? [] : activeProvider.models,
       capabilities: binding.mustClearModels ? ['text', 'streaming'] : activeProvider.capabilities,
     };
+    if (customHeadersValidation.normalized.length > 0) {
+      nextProvider.customHeaders = customHeadersValidation.normalized.map((header) => ({ ...header }));
+    } else {
+      // 显式删除继承自 activeProvider 的旧 customHeaders，防止清空后残留
+      delete nextProvider.customHeaders;
+    }
+    return nextProvider;
   }
 
   async function persistProviderDraft(): Promise<ProviderProfile | null> {
@@ -287,15 +355,69 @@ export function useSettingsScreenModel(onClose: () => void): SettingsScreenModel
     kind?: ProviderProfile['kind'];
     baseUrl?: string;
   }) {
+    const previousFingerprint = providerEndpointFingerprint({
+      kind: providerKindDraft,
+      baseUrl: providerBaseUrlDraft,
+    });
     const nextKind = patch.kind ?? providerKindDraft;
-    const nextBaseUrl = patch.baseUrl ?? providerBaseUrlDraft;
+    let nextBaseUrl = patch.baseUrl ?? providerBaseUrlDraft;
+
+    // 切换协议类型且未显式传入 baseUrl 时，若当前为预设地址或在简单模式下切向官方预设，自动联动推荐地址
+    if (patch.kind !== undefined && patch.baseUrl === undefined && patch.kind !== providerKindDraft) {
+      const trimmedCurrentUrl = providerBaseUrlDraft.trim();
+      const shouldSyncDefaultUrl =
+        !trimmedCurrentUrl ||
+        presetDefaultBaseUrls.has(trimmedCurrentUrl) ||
+        (experienceMode === 'simple' && patch.kind !== 'custom' && patch.kind !== 'new-api-relay');
+      const recommendedUrl = defaultBaseUrlByKind[patch.kind];
+      if (shouldSyncDefaultUrl && recommendedUrl) {
+        nextBaseUrl = recommendedUrl;
+      }
+    }
+
     if (patch.kind) setProviderKindDraft(patch.kind);
-    if (patch.baseUrl !== undefined) setProviderBaseUrlDraft(patch.baseUrl);
+    if (patch.baseUrl !== undefined || nextBaseUrl !== providerBaseUrlDraft) {
+      setProviderBaseUrlDraft(nextBaseUrl);
+    }
+
     const nextFingerprint = providerEndpointFingerprint({ kind: nextKind, baseUrl: nextBaseUrl });
     if (providerApiKeyDraft && providerKeyBindingFingerprint !== nextFingerprint) {
       setProviderApiKeyDraft('');
       setProviderKeyBindingFingerprint(null);
     }
+    const hasEnabledSensitiveHeader = providerCustomHeadersDraft.some(
+      (header) =>
+        header.enabled &&
+        isSensitiveCustomHeaderName(header.key) &&
+        header.value.trim().length > 0
+    );
+    if (previousFingerprint !== nextFingerprint && hasEnabledSensitiveHeader) {
+      setNotice('服务商协议或地址已变更，请核对自定义请求头中的鉴权凭据是否仍适用于新端点。');
+    }
+  }
+
+  function addCustomHeaderDraft() {
+    if (providerCustomHeadersDraft.length >= PROVIDER_CUSTOM_HEADER_LIMITS.maxCount) {
+      setNotice(`自定义请求头最多支持 ${PROVIDER_CUSTOM_HEADER_LIMITS.maxCount} 条。`);
+      return;
+    }
+    setProviderCustomHeadersDraft((current) => [
+      ...current,
+      { id: createId('hdr'), key: '', value: '', enabled: true },
+    ]);
+  }
+
+  function updateCustomHeaderDraft(
+    id: string,
+    patch: Partial<Pick<ProviderCustomHeaderDraft, 'key' | 'value' | 'enabled'>>
+  ) {
+    setProviderCustomHeadersDraft((current) =>
+      current.map((item) => (item.id === id ? { ...item, ...patch } : item))
+    );
+  }
+
+  function removeCustomHeaderDraft(id: string) {
+    setProviderCustomHeadersDraft((current) => current.filter((item) => item.id !== id));
   }
 
   async function selectProvider(providerId: string): Promise<boolean> {
@@ -515,8 +637,24 @@ export function useSettingsScreenModel(onClose: () => void): SettingsScreenModel
     if (!ensureWritable() || !activeProvider) return;
     const configuredProvider = await persistProviderDraft();
     if (!configuredProvider) return;
-    if (!configuredProvider.apiKey?.trim() && configuredProvider.kind !== 'volcengine-ark') {
-      setNotice('连接检查需要该服务商自己的 API Key；不会发送生成请求，只请求模型目录。');
+    const hasCustomAuthHeader =
+      configuredProvider.authHeaderMode === 'custom' &&
+      (configuredProvider.customHeaders ?? []).some(
+        (header) =>
+          header.enabled !== false &&
+          header.key.trim().length > 0 &&
+          header.value.trim().length > 0
+      );
+    if (
+      !configuredProvider.apiKey?.trim() &&
+      configuredProvider.kind !== 'volcengine-ark' &&
+      !hasCustomAuthHeader
+    ) {
+      setNotice(
+        configuredProvider.authHeaderMode === 'custom'
+          ? '当前为自定义鉴权模式，请先添加并启用包含鉴权信息的自定义请求头，再检查连接。'
+          : '连接检查需要该服务商自己的 API Key；不会发送生成请求，只请求模型目录。'
+      );
       return;
     }
     setRefreshingModels(true);
@@ -602,16 +740,20 @@ export function useSettingsScreenModel(onClose: () => void): SettingsScreenModel
     appearance: {
       colorMode: appearance.colorMode,
       onSetColorMode: appearance.setColorMode,
-      experienceMode: workspace.experienceMode,
+      experienceMode,
       onSetExperienceMode: setExperienceMode,
     },
     providers: {
-      providers: workspace.providers,
+      providers,
       activeProvider,
       nameDraft: providerNameDraft,
       kindDraft: providerKindDraft,
       baseUrlDraft: providerBaseUrlDraft,
       apiKeyDraft: providerApiKeyDraft,
+      authHeaderModeDraft: providerAuthHeaderModeDraft,
+      imageApiModeDraft: providerImageApiModeDraft,
+      customHeadersDraft: providerCustomHeadersDraft,
+      customHeadersValidation,
       endpointInspection: providerEndpointInspection,
       select: selectProvider,
       toggleEnabled: toggleProviderEnabled,
@@ -630,6 +772,11 @@ export function useSettingsScreenModel(onClose: () => void): SettingsScreenModel
             : null
         );
       },
+      setAuthHeaderModeDraft: setProviderAuthHeaderModeDraft,
+      setImageApiModeDraft: setProviderImageApiModeDraft,
+      addCustomHeaderDraft,
+      updateCustomHeaderDraft,
+      removeCustomHeaderDraft,
       saveDraft: saveProviderDraft,
     },
     models: {

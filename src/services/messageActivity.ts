@@ -485,17 +485,46 @@ function toolModuleFromItem(tool: ToolActivityItem, sequence: number): ToolActiv
  * Fall back to reasoning + toolActivity sorted by sequence/startedAt.
  */
 export function buildMessageActivityModules(message: ChatMessage): MessageActivityModule[] {
+  const hasExplicitThinkingDuration =
+    typeof message.thinkingDurationMs === 'number' &&
+    Number.isFinite(message.thinkingDurationMs) &&
+    message.thinkingDurationMs >= 0;
+
   if (message.activityTimeline?.length) {
     const finishedAt =
       message.requestMetrics?.durationMs != null
         ? message.createdAt + message.requestMetrics.durationMs
         : undefined;
+    const thinkingStepsCount = message.activityTimeline.filter(
+      (step) => step.kind === 'thinking'
+    ).length;
+    // 若消息已结束且仅有一段思考过程并带有精确 thinkingDurationMs，优先采用之而非总请求耗时
+    const timelineWithThinkingDuration =
+      hasExplicitThinkingDuration &&
+      thinkingStepsCount === 1 &&
+      message.status !== 'pending'
+        ? message.activityTimeline.map((step) => {
+            if (step.kind !== 'thinking' || step.finishedAt !== undefined) {
+              return step;
+            }
+            const start = step.startedAt ?? message.createdAt;
+            const end = start + message.thinkingDurationMs!;
+            return {
+              ...step,
+              startedAt: start,
+              status: 'completed' as const,
+              finishedAt: end,
+              title: formatThinkingRowTitle('completed', start, end),
+            };
+          })
+        : message.activityTimeline;
+
     // Defensive: terminal messages must not keep a live "running" timer in the UI.
     const timeline =
-      finalizeActivityTimelineForTerminalMessage(message.activityTimeline, {
+      finalizeActivityTimelineForTerminalMessage(timelineWithThinkingDuration, {
         messageStatus: message.status,
         ...(finishedAt !== undefined ? { finishedAt } : {}),
-      }) ?? message.activityTimeline;
+      }) ?? timelineWithThinkingDuration;
 
     const modules = timeline
       .slice()
@@ -526,9 +555,11 @@ export function buildMessageActivityModules(message: ChatMessage): MessageActivi
       thinkingRunning || message.status === 'pending' ? 'running' : 'completed';
     const finishedAt =
       message.status === 'ready' || message.status === 'error' || message.status === 'cancelled'
-        ? message.requestMetrics?.durationMs
-          ? message.createdAt + message.requestMetrics.durationMs
-          : undefined
+        ? hasExplicitThinkingDuration
+          ? message.createdAt + message.thinkingDurationMs!
+          : message.requestMetrics?.durationMs !== undefined
+            ? message.createdAt + message.requestMetrics.durationMs
+            : undefined
         : undefined;
     modules.push({
       kind: 'thinking',

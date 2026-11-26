@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react';
 import {
   KeyboardAvoidingView,
-  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -9,8 +8,10 @@ import {
   Text,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AlertTriangle, CheckCircle2 } from 'lucide-react-native';
 import { AnimatedPressable } from './AnimatedPressable';
+import { OverlayPortal } from './AppDialogHost';
 import { MotionItem } from './Motion';
 import { useKelivoTheme, type KelivoTheme } from '../theme';
 import type { DialogTone } from './dialogService';
@@ -25,6 +26,8 @@ export interface NoticeDialogProps {
   onClose: () => void;
 }
 
+export type NoticeDialogContentProps = Omit<NoticeDialogProps, 'visible'>;
+
 function DefaultIcon({ tone }: { tone: DialogTone }) {
   const theme = useKelivoTheme();
   if (tone === 'warning') {
@@ -36,79 +39,101 @@ function DefaultIcon({ tone }: { tone: DialogTone }) {
   return <CheckCircle2 size={22} color={theme.colors.success} strokeWidth={2.25} />;
 }
 
-export function NoticeDialog({
-  visible,
+/**
+ * 通知弹窗纯内容组件：供 `AppDialogHost` 直接渲染以避免 Portal 循环注册。
+ */
+export function NoticeDialogContent({
   title,
   description,
   buttonLabel = '好的',
   tone = 'primary',
   icon,
   onClose,
-}: NoticeDialogProps) {
+}: NoticeDialogContentProps) {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = getStyles(theme, tone);
 
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      onRequestClose={onClose}
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined}
+      style={styles.keyboard}
     >
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined}
-        style={styles.keyboard}
+      <Pressable
+        style={[
+          styles.scrim,
+          {
+            paddingTop: Math.max(24, insets.top + 12),
+            paddingBottom: Math.max(24, insets.bottom + 12),
+            paddingLeft: Math.max(24, insets.left + 12),
+            paddingRight: Math.max(24, insets.right + 12),
+          },
+        ]}
+        onPress={onClose}
       >
-        <Pressable style={styles.scrim} onPress={onClose}>
-          <MotionItem
-            delay={20}
-            distance={12}
-            duration={220}
-            scaleFrom={0.94}
-            style={styles.dialogMotion}
+        <MotionItem
+          delay={20}
+          distance={12}
+          duration={220}
+          scaleFrom={0.94}
+          style={styles.dialogMotion}
+        >
+          <Pressable
+            accessible={false}
+            accessibilityViewIsModal
+            style={styles.dialog}
+            onPress={(event) => event.stopPropagation()}
           >
-            <Pressable
-              accessible={false}
-              accessibilityViewIsModal
-              style={styles.dialog}
-              onPress={(event) => event.stopPropagation()}
+            <ScrollView
+              style={styles.contentScroll}
+              contentContainerStyle={styles.contentScrollBody}
+              bounces={false}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
             >
-              <ScrollView
-                style={styles.contentScroll}
-                contentContainerStyle={styles.contentScrollBody}
-                bounces={false}
-                keyboardShouldPersistTaps="handled"
-                showsVerticalScrollIndicator={false}
+              <View
+                accessible
+                accessibilityRole="alert"
+                accessibilityLiveRegion="assertive"
+                style={styles.messageBlock}
               >
-                <View
-                  accessible
-                  accessibilityRole="alert"
-                  accessibilityLiveRegion="assertive"
-                  style={styles.messageBlock}
-                >
-                  <View style={styles.iconWrap}>
-                    {icon ?? <DefaultIcon tone={tone} />}
-                  </View>
-                  <Text style={styles.title}>{title}</Text>
-                  <Text style={styles.description}>{description}</Text>
+                <View style={styles.iconWrap}>
+                  {icon ?? <DefaultIcon tone={tone} />}
                 </View>
-              </ScrollView>
-              <View style={styles.footer}>
-                <AnimatedPressable
-                  accessibilityRole="button"
-                  accessibilityLabel={buttonLabel}
-                  onPress={onClose}
-                  haptic="light"
-                  style={styles.button}
-                >
-                  <Text style={styles.buttonText}>{buttonLabel}</Text>
-                </AnimatedPressable>
+                <Text style={styles.title}>{title}</Text>
+                <Text style={styles.description}>{description}</Text>
               </View>
-            </Pressable>
-          </MotionItem>
-        </Pressable>
-      </KeyboardAvoidingView>
-    </Modal>
+            </ScrollView>
+            <View style={styles.footer}>
+              <AnimatedPressable
+                accessibilityRole="button"
+                accessibilityLabel={buttonLabel}
+                onPress={onClose}
+                haptic="light"
+                style={styles.button}
+              >
+                <Text style={styles.buttonText}>{buttonLabel}</Text>
+              </AnimatedPressable>
+            </View>
+          </Pressable>
+        </MotionItem>
+      </Pressable>
+    </KeyboardAvoidingView>
+  );
+}
+
+/**
+ * 声明式通知弹窗，经由 `OverlayPortal` 渲染于统一顶层宿主。
+ */
+export function NoticeDialog({
+  visible,
+  onClose,
+  ...rest
+}: NoticeDialogProps) {
+  return (
+    <OverlayPortal visible={visible} layer="dialog" onRequestClose={onClose}>
+      <NoticeDialogContent onClose={onClose} {...rest} />
+    </OverlayPortal>
   );
 }
 
@@ -143,12 +168,6 @@ function createStyles(theme: KelivoTheme, tone: DialogTone) {
       paddingHorizontal: 24,
       paddingVertical: 24,
       backgroundColor: theme.colors.scrim,
-      ...(Platform.OS === 'web'
-        ? ({
-            position: 'fixed',
-            inset: 0,
-          } as any)
-        : {}),
     },
     dialogMotion: {
       width: '100%',

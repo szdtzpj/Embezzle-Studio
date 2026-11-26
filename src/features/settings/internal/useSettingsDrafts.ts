@@ -1,9 +1,22 @@
 import { useState } from 'react';
 
-import type { AppWorkspace, ProviderProfile } from '../../../domain/types';
+import type {
+  AppWorkspace,
+  ProviderAuthHeaderMode,
+  ProviderImageApiMode,
+  ProviderProfile,
+} from '../../../domain/types';
 import type { AppUpdateInfo } from '../../../services/updateChecker';
 import type { GenerationTaskFilter } from '../../../services/generationTasks';
 import type { ModelCapabilityFilter } from '../../../services/modelCapabilities';
+
+/** 服务商自定义请求头草稿行（含稳定本地 id，防止编辑 key 时输入框失焦）。 */
+export interface ProviderCustomHeaderDraft {
+  id: string;
+  key: string;
+  value: string;
+  enabled: boolean;
+}
 
 /** Provider/model/update drafts owned by the Settings screen model. */
 export function useSettingsScreenDrafts(candidatePageSize: number) {
@@ -16,6 +29,12 @@ export function useSettingsScreenDrafts(candidatePageSize: number) {
   const [providerApiKeyDraft, setProviderApiKeyDraft] = useState('');
   const [providerKeyBindingFingerprint, setProviderKeyBindingFingerprint] =
     useState<string | null>(null);
+  const [providerAuthHeaderModeDraft, setProviderAuthHeaderModeDraft] =
+    useState<ProviderAuthHeaderMode>('auto');
+  const [providerImageApiModeDraft, setProviderImageApiModeDraft] =
+    useState<ProviderImageApiMode>('auto');
+  const [providerCustomHeadersDraft, setProviderCustomHeadersDraft] =
+    useState<ProviderCustomHeaderDraft[]>([]);
   const [modelSearchQuery, setModelSearchQuery] = useState('');
   const [modelCapabilityFilter, setModelCapabilityFilter] =
     useState<ModelCapabilityFilter>('all');
@@ -33,6 +52,9 @@ export function useSettingsScreenDrafts(candidatePageSize: number) {
     providerBaseUrlDraft, setProviderBaseUrlDraft,
     providerApiKeyDraft, setProviderApiKeyDraft,
     providerKeyBindingFingerprint, setProviderKeyBindingFingerprint,
+    providerAuthHeaderModeDraft, setProviderAuthHeaderModeDraft,
+    providerImageApiModeDraft, setProviderImageApiModeDraft,
+    providerCustomHeadersDraft, setProviderCustomHeadersDraft,
     modelSearchQuery, setModelSearchQuery,
     modelCapabilityFilter, setModelCapabilityFilter,
     candidateModelRenderLimit, setCandidateModelRenderLimit,

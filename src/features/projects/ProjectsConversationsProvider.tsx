@@ -11,9 +11,6 @@ import {
   isWorkspaceCommitRejectedError,
 } from '../../app/workspace/internal/WorkspaceCommitPort';
 import { useWorkspaceSession } from '../../app/workspace/internal/WorkspaceSessionContext';
-import {
-  useWorkspaceStatus,
-} from '../../app/workspace/WorkspaceSessionProvider';
 import { createId } from '../../services/id';
 import { discardUncommittedAttachments } from '../../services/mediaStorage';
 import {
@@ -54,7 +51,6 @@ export function ProjectsConversationsProvider(props: {
 }): React.ReactElement {
   const { children, ports = unlockedProjectsPorts } = props;
   const session = useWorkspaceSession();
-  const workspaceStatus = useWorkspaceStatus();
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const cleanupDeletedConversation = useCallback(async (conversationId: string) => {
@@ -101,13 +97,14 @@ export function ProjectsConversationsProvider(props: {
 
   const execute = useCallback(
     async (command: ProjectConversationCommand): Promise<ProjectConversationResult> => {
-      if (workspaceStatus.phase === 'replacing') {
+      const phase = session.getStatus().phase;
+      if (phase === 'replacing') {
         return {
           ok: false,
           notice: '正在验证并导入备份，暂时不能修改工作区。',
         };
       }
-      if (workspaceStatus.phase !== 'ready') {
+      if (phase !== 'ready') {
         return {
           ok: false,
           notice: '工作区加载失败，当前为只读模式，无法保存更改。',
@@ -125,7 +122,7 @@ export function ProjectsConversationsProvider(props: {
         };
       }
     },
-    [runtime, workspaceStatus.phase]
+    [runtime, session]
   );
 
   const value = useMemo<ProjectsConversationsContextValue>(

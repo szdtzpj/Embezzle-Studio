@@ -446,7 +446,7 @@ describe('stageReleaseForPages', () => {
       publicBaseUrl,
       fetchImpl,
       ...unsafeOptions,
-    })).rejects.toThrow();
+    })).rejects.toThrow(/(?:PUBLIC_RELEASE_BASE_URL|GITHUB_REPOSITORY)/);
 
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(await exists(path.join(outputDir, 'release.html'))).toBe(false);

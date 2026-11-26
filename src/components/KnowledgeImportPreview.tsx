@@ -1,9 +1,10 @@
 import { Check, FileText, LoaderCircle, X } from 'lucide-react-native';
 import { useMemo } from 'react';
-import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { KnowledgeImportDraft, KnowledgeImportSection } from '../services/documentImport';
+import { OverlayPortal } from '../ui/components/AppDialogHost';
 import { useKelivoTheme } from '../ui/theme';
 
 export interface KnowledgeImportPreviewProps {
@@ -45,9 +46,13 @@ export function KnowledgeImportPreview({
   };
 
   return (
-    <Modal visible transparent animationType="slide" onRequestClose={onClose}>
-      <View style={styles.scrim}>
-        <SafeAreaView style={styles.sheet}>
+    <OverlayPortal
+      visible={visible && draft !== null}
+      layer="sheet"
+      onRequestClose={onClose}
+    >
+      <View style={[styles.scrim, { paddingTop: Math.max(16, insets.top) }]}>
+        <View style={[styles.sheet, { paddingLeft: insets.left, paddingRight: insets.right }]}>
           <View style={styles.header}>
             <View style={styles.headerIcon}><FileText size={20} color={theme.colors.primary} strokeWidth={2.2} /></View>
             <View style={styles.headerCopy}>
@@ -127,9 +132,9 @@ export function KnowledgeImportPreview({
               <Text style={styles.confirmText}>{busy ? '正在保存…' : '保存选中资料'}</Text>
             </Pressable>
           </ScrollView>
-        </SafeAreaView>
+        </View>
       </View>
-    </Modal>
+    </OverlayPortal>
   );
 }
 

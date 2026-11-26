@@ -1,5 +1,6 @@
 import { ArrowLeft, Check, Monitor, Sun, Moon } from 'lucide-react-native';
 import { StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AnimatedPressable } from '../../components/AnimatedPressable';
 import { MotionItem, MotionSwap } from '../../components/Motion';
 import { SectionCard } from '../../components/settings/SettingsList';
@@ -16,6 +17,7 @@ type ModeOption = { key: 'system' | 'light' | 'dark'; label: string; icon: React
 
 export function ColorModeScreen({ readOnly, colorMode, onSetColorMode, onBack }: ColorModeScreenProps) {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = getStyles(theme);
   const options: ModeOption[] = [
     {
@@ -37,7 +39,16 @@ export function ColorModeScreen({ readOnly, colorMode, onSetColorMode, onBack }:
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
+      <View
+        style={[
+          styles.header,
+          {
+            paddingTop: Math.max(8, insets.top),
+            paddingLeft: Math.max(6, insets.left),
+            paddingRight: Math.max(6, insets.right),
+          },
+        ]}
+      >
         <AnimatedPressable accessibilityRole="button" onPress={onBack} style={styles.headerButton}>
           <ArrowLeft size={22} color={theme.colors.text} strokeWidth={2.2} />
         </AnimatedPressable>
@@ -45,7 +56,16 @@ export function ColorModeScreen({ readOnly, colorMode, onSetColorMode, onBack }:
         <View style={styles.headerButton} />
       </View>
 
-      <View style={styles.content}>
+      <View
+        style={[
+          styles.content,
+          {
+            paddingBottom: Math.max(24, insets.bottom + 16),
+            paddingLeft: insets.left,
+            paddingRight: insets.right,
+          },
+        ]}
+      >
         <SectionCard>
           {options.map((option, index) => {
             const selected = option.key === colorMode;

@@ -16,8 +16,6 @@ import { useMemo, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   Image,
-  Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -29,6 +27,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { IncomingShareItem, IncomingShareSnapshot } from '../../services/incomingShare';
 import { useKelivoTheme, type KelivoTheme } from '../../ui/theme';
 import { AnimatedPressable } from '../../ui/components/AnimatedPressable';
+import { OverlayPortal } from '../../ui/components/AppDialogHost';
 
 export type IncomingShareDestination = 'conversation' | 'knowledge' | 'artifact';
 
@@ -154,18 +153,23 @@ export function IncomingShareSheet({
   if (!visible || snapshot.items.length === 0) return null;
 
   return (
-    <Modal
-      visible
-      transparent
-      statusBarTranslucent
-      animationType="slide"
+    <OverlayPortal
+      visible={visible && snapshot.items.length > 0}
+      layer="sheet"
       onRequestClose={onClose}
     >
-      <View style={styles.root}>
+      <View style={[styles.root, { paddingTop: Math.max(16, insets.top) }]}>
         <Pressable accessibilityRole="button" accessibilityLabel="关闭分享预览" style={styles.scrim} onPress={onClose} />
         <View
           accessibilityViewIsModal
-          style={[styles.sheet, { paddingBottom: Math.max(insets.bottom + 12, 24) }]}
+          style={[
+            styles.sheet,
+            {
+              paddingBottom: Math.max(insets.bottom + 12, 24),
+              paddingLeft: insets.left,
+              paddingRight: insets.right,
+            },
+          ]}
         >
           <View style={styles.handle} />
           <View style={styles.header}>
@@ -289,7 +293,7 @@ export function IncomingShareSheet({
           </ScrollView>
         </View>
       </View>
-    </Modal>
+    </OverlayPortal>
   );
 }
 
@@ -299,7 +303,6 @@ function createStyles(theme: KelivoTheme) {
     scrim: {
       ...StyleSheet.absoluteFill,
       backgroundColor: theme.colors.scrim,
-      ...(Platform.OS === 'web' ? ({ position: 'fixed', inset: 0 } as any) : {}),
     },
     sheet: {
       maxHeight: '92%',

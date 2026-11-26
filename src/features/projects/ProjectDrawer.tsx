@@ -1,5 +1,5 @@
 import { BlurView } from 'expo-blur';
-import { Check, Folder, MoreHorizontal, PenSquare, Pencil, Pin, Search, Share2, Trash2, X } from 'lucide-react-native';
+import { Check, Download, FileText, Folder, MoreHorizontal, PenSquare, Pencil, Pin, Search, Share2, Trash2, X } from 'lucide-react-native';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   InteractionManager,
@@ -14,10 +14,11 @@ import {
 } from 'react-native';
 
 import {
+  useWorkspacePhase,
   useWorkspaceSelector,
-  useWorkspaceStatus,
 } from '../../app/workspace/WorkspaceSessionProvider';
-import type { ChatConversation } from '../../domain/types';
+import type { AppWorkspace, ChatConversation } from '../../domain/types';
+import { exportConversation } from '../../services/conversationExport';
 import { deletePersistedAttachments } from '../../services/mediaStorage';
 import {
   buildWorkspaceSearchIndex,
@@ -50,7 +51,10 @@ export interface ProjectDrawerChatPort {
   showNotice(message: string): void;
 }
 
-const conversationActionMenuHeight = 198;
+const conversationActionMenuHeight = 276;
+const EMPTY_PROJECTS: AppWorkspace['projects'] = [];
+const EMPTY_CONVERSATIONS: AppWorkspace['conversations'] = [];
+const EMPTY_TEMPLATES: AppWorkspace['promptTemplates'] = [];
 
 function dominantConversationModel(conversation: ChatConversation) {
   const counts = new Map<
@@ -103,11 +107,8 @@ export function ProjectDrawer(props: { chat: ProjectDrawerChatPort }): React.Rea
   const theme = useKelivoTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const navigation = useProjectConversationNavigation();
-  const status = useWorkspaceStatus();
-  const workspace = useWorkspaceSelector((snapshot) => snapshot);
-  const workspaceRef = useRef(workspace);
-  workspaceRef.current = workspace;
-  const readOnly = status.phase !== 'ready';
+  const workspacePhase = useWorkspacePhase();
+  const readOnly = workspacePhase !== 'ready';
   const [searchQuery, setSearchQuery] = useState('');
   const [searchIndex, setSearchIndex] = useState<WorkspaceSearchIndex | null>(null);
   const [panelHeight, setPanelHeight] = useState(0);
@@ -117,6 +118,37 @@ export function ProjectDrawer(props: { chat: ProjectDrawerChatPort }): React.Rea
   const [renameDraft, setRenameDraft] = useState('');
   const [moveConversationId, setMoveConversationId] = useState<string | null>(null);
   const [deleteConversationId, setDeleteConversationId] = useState<string | null>(null);
+
+  // 仅在抽屉或抽屉关联弹窗开启时订阅列表字段，避免后台流式生成触发抽屉重渲染。
+  const drawerSubscribed = Boolean(
+    navigation.drawerOpen ||
+    renamingConversationId ||
+    moveConversationId ||
+    deleteConversationId
+  );
+  const projects = useWorkspaceSelector((snapshot) =>
+    drawerSubscribed ? snapshot.projects : EMPTY_PROJECTS
+  );
+  const conversations = useWorkspaceSelector((snapshot) =>
+    drawerSubscribed ? snapshot.conversations : EMPTY_CONVERSATIONS
+  );
+  const promptTemplates = useWorkspaceSelector((snapshot) =>
+    drawerSubscribed ? snapshot.promptTemplates : EMPTY_TEMPLATES
+  );
+  const activeProjectId = useWorkspaceSelector((snapshot) => snapshot.activeProjectId);
+  const activeConversationId = useWorkspaceSelector((snapshot) => snapshot.activeConversationId);
+  const workspace = useMemo(
+    () => ({
+      projects,
+      conversations,
+      promptTemplates,
+      activeProjectId,
+      activeConversationId,
+    }),
+    [projects, conversations, promptTemplates, activeProjectId, activeConversationId]
+  );
+  const workspaceRef = useRef(workspace);
+  workspaceRef.current = workspace;
   const actionIdRef = useRef(conversationActionId);
   actionIdRef.current = conversationActionId;
 
@@ -273,6 +305,20 @@ export function ProjectDrawer(props: { chat: ProjectDrawerChatPort }): React.Rea
     }
   }
 
+  /** 将抽屉中选中的对话导出为 Markdown 或脱敏 JSON 文件。 */
+  async function exportDrawerConversation(
+    conversation: ChatConversation,
+    format: 'markdown' | 'json'
+  ) {
+    setConversationActionId(null);
+    try {
+      const result = await exportConversation({ conversation, format });
+      chat.showNotice(`已导出 ${result.filename}`);
+    } catch (error) {
+      chat.showNotice(error instanceof Error ? error.message : '导出对话失败，请稍后再试。');
+    }
+  }
+
   return (
     <>
       <ProjectDrawerShell
@@ -401,23 +447,37 @@ export function ProjectDrawer(props: { chat: ProjectDrawerChatPort }): React.Rea
             <BlurView intensity={38} tint={theme.dark ? 'dark' : 'light'} blurMethod="dimezisBlurView" style={styles.frost}>
               <Pressable style={styles.frostTarget} onPress={() => setConversationActionId(null)} />
             </BlurView>
-            <View style={[styles.actionMenu, { top: conversationActionMenuTop }]}>
-              <AnimatedPressable accessibilityRole="button" onPress={() => void execute({ type: 'conversation.pin', conversationId: actionConversation.id, pinned: !actionConversation.pinnedAt })} style={styles.actionRow}>
-                <Text style={styles.actionText}>{actionConversation.pinnedAt ? '取消置顶' : '置顶'}</Text>
-                <Pin size={16} color={theme.colors.text} strokeWidth={2.4} />
-              </AnimatedPressable>
-              <AnimatedPressable accessibilityRole="button" onPress={() => { setRenamingConversationId(actionConversation.id); setRenameDraft(actionConversation.title); setConversationActionId(null); navigation.closeDrawer(); }} style={styles.actionRow}>
-                <Text style={styles.actionText}>编辑名称</Text><Pencil size={16} color={theme.colors.primary} strokeWidth={2.4} />
-              </AnimatedPressable>
-              <AnimatedPressable accessibilityRole="button" onPress={() => void shareConversation(actionConversation)} style={styles.actionRow}>
-                <Text style={styles.actionText}>分享对话</Text><Share2 size={16} color={theme.colors.success} strokeWidth={2.3} />
-              </AnimatedPressable>
-              <AnimatedPressable accessibilityRole="button" onPress={() => { setMoveConversationId(actionConversation.id); setConversationActionId(null); navigation.closeDrawer(); }} style={styles.actionRow}>
-                <Text style={styles.actionText}>移动到项目</Text><Folder size={16} color={theme.colors.textSecondary} strokeWidth={2.3} />
-              </AnimatedPressable>
-              <AnimatedPressable accessibilityRole="button" onPress={() => { setDeleteConversationId(actionConversation.id); setConversationActionId(null); navigation.closeDrawer(); }} style={[styles.actionRow, styles.actionDangerRow]}>
-                <Text style={[styles.actionText, styles.actionDangerText]}>删除</Text><Trash2 size={16} color={theme.colors.error} strokeWidth={2.4} />
-              </AnimatedPressable>
+            <View
+              style={[
+                styles.actionMenu,
+                { top: conversationActionMenuTop },
+                panelHeight ? { maxHeight: Math.max(120, panelHeight - 28) } : undefined,
+              ]}
+            >
+              <ScrollView bounces={false} showsVerticalScrollIndicator={false}>
+                <AnimatedPressable accessibilityRole="button" onPress={() => void execute({ type: 'conversation.pin', conversationId: actionConversation.id, pinned: !actionConversation.pinnedAt })} style={styles.actionRow}>
+                  <Text style={styles.actionText}>{actionConversation.pinnedAt ? '取消置顶' : '置顶'}</Text>
+                  <Pin size={16} color={theme.colors.text} strokeWidth={2.4} />
+                </AnimatedPressable>
+                <AnimatedPressable accessibilityRole="button" onPress={() => { setRenamingConversationId(actionConversation.id); setRenameDraft(actionConversation.title); setConversationActionId(null); navigation.closeDrawer(); }} style={styles.actionRow}>
+                  <Text style={styles.actionText}>编辑名称</Text><Pencil size={16} color={theme.colors.primary} strokeWidth={2.4} />
+                </AnimatedPressable>
+                <AnimatedPressable accessibilityRole="button" onPress={() => void shareConversation(actionConversation)} style={styles.actionRow}>
+                  <Text style={styles.actionText}>分享对话</Text><Share2 size={16} color={theme.colors.success} strokeWidth={2.3} />
+                </AnimatedPressable>
+                <AnimatedPressable accessibilityRole="button" accessibilityLabel="导出 Markdown" onPress={() => void exportDrawerConversation(actionConversation, 'markdown')} style={styles.actionRow}>
+                  <Text style={styles.actionText}>导出 Markdown</Text><Download size={16} color={theme.colors.accentText} strokeWidth={2.3} />
+                </AnimatedPressable>
+                <AnimatedPressable accessibilityRole="button" accessibilityLabel="导出 JSON" onPress={() => void exportDrawerConversation(actionConversation, 'json')} style={styles.actionRow}>
+                  <Text style={styles.actionText}>导出 JSON</Text><FileText size={16} color={theme.colors.accentText} strokeWidth={2.3} />
+                </AnimatedPressable>
+                <AnimatedPressable accessibilityRole="button" onPress={() => { setMoveConversationId(actionConversation.id); setConversationActionId(null); navigation.closeDrawer(); }} style={styles.actionRow}>
+                  <Text style={styles.actionText}>移动到项目</Text><Folder size={16} color={theme.colors.textSecondary} strokeWidth={2.3} />
+                </AnimatedPressable>
+                <AnimatedPressable accessibilityRole="button" onPress={() => { setDeleteConversationId(actionConversation.id); setConversationActionId(null); navigation.closeDrawer(); }} style={[styles.actionRow, styles.actionDangerRow]}>
+                  <Text style={[styles.actionText, styles.actionDangerText]}>删除</Text><Trash2 size={16} color={theme.colors.error} strokeWidth={2.4} />
+                </AnimatedPressable>
+              </ScrollView>
             </View>
           </>
         ) : null}
@@ -479,7 +539,7 @@ function createStyles(theme: ReturnType<typeof useKelivoTheme>) {
     moreButtonActive: { backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.accentBorder },
     frost: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, zIndex: 30, elevation: 30, backgroundColor: colors.surfaceAlt },
     frostTarget: { flex: 1 },
-    actionMenu: { position: 'absolute', right: 20, zIndex: 31, width: 184, borderRadius: radius.md, overflow: 'hidden', borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.card, ...theme.shadows.medium },
+    actionMenu: { position: 'absolute', right: 20, zIndex: 31, width: 184, borderRadius: radius.md, overflow: 'hidden', borderWidth: 1, borderColor: colors.outline, backgroundColor: colors.card, ...theme.shadows.medium, elevation: 31 },
     actionRow: { minHeight: 38, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: colors.outline },
     actionDangerRow: { borderBottomWidth: 0 },
     actionText: { flex: 1, minWidth: 0, color: colors.text, fontSize: 13, fontWeight: '700' },

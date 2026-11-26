@@ -3,10 +3,17 @@ import { describe, expect, it } from 'vitest';
 import type { ChatMessage, MediaAttachment, ProviderProfile } from '../src/domain/types';
 import {
   assertProviderWebSearchMessagesSupported,
+  buildDeepSeekContinuationMessagePatch,
+  buildDeepSeekServerToolActivity,
   buildProviderWebSearchRequest,
+  extractDeepSeekServerToolCalls,
   getProviderWebSearchEndpoint,
+  parseDeepSeekUrlCitations,
   parseProviderWebSearchResponse,
+  ProviderWebSearchProtocolError,
+  resolveProviderWebSearchCapability,
   resolveProviderWebSearchProtocol,
+  toDeepSeekServerToolCallsBlock,
 } from '../src/services/providerWebSearch';
 
 function provider(
@@ -109,7 +116,7 @@ describe('provider Web Search request construction', () => {
       messages: [message('Find this image.', [image])],
     });
 
-    expect(request.body.input[0].content).toEqual([
+    expect(request.body.input?.[0].content).toEqual([
       { type: 'input_text', text: 'Find this image.' },
       { type: 'input_image', image_url: 'https://images.example.com/news.png' },
     ]);
@@ -184,7 +191,7 @@ describe('provider Web Search request construction', () => {
           'https://dashscope-us.aliyuncs.com.evil.example/compatible-mode/v1'
         )
       )
-    ).toThrow();
+    ).toThrow(ProviderWebSearchProtocolError);
   });
 
   it('rejects attachments for Ark and Bailian instead of guessing a multimodal wire shape', () => {
@@ -227,7 +234,9 @@ describe('provider Web Search request construction', () => {
     ['unexpected path', provider('custom', 'https://api.openai.com/admin')],
     ['query-bearing URL', provider('custom', 'https://api.openai.com/v1?token=secret')],
   ])('fails closed for %s', (_label, currentProvider) => {
-    expect(() => resolveProviderWebSearchProtocol(currentProvider)).toThrow();
+    expect(() => resolveProviderWebSearchProtocol(currentProvider)).toThrow(
+      ProviderWebSearchProtocolError
+    );
   });
 
   it('normalizes only supported official endpoint forms', () => {
@@ -510,5 +519,310 @@ describe('provider Web Search response parsing', () => {
     [{ status: 'queued', output: [] }, /Responses API/],
   ])('rejects unsuccessful response status %#', (payload, expected) => {
     expect(() => parseProviderWebSearchResponse({ provider: openAi, payload })).toThrow(expected);
+  });
+});
+
+describe('multi-provider official web search matrix (Anthropic / Gemini / xAI / DeepSeek)', () => {
+  const anthropic = provider('anthropic', 'https://api.anthropic.com/v1');
+  const gemini = provider('gemini', 'https://generativelanguage.googleapis.com/v1beta');
+  const xai = provider('xai-grok', 'https://api.x.ai/v1');
+  const deepseek = provider('deepseek', 'https://api.deepseek.com/v1');
+  const deepseekCustom = provider('custom', 'https://api.deepseek.com/v1');
+
+  it('resolves official protocols and rejects relays and lookalike domains', () => {
+    expect(resolveProviderWebSearchProtocol(anthropic)).toBe('anthropic-official');
+    expect(resolveProviderWebSearchProtocol(gemini)).toBe('gemini-official');
+    expect(resolveProviderWebSearchProtocol(xai)).toBe('xai-official');
+    expect(resolveProviderWebSearchProtocol(deepseek)).toBe('deepseek-official');
+    expect(resolveProviderWebSearchProtocol(deepseekCustom)).toBe('deepseek-official');
+
+    expect(getProviderWebSearchEndpoint(anthropic)).toBe('https://api.anthropic.com/v1/messages');
+    expect(getProviderWebSearchEndpoint(gemini, 'gemini-2.5-pro')).toBe(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent'
+    );
+    expect(getProviderWebSearchEndpoint(xai)).toBe('https://api.x.ai/v1/responses');
+    expect(getProviderWebSearchEndpoint(deepseek)).toBe('https://api.deepseek.com/v1/chat/completions');
+
+    const relayAnthropic = provider('new-api-relay', 'https://api.anthropic.com/v1');
+    const lookalikeXai = provider('xai-grok', 'https://api.x.ai.evil.example/v1');
+    const lookalikeDeepSeek = provider('deepseek', 'https://api.deepseek.com.evil.example/v1');
+
+    for (const invalid of [relayAnthropic, lookalikeXai, lookalikeDeepSeek]) {
+      expect(() => resolveProviderWebSearchProtocol(invalid)).toThrow(ProviderWebSearchProtocolError);
+    }
+
+    expect(resolveProviderWebSearchCapability(deepseek)).toEqual({
+      supported: true,
+      mode: 'official-hosted',
+      protocol: 'deepseek-official',
+    });
+    expect(resolveProviderWebSearchCapability(relayAnthropic)).toMatchObject({
+      supported: false,
+      mode: 'client-external-fallback',
+      isRelay: true,
+    });
+  });
+
+  it('builds protocol-specific search requests and never sends xAI search_parameters', () => {
+    const anthropicReq = buildProviderWebSearchRequest({
+      provider: anthropic,
+      modelId: 'claude-sonnet-4-6',
+      messages: [message('Check Claude search')],
+      anthropicToolType: 'web_search_20260209',
+    });
+    expect(anthropicReq.body.max_tokens).toBe(4096);
+    expect(anthropicReq.body.tools).toEqual([
+      { type: 'web_search_20260209', name: 'web_search', max_uses: 5 },
+    ]);
+
+    const geminiReq = buildProviderWebSearchRequest({
+      provider: gemini,
+      modelId: 'gemini-2.5-pro',
+      messages: [message('Check Gemini grounding')],
+      maxOutputTokens: 2048,
+    });
+    expect(geminiReq.url).toContain('gemini-2.5-pro:generateContent');
+    expect(geminiReq.body.tools).toEqual([{ google_search: {} }]);
+    expect(geminiReq.body.generationConfig).toEqual({ maxOutputTokens: 2048 });
+
+    const xaiReq = buildProviderWebSearchRequest({
+      provider: xai,
+      modelId: 'grok-4.3',
+      messages: [message('Check xAI search')],
+    });
+    expect(xaiReq.url).toBe('https://api.x.ai/v1/responses');
+    expect(xaiReq.body.tools).toEqual([{ type: 'web_search' }, { type: 'x_search' }]);
+    expect(JSON.stringify(xaiReq.body)).not.toContain('search_parameters');
+
+    const dsReq = buildProviderWebSearchRequest({
+      provider: deepseek,
+      modelId: 'deepseek-v4-pro',
+      messages: [
+        message('Search DS'),
+        {
+          id: 'a1',
+          role: 'assistant',
+          content: 'Turn 1',
+          createdAt: 2,
+          status: 'ready',
+          providerContinuations: [
+            {
+              provider: 'deepseek',
+              type: 'server_tool_calls',
+              serverToolCalls: [{ id: 'tc_1', type: 'deepseek_web_search', input: { query: 'ds' } }],
+            },
+          ],
+        },
+        message('Follow up'),
+      ],
+    });
+    expect(dsReq.body.tools).toEqual([
+      { type: 'deepseek_web_search', name: 'deepseek_web_search' },
+      { type: 'deepseek_read_url', name: 'deepseek_read_url' },
+    ]);
+    expect(dsReq.body.messages?.[1]?.server_tool_calls).toEqual([
+      { id: 'tc_1', type: 'deepseek_web_search', input: { query: 'ds' } },
+    ]);
+
+    expect(() =>
+      buildProviderWebSearchRequest({
+        provider: xai,
+        modelId: 'grok-4.3',
+        messages: [message('bad context size')],
+        searchContextSize: 'medium',
+      })
+    ).toThrow(/只适用于 OpenAI/);
+  });
+
+  it('parses DeepSeek server_tool_calls, annotations, and builds continuation patches and tool activity', () => {
+    const serverCalls = [
+      {
+        id: 'ds_ws_1',
+        type: 'deepseek_web_search',
+        input: { query: 'DeepSeek V4' },
+        output: {
+          results: [
+            { title: 'DeepSeek Docs', url: 'https://platform.deepseek.com/docs', snippet: 'Official' },
+            { title: 'Evil LAN', url: 'https://192.168.0.10/secret', snippet: 'Drop' },
+          ],
+        },
+      },
+      {
+        id: 'ds_read_1',
+        type: 'deepseek_read_url',
+        input: { url: 'https://platform.deepseek.com/docs' },
+        output: { title: 'DeepSeek Docs', content: 'Doc text' },
+      },
+    ];
+
+    const dsPayload = {
+      choices: [
+        {
+          message: {
+            content: 'DeepSeek V4 已发布。',
+            reasoning_content: 'Searching docs...',
+            server_tool_calls: serverCalls,
+            annotations: [
+              {
+                type: 'url_citation',
+                url: 'https://platform.deepseek.com/docs',
+                title: 'DeepSeek Docs',
+                start_index: 0,
+                end_index: 11,
+              },
+              {
+                type: 'url_citation',
+                url: 'http://127.0.0.1/local',
+                title: 'Bad',
+                start_index: 0,
+                end_index: 4,
+              },
+            ],
+          },
+        },
+      ],
+      usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 },
+    };
+
+    expect(extractDeepSeekServerToolCalls(dsPayload)).toEqual(serverCalls);
+    expect(
+      parseDeepSeekUrlCitations(dsPayload.choices[0].message.annotations, 'DeepSeek V4 已发布。')
+    ).toEqual([
+      {
+        url: 'https://platform.deepseek.com/docs',
+        title: 'DeepSeek Docs',
+        startIndex: 0,
+        endIndex: 11,
+      },
+    ]);
+    const activities = buildDeepSeekServerToolActivity(serverCalls);
+    expect(activities).toHaveLength(2);
+    expect(activities[0]?.toolName).toBe('web_search');
+    expect(activities[1]?.toolName).toBe('deepseek_read_url');
+
+    const parsed = parseProviderWebSearchResponse({ provider: deepseek, payload: dsPayload });
+    expect(parsed.webSearchTriggered).toBe(true);
+    expect(parsed.citations.map((c) => c.url)).toEqual(['https://platform.deepseek.com/docs']);
+    expect(parsed.providerContinuations).toEqual([
+      { provider: 'deepseek', type: 'server_tool_calls', serverToolCalls: serverCalls },
+    ]);
+
+    expect(buildDeepSeekContinuationMessagePatch(parsed.providerContinuations)).toEqual({
+      server_tool_calls: serverCalls,
+    });
+  });
+
+  it('parses Anthropic and Gemini Grounding web search responses and rejects malformed 400/404/410/non-JSON payloads', () => {
+    const anthropicParsed = parseProviderWebSearchResponse({
+      provider: anthropic,
+      payload: {
+        content: [
+          { type: 'server_tool_use', id: 'srv_1', name: 'web_search', input: { query: 'Claude' } },
+          {
+            type: 'web_search_tool_result',
+            tool_use_id: 'srv_1',
+            content: [{ type: 'web_search_result', url: 'https://docs.anthropic.com/ws', title: 'Docs' }],
+          },
+          {
+            type: 'text',
+            text: 'Anthropic result.',
+            citations: [
+              {
+                type: 'web_search_result_location',
+                url: 'https://docs.anthropic.com/ws',
+                title: 'Docs',
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(anthropicParsed.webSearchTriggered).toBe(true);
+    expect(anthropicParsed.citations[0]?.url).toBe('https://docs.anthropic.com/ws');
+
+    const geminiParsed = parseProviderWebSearchResponse({
+      provider: gemini,
+      payload: {
+        candidates: [
+          {
+            content: { parts: [{ text: 'Gemini grounded answer.' }] },
+            groundingMetadata: {
+              webSearchQueries: ['Gemini 2026'],
+              groundingChunks: [
+                { web: { uri: 'https://ai.google.dev/grounding', title: 'Google AI' } },
+                { web: { uri: 'http://10.0.0.1/bad', title: 'Bad' } },
+              ],
+            },
+          },
+        ],
+      },
+    });
+    expect(geminiParsed.webSearchTriggered).toBe(true);
+    expect(geminiParsed.citations).toEqual([
+      { url: 'https://ai.google.dev/grounding', title: 'Google AI', startIndex: 0, endIndex: 0 },
+    ]);
+
+    for (const badPayload of [
+      '<html>404 Not Found</html>',
+      JSON.stringify({ error: { message: '410 Gone' } }),
+      JSON.stringify({ choices: [] }),
+    ]) {
+      expect(() =>
+        parseProviderWebSearchResponse({ provider: deepseek, payload: badPayload })
+      ).toThrow(ProviderWebSearchProtocolError);
+    }
+  });
+
+  it('strips __proto__, constructor, and prototype own properties from DeepSeek server_tool_calls and ToolActivity arguments', () => {
+    const maliciousPayload = JSON.parse(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: 'Result',
+              server_tool_calls: [
+                {
+                  id: 'ds_proto_1',
+                  type: 'deepseek_web_search',
+                  input: JSON.parse(
+                    '{"query":"test","__proto__":{"polluted":true},"constructor":{"x":1},"prototype":{"y":2}}'
+                  ),
+                  output: { results: [] },
+                },
+              ],
+            },
+          },
+        ],
+      })
+    );
+
+    const extracted = extractDeepSeekServerToolCalls(maliciousPayload);
+    const firstExtracted = extracted[0] as Record<string, unknown>;
+    const extractedInput = firstExtracted.input as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(extractedInput, '__proto__')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(extractedInput, 'constructor')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(extractedInput, 'prototype')).toBe(false);
+    expect(extractedInput).toEqual({ query: 'test' });
+
+    const activities = buildDeepSeekServerToolActivity(extracted);
+    expect(activities).toHaveLength(1);
+    const args = activities[0]?.arguments as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(args, '__proto__')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(args, 'constructor')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(args, 'prototype')).toBe(false);
+    expect(args).toEqual({ query: 'test' });
+
+    const block = toDeepSeekServerToolCallsBlock(
+      maliciousPayload.choices[0].message.server_tool_calls
+    );
+    expect(block?.type).toBe('server_tool_calls');
+    if (block?.type === 'server_tool_calls') {
+      const blockInput = (block.serverToolCalls[0] as Record<string, unknown>).input as Record<
+        string,
+        unknown
+      >;
+      expect(Object.prototype.hasOwnProperty.call(blockInput, '__proto__')).toBe(false);
+    }
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 });

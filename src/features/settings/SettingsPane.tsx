@@ -1,5 +1,5 @@
 import React, { type ReactElement } from 'react';
-import { Platform, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 
 import {
   SettingsScreen,
@@ -10,21 +10,20 @@ import { useSettingsScreenRef } from './SettingsProductivityProvider';
 import { useSettingsScreenModel } from './internal/useSettingsScreenModel';
 
 /**
- * Public Settings visual host: lazy-mounted once, then shown/hidden.
- * Owns pointer-events and accessibility suppression while closed.
+ * 公共设置页面视图宿主：仅在打开期间挂载，关闭即卸载，
+ * 避免后台流式输出期间仍维持不必要的设置页状态订阅。
  */
 export function SettingsPane(): ReactElement | null {
-  const { isOpen, hasMounted, close } = useSettingsLauncher();
+  const { isOpen, close } = useSettingsLauncher();
   const settingsScreenRef = useSettingsScreenRef();
 
-  if (!hasMounted) {
+  if (!isOpen) {
     return null;
   }
 
   return (
     <MountedSettingsPane
       close={close}
-      isOpen={isOpen}
       settingsScreenRef={settingsScreenRef}
     />
   );
@@ -32,38 +31,25 @@ export function SettingsPane(): ReactElement | null {
 
 function MountedSettingsPane(props: {
   close(): void;
-  isOpen: boolean;
   settingsScreenRef: React.RefObject<SettingsScreenHandle | null>;
 }): ReactElement {
   const model = useSettingsScreenModel(props.close);
 
-  const screen = (
-    <SettingsScreen
-      ref={props.settingsScreenRef as React.RefObject<SettingsScreenHandle>}
-      {...model}
-    />
-  );
-
   return (
     <View
-      style={[
-        styles.pane,
-        !props.isOpen && (Platform.OS === 'web' ? styles.webHidden : styles.nativeHidden),
-      ]}
-      pointerEvents={props.isOpen ? 'auto' : 'none'}
-      accessibilityElementsHidden={!props.isOpen}
-      importantForAccessibility={props.isOpen ? 'auto' : 'no-hide-descendants'}
+      style={styles.pane}
+      pointerEvents="auto"
+      accessibilityElementsHidden={false}
+      importantForAccessibility="auto"
     >
-      {screen}
+      <SettingsScreen
+        ref={props.settingsScreenRef as React.RefObject<SettingsScreenHandle>}
+        {...model}
+      />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   pane: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, zIndex: 20 },
-  // Keep the pane mounted so drafts/navigation survive toggles. On web, display:none
-  // also removes hidden controls from layout and the browser tab order; native keeps
-  // the existing transparent overlay for cheaper remount-free transitions.
-  webHidden: { display: 'none' },
-  nativeHidden: { opacity: 0 },
 });

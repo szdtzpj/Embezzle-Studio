@@ -16,6 +16,7 @@ import {
   Download,
   FileText,
   Image as ImageIcon,
+  Pencil,
   Play,
   Share2,
   Video,
@@ -154,10 +155,14 @@ export function AttachmentPreview({
   attachment,
   videoActive = false,
   onToggleVideo,
+  onOpenLightbox,
+  onEditWithImage,
 }: {
   attachment: MediaAttachment;
   videoActive?: boolean;
   onToggleVideo?: () => void;
+  onOpenLightbox?: () => void;
+  onEditWithImage?: () => void;
 }) {
   const { palette, styles } = useChatAttachmentPresentationTheme();
   const { displayUri, displayError } = useAttachmentDisplayUri(attachment);
@@ -214,29 +219,53 @@ export function AttachmentPreview({
 
   if (attachment.kind === 'image') {
     return (
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={`打开或导出图片 ${attachment.name}`}
-        onPress={openOrExport}
-        style={styles.attachmentImageFrame}
-      >
-        {displayUri ? (
-          <Image
-            source={{ uri: displayUri }}
-            resizeMode="cover"
-            fadeDuration={0}
-            style={styles.attachmentImage}
-          />
-        ) : (
-          <View style={styles.attachmentImageFallback}>
-            {displayError ? (
-              <ImageIcon size={22} color={palette.danger} strokeWidth={1.8} />
-            ) : (
-              <ActivityIndicator color={palette.textSecondary} size="small" />
-            )}
-          </View>
-        )}
-      </Pressable>
+      <View style={styles.attachmentImageCard}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={
+            onOpenLightbox
+              ? `放大查看图片 ${attachment.name}`
+              : `打开或导出图片 ${attachment.name}`
+          }
+          testID={`attachment-image-preview-${attachment.id}`}
+          onPress={onOpenLightbox ?? openOrExport}
+          style={({ pressed }) => [styles.attachmentImageFrame, pressed && styles.buttonPressed]}
+        >
+          {displayUri ? (
+            <Image
+              source={{ uri: displayUri }}
+              resizeMode="cover"
+              fadeDuration={0}
+              style={styles.attachmentImage}
+            />
+          ) : (
+            <View style={styles.attachmentImageFallback}>
+              {displayError ? (
+                <ImageIcon size={22} color={palette.danger} strokeWidth={1.8} />
+              ) : (
+                <ActivityIndicator color={palette.textSecondary} size="small" />
+              )}
+            </View>
+          )}
+        </Pressable>
+        {onEditWithImage ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`以此图继续编辑 ${attachment.name}`}
+            testID={`attachment-image-edit-${attachment.id}`}
+            onPress={onEditWithImage}
+            style={({ pressed }) => [
+              styles.attachmentImageEditButton,
+              pressed && styles.buttonPressed,
+            ]}
+          >
+            <Pencil size={12} color={palette.accentText} strokeWidth={2.2} />
+            <Text numberOfLines={1} style={styles.attachmentImageEditButtonText}>
+              继续编辑
+            </Text>
+          </Pressable>
+        ) : null}
+      </View>
     );
   }
 

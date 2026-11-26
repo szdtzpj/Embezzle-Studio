@@ -3,7 +3,7 @@ import { StyleSheet } from 'react-native';
 import type { NotificationResponse } from 'expo-notifications';
 
 import { useChatProjectNavigation } from '../../features/chat';
-import { useWorkspaceSelector, useWorkspaceStatus } from '../../app/workspace/WorkspaceSessionProvider';
+import { useWorkspacePhase, useWorkspaceSelector } from '../../app/workspace/WorkspaceSessionProvider';
 import { useWorkspaceSession } from '../../app/workspace/internal/WorkspaceSessionContext';
 import { ChatPane } from '../../features/chat/ChatPane';
 import { ProjectDrawer } from '../../features/projects/ProjectDrawer';
@@ -52,8 +52,8 @@ export function MobileApplication(): React.ReactElement {
   const workspaceSession = useWorkspaceSession();
   const generationBackground = useGenerationTaskBackground();
   const incomingShare = useIncomingShareInbox();
-  const workspace = useWorkspaceSelector((snapshot) => snapshot);
-  const status = useWorkspaceStatus();
+  const needsOnboarding = useWorkspaceSelector((snapshot) => workspaceNeedsOnboarding(snapshot));
+  const workspacePhase = useWorkspacePhase();
   const [setupOpen, setSetupOpen] = useState(false);
   const [shareBusyDestination, setShareBusyDestination] = useState<IncomingShareDestination | null>(null);
   const [shareError, setShareError] = useState<string>();
@@ -69,10 +69,10 @@ export function MobileApplication(): React.ReactElement {
   generationBackgroundRef.current = generationBackground;
 
   useEffect(() => {
-    if (status.phase === 'ready' && workspaceNeedsOnboarding(workspace)) {
+    if (workspacePhase === 'ready' && needsOnboarding) {
       setSetupOpen(true);
     }
-  }, [status.phase, workspace]);
+  }, [needsOnboarding, workspacePhase]);
 
   useEffect(() => {
     let disposed = false;

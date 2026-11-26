@@ -11,8 +11,8 @@ import {
 import { AppState, Platform } from 'react-native';
 
 import {
+  useWorkspacePhase,
   useWorkspaceSelector,
-  useWorkspaceStatus,
 } from '../../app/workspace/WorkspaceSessionProvider';
 import { useWorkspaceSession } from '../../app/workspace/internal/WorkspaceSessionContext';
 import {
@@ -21,6 +21,7 @@ import {
   runDueGenerationTaskQueries,
   type GenerationTaskRecoveryResult,
 } from '../../services/generationTaskBackground';
+import { deriveGenerationTasks } from '../../services/generationTasks';
 import { installGenerationTaskNotificationHandler } from '../../services/generationTaskNotifications';
 
 export interface GenerationTaskBackgroundContextValue {
@@ -41,8 +42,15 @@ export function GenerationTaskBackgroundProvider(props: {
   suspended?: boolean;
 }): React.ReactElement {
   const session = useWorkspaceSession();
-  const status = useWorkspaceStatus();
-  const conversations = useWorkspaceSelector((workspace) => workspace.conversations);
+  const workspacePhase = useWorkspacePhase();
+  // 仅订阅活跃生成任务标量指纹，避免普通聊天流式或落盘触发后台任务重复注册
+  const activeGenerationTaskKey = useWorkspaceSelector((workspace) =>
+    deriveGenerationTasks(workspace.conversations)
+      .filter((item) => item.state === 'active')
+      .map((item) => `${item.task.taskId}:${item.messageId}`)
+      .sort()
+      .join('|')
+  );
   const suspended = props.suspended === true;
   const applyingRef = useRef(false);
   const [applying, setApplying] = useState(false);
@@ -53,7 +61,7 @@ export function GenerationTaskBackgroundProvider(props: {
   }, []);
 
   const applyOutbox = useCallback(async () => {
-    if (status.phase !== 'ready' || applyingRef.current) return;
+    if (workspacePhase !== 'ready' || applyingRef.current) return;
     applyingRef.current = true;
     setApplying(true);
     try {
@@ -62,10 +70,10 @@ export function GenerationTaskBackgroundProvider(props: {
       applyingRef.current = false;
       setApplying(false);
     }
-  }, [session, status.phase]);
+  }, [session, workspacePhase]);
 
   const recoverNow = useCallback(async (): Promise<GenerationTaskRecoveryResult | undefined> => {
-    if (Platform.OS === 'web' || status.phase !== 'ready' || suspended) return undefined;
+    if (Platform.OS === 'web' || workspacePhase !== 'ready' || suspended) return undefined;
     if (recoveryRef.current) return recoveryRef.current;
     const promise = (async () => {
       await applyOutbox();
@@ -79,25 +87,26 @@ export function GenerationTaskBackgroundProvider(props: {
     } finally {
       if (recoveryRef.current === promise) recoveryRef.current = null;
     }
-  }, [applyOutbox, session, status.phase, suspended]);
+  }, [applyOutbox, session, suspended, workspacePhase]);
 
   // Keep the single persistent WorkManager task in sync with the current
   // workspace, without issuing provider requests on every render.
   useEffect(() => {
-    if (status.phase !== 'ready') return;
+    if (workspacePhase !== 'ready') return;
+    const snapshot = session.getSnapshot();
     void ensureGenerationTaskBackgroundRegistration({
-      ...session.getSnapshot(),
-      conversations,
+      ...snapshot,
+      conversations: activeGenerationTaskKey ? snapshot.conversations : [],
     }).catch(() => {
       // Registration is best effort. A rejected TaskManager/WorkManager call
       // must not become an unhandled promise rejection in the UI runtime.
     });
-  }, [conversations, session, status.phase]);
+  }, [activeGenerationTaskKey, session, workspacePhase]);
 
   // Apply headless results and perform one due query when the app returns to
   // the foreground. The nextCheckAt metadata prevents rapid duplicate calls.
   useEffect(() => {
-    if (Platform.OS === 'web' || status.phase !== 'ready' || suspended) return;
+    if (Platform.OS === 'web' || workspacePhase !== 'ready' || suspended) return;
     void recoverNow().catch(() => {
       // Recovery is retried on the next foreground transition. Never let a
       // provider/network failure escape from this fire-and-forget effect.
@@ -111,7 +120,7 @@ export function GenerationTaskBackgroundProvider(props: {
       }
     });
     return () => subscription.remove();
-  }, [recoverNow, status.phase, suspended]);
+  }, [recoverNow, suspended, workspacePhase]);
 
   const value = useMemo<GenerationTaskBackgroundContextValue>(
     () => ({ recoverNow, applying }),

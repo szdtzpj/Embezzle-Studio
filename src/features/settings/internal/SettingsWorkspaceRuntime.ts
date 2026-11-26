@@ -18,7 +18,7 @@ import {
 import type { WorkspaceSession } from '../../../app/workspace/WorkspaceSession';
 import {
   DEFAULT_GROK_SEARCH_MODEL,
-  externalSearchProviderLabels,
+  allExternalSearchProviderLabels,
 } from '../../../services/externalSearch';
 import { inferModelTask } from '../../../services/modelCapabilities';
 import {
@@ -444,29 +444,41 @@ export function reduceSettingsWorkspaceCommand(
           ? workspace.externalSearch.services.find((service) => service.kind === input.kind)
           : undefined);
       const apiKey = input.apiKey?.trim();
+      const endpoint = input.endpoint?.trim().replace(/\/+$/, '');
       const service = {
         id: sameKind?.id ?? input.newId,
         kind: input.kind,
-        name: (input.name?.trim() || externalSearchProviderLabels[input.kind]).slice(0, 80),
+        name: (
+          input.name?.trim() ||
+          existing?.name ||
+          sameKind?.name ||
+          allExternalSearchProviderLabels[input.kind]
+        ).slice(0, 80),
         ...(apiKey ? { apiKey } : {}),
-        ...(input.endpoint?.trim() ? { endpoint: input.endpoint.trim() } : {}),
+        ...(endpoint ? { endpoint } : {}),
         ...(input.kind === 'grok'
           ? { model: input.model?.trim() || DEFAULT_GROK_SEARCH_MODEL }
           : {}),
       };
-      const services = sameKind
+      const nextServices = sameKind
         ? workspace.externalSearch.services.map((item) =>
             item.id === sameKind.id ? service : item
           )
         : [...workspace.externalSearch.services, service].slice(0, 16);
+      // 仅当提交的服务真实落入 16 项上限列表时切换 selectedServiceId，避免产生悬空引用。
+      const selectedServiceId = nextServices.some((item) => item.id === service.id)
+        ? service.id
+        : nextServices.some((item) => item.id === workspace.externalSearch.selectedServiceId)
+          ? workspace.externalSearch.selectedServiceId
+          : nextServices[0]?.id;
       return {
         result: undefined,
         workspace: {
           ...workspace,
           externalSearch: {
             ...workspace.externalSearch,
-            services,
-            selectedServiceId: service.id,
+            services: nextServices,
+            selectedServiceId,
           },
         },
       };

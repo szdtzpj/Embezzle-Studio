@@ -8,6 +8,7 @@
     "dist",
     "build",
     "web-build",
-    ".expo"
+    ".expo",
+    "tests/e2e"
   ]
 }

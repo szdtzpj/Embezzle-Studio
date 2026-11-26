@@ -1,10 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { ExternalSearchService } from '../src/domain/types';
 import {
+  allExternalSearchProviderKinds,
+  allExternalSearchProviderLabels,
   DEFAULT_GROK_SEARCH_MODEL,
   citationsFromExternalSearchResults,
   cleanSearchAnswerForDisplay,
+  externalSearchProviderKinds,
   extractLinksFromAnswerText,
   externalSearchProviderAllowsAnonymous,
   externalSearchProviderRequiresApiKey,
@@ -18,9 +21,11 @@ import {
   reindexExternalSearchResult,
   resolveMessageMarkdownLink,
   resolveActiveExternalSearchService,
+  runDeepSeekFetch,
   runExternalSearch,
   stripExternalSearchSecrets,
   titleFromSearchUrl,
+  type ExtendedExternalSearchService,
 } from '../src/services/externalSearch';
 
 function service(
@@ -478,5 +483,652 @@ describe('provider adapters', () => {
           }),
       })
     ).rejects.toThrow(/响应过大/);
+  });
+});
+
+function extendedService(
+  kind: ExtendedExternalSearchService['kind'],
+  overrides: Partial<ExtendedExternalSearchService> = {}
+): ExtendedExternalSearchService {
+  return {
+    id: `${kind}-1`,
+    kind,
+    name: allExternalSearchProviderLabels[kind],
+    apiKey: 'test-ext-key',
+    ...overrides,
+  };
+}
+
+describe('extended external search engines (DeepSeek / Bocha / Exa / SearXNG)', () => {
+  it('keeps legacy 6-item exports intact while exposing 10-item superset metadata and SearXNG endpoint requirement', () => {
+    expect(externalSearchProviderKinds).toHaveLength(6);
+    expect(allExternalSearchProviderKinds).toHaveLength(10);
+    expect(allExternalSearchProviderKinds).toEqual(
+      expect.arrayContaining(['deepseek', 'bocha', 'exa', 'searxng'])
+    );
+
+    expect(externalSearchProviderRequiresApiKey('deepseek')).toBe(true);
+    expect(externalSearchProviderRequiresApiKey('bocha')).toBe(true);
+    expect(externalSearchProviderRequiresApiKey('exa')).toBe(true);
+    expect(externalSearchProviderAllowsAnonymous('searxng')).toBe(true);
+    expect(externalSearchProviderRequiresApiKey('searxng')).toBe(false);
+
+    // SearXNG 无默认公共实例，必须配置合法 HTTPS endpoint 才算 configured
+    expect(
+      isExternalSearchServiceConfigured(extendedService('searxng', { apiKey: undefined, endpoint: undefined }))
+    ).toBe(false);
+    expect(
+      isExternalSearchServiceConfigured(extendedService('searxng', { apiKey: undefined, endpoint: 'http://searx.local' }))
+    ).toBe(false);
+    expect(
+      isExternalSearchServiceConfigured(extendedService('searxng', { apiKey: undefined, endpoint: 'https://searx.example.com' }))
+    ).toBe(true);
+  });
+
+  it('runs DeepSeek Search and runDeepSeekFetch with SSRF protection', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push({ url: String(input), init });
+      if (String(input).endsWith('/tools/fetch')) {
+        return new Response(
+          JSON.stringify({ title: 'DeepSeek Doc', content: 'Fetched markdown content' }),
+          { status: 200 }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          results: [
+            { title: 'DS Hit', url: 'https://platform.deepseek.com/docs', summary: 'DS summary' },
+            { title: 'LAN Hit', url: 'https://10.0.0.5/internal', summary: 'Should be dropped' },
+          ],
+        }),
+        { status: 200 }
+      );
+    };
+
+    const searchResult = await runExternalSearch({
+      query: 'deepseek api',
+      service: extendedService('deepseek'),
+      maxResults: 3,
+      fetchImpl,
+    });
+    expect(calls[0]?.url).toBe('https://api.deepseek.com/v1/tools/search');
+    expect((calls[0]?.init?.headers as Record<string, string>).Authorization).toBe('Bearer test-ext-key');
+    expect(JSON.parse(String(calls[0]?.init?.body))).toMatchObject({
+      query: 'deepseek api',
+      count: 3,
+      need_content: true,
+    });
+    expect(searchResult.items).toHaveLength(1);
+    expect(searchResult.items[0]?.url).toBe('https://platform.deepseek.com/docs');
+
+    const fetched = await runDeepSeekFetch({
+      url: 'https://platform.deepseek.com/docs?lang=zh',
+      apiKey: 'test-ext-key',
+      fetchImpl,
+    });
+    expect(calls[1]?.url).toBe('https://api.deepseek.com/v1/tools/fetch');
+    expect(fetched.content).toBe('Fetched markdown content');
+
+    await expect(
+      runDeepSeekFetch({
+        url: 'https://169.254.169.254/latest/meta-data',
+        apiKey: 'test-ext-key',
+        fetchImpl,
+      })
+    ).rejects.toThrow(/本机或私网/);
+  });
+
+  it('runs Bocha web search and rejects non-200 business codes', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push({ url: String(input), init });
+      return new Response(
+        JSON.stringify({
+          code: 200,
+          data: {
+            webPages: {
+              value: [
+                {
+                  name: '博查测试',
+                  url: 'https://bochaai.com/docs',
+                  summary: '博查摘要内容',
+                },
+              ],
+            },
+          },
+        }),
+        { status: 200 }
+      );
+    };
+
+    const result = await runExternalSearch({
+      query: '博查 API',
+      service: extendedService('bocha'),
+      maxResults: 4,
+      fetchImpl,
+    });
+    expect(calls[0]?.url).toBe('https://api.bochaai.com/v1/web-search');
+    expect(JSON.parse(String(calls[0]?.init?.body))).toMatchObject({
+      query: '博查 API',
+      freshness: 'noLimit',
+      summary: true,
+      count: 4,
+    });
+    expect(result.items[0]).toMatchObject({
+      title: '博查测试',
+      url: 'https://bochaai.com/docs',
+      text: '博查摘要内容',
+    });
+
+    await expect(
+      runExternalSearch({
+        query: 'bad code',
+        service: extendedService('bocha'),
+        fetchImpl: async () => new Response(JSON.stringify({ code: 403, msg: 'quota exceeded' }), { status: 200 }),
+      })
+    ).rejects.toThrow(/quota exceeded/);
+  });
+
+  it('runs Exa AI search with x-api-key and highlights parsing', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push({ url: String(input), init });
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              title: 'Exa Search',
+              url: 'https://docs.exa.ai/reference/search',
+              highlights: ['Neural highlight 1', 'Neural highlight 2'],
+              text: 'Full fallback text',
+            },
+          ],
+        }),
+        { status: 200 }
+      );
+    };
+
+    const result = await runExternalSearch({
+      query: 'exa neural',
+      service: extendedService('exa'),
+      maxResults: 5,
+      fetchImpl,
+    });
+    expect(calls[0]?.url).toBe('https://api.exa.ai/search');
+    expect((calls[0]?.init?.headers as Record<string, string>)['x-api-key']).toBe('test-ext-key');
+    expect(result.items[0]?.text).toContain('Neural highlight 1');
+  });
+
+  it('runs SearXNG with /search path completion, format=json, and clear HTML error hints', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push({ url: String(input), init });
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              title: 'SearXNG Result',
+              url: 'https://docs.searxng.org/',
+              content: 'Metasearch snippet',
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    };
+
+    const result = await runExternalSearch({
+      query: 'hello searxng',
+      service: extendedService('searxng', {
+        apiKey: undefined,
+        endpoint: 'https://searx.example.com',
+      }),
+      fetchImpl,
+    });
+    expect(calls[0]?.url).toBe('https://searx.example.com/search?q=hello+searxng&format=json');
+    expect((calls[0]?.init?.headers as Record<string, string>).Authorization).toBeUndefined();
+    expect(result.items[0]?.title).toBe('SearXNG Result');
+
+    await expect(
+      runExternalSearch({
+        query: 'html err',
+        service: extendedService('searxng', {
+          apiKey: undefined,
+          endpoint: 'https://searx.example.com/search',
+        }),
+        fetchImpl: async () =>
+          new Response('<html><body>SearXNG HTML</body></html>', {
+            status: 200,
+            headers: { 'Content-Type': 'text/html' },
+          }),
+      })
+    ).rejects.toThrow(/format=json/);
+  });
+
+  it('handles 400/404/410 HTTP errors, AbortSignal, and never sends Grok search_parameters', async () => {
+    for (const status of [400, 404, 410]) {
+      await expect(
+        runExternalSearch({
+          query: 'err',
+          service: extendedService('grok'),
+          fetchImpl: async (input, init) => {
+            expect(String(input)).toBe('https://api.x.ai/v1/responses');
+            expect(String(init?.body)).not.toContain('search_parameters');
+            return new Response(JSON.stringify({ error: `HTTP ${status}` }), { status });
+          },
+        })
+      ).rejects.toThrow(new RegExp(String(status)));
+    }
+
+    const abortController = new AbortController();
+    abortController.abort(new Error('manual cancel'));
+    await expect(
+      runExternalSearch({
+        query: 'cancelled',
+        service: extendedService('exa'),
+        signal: abortController.signal,
+        fetchImpl: async () => new Response('{}', { status: 200 }),
+      })
+    ).rejects.toThrow(/manual cancel/);
+  });
+
+  it('blocks IPv6 transition, documentation, and site-local SSRF addresses with 0 fetch calls and handles Bocha string error codes', async () => {
+    const fetchSpy = vi.fn(async () => new Response('{}', { status: 200 }));
+    for (const blockedUrl of [
+      'https://[64:ff9b::127.0.0.1]/x',
+      'https://[2002:7f00:0001::]/x',
+      'https://[fec0::1]/x',
+      'https://[2001:db8::1]/x',
+      'https://[100::1]/x',
+    ]) {
+      await expect(
+        runDeepSeekFetch({
+          url: blockedUrl,
+          apiKey: 'test-ext-key',
+          fetchImpl: fetchSpy,
+        })
+      ).rejects.toThrow(/本机或私网/);
+
+      await expect(
+        runExternalSearch({
+          query: 'ssrf',
+          service: extendedService('searxng', { apiKey: undefined, endpoint: blockedUrl }),
+          fetchImpl: fetchSpy,
+        })
+      ).rejects.toThrow(/本机或私网/);
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // Bocha 字符串错误码 "403"
+    await expect(
+      runExternalSearch({
+        query: 'string code',
+        service: extendedService('bocha'),
+        fetchImpl: async () =>
+          new Response(JSON.stringify({ code: '403', msg: 'Invalid API Key' }), { status: 200 }),
+      })
+    ).rejects.toThrow(/Invalid API Key/);
+
+    // 弱标题忽略尾部斜杠与大小写
+    expect(isWeakSearchTitle('https://example.com', 'https://example.com/')).toBe(true);
+    expect(isWeakSearchTitle('HTTPS://EXAMPLE.COM', 'https://example.com/')).toBe(true);
+    expect(titleFromSearchUrl('https://example.com/')).toBe('example.com');
+  });
+
+  it('strictly caps client results to maxResults when upstream providers return extra items', async () => {
+    const fourUrls = [
+      'https://example.com/1',
+      'https://example.com/2',
+      'https://example.com/3',
+      'https://example.com/4',
+    ];
+
+    // Tavily
+    const tavilyRes = await runExternalSearch({
+      query: 'cap test',
+      service: service('tavily'),
+      maxResults: 3,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            results: fourUrls.map((url, idx) => ({ title: `T${idx + 1}`, url, content: 'body' })),
+          }),
+          { status: 200 }
+        ),
+    });
+    expect(tavilyRes.items).toHaveLength(3);
+
+    // Firecrawl
+    const firecrawlRes = await runExternalSearch({
+      query: 'cap test',
+      service: service('firecrawl'),
+      maxResults: 3,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            data: {
+              web: fourUrls.map((url, idx) => ({ title: `F${idx + 1}`, url, description: 'body' })),
+            },
+          }),
+          { status: 200 }
+        ),
+    });
+    expect(firecrawlRes.items).toHaveLength(3);
+
+    // DeepSeek
+    const deepseekRes = await runExternalSearch({
+      query: 'cap test',
+      service: extendedService('deepseek'),
+      maxResults: 3,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            results: fourUrls.map((url, idx) => ({ title: `D${idx + 1}`, url, summary: 'body' })),
+          }),
+          { status: 200 }
+        ),
+    });
+    expect(deepseekRes.items).toHaveLength(3);
+
+    // Bocha
+    const bochaRes = await runExternalSearch({
+      query: 'cap test',
+      service: extendedService('bocha'),
+      maxResults: 3,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            code: 200,
+            data: {
+              webPages: {
+                value: fourUrls.map((url, idx) => ({ name: `B${idx + 1}`, url, summary: 'body' })),
+              },
+            },
+          }),
+          { status: 200 }
+        ),
+    });
+    expect(bochaRes.items).toHaveLength(3);
+
+    // Exa
+    const exaRes = await runExternalSearch({
+      query: 'cap test',
+      service: extendedService('exa'),
+      maxResults: 3,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            results: fourUrls.map((url, idx) => ({ title: `E${idx + 1}`, url, text: 'body' })),
+          }),
+          { status: 200 }
+        ),
+    });
+    expect(exaRes.items).toHaveLength(3);
+
+    // SearXNG
+    const searxngRes = await runExternalSearch({
+      query: 'cap test',
+      service: extendedService('searxng', { apiKey: undefined, endpoint: 'https://searx.example.com' }),
+      maxResults: 3,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            results: fourUrls.map((url, idx) => ({ title: `S${idx + 1}`, url, content: 'body' })),
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        ),
+    });
+    expect(searxngRes.items).toHaveLength(3);
+  });
+
+  it('redacts raw and percent-encoded external search apiKey across HTTP errors, Bocha error codes, and DeepSeek Fetch', async () => {
+    const rawKey = 'tvly-secret+key/val=9911';
+    const mixedCaseEncoded = encodeURIComponent(rawKey)
+      .replace(/%2B/gi, '%2b')
+      .replace(/%2F/gi, '%2F')
+      .replace(/%3D/gi, '%3d');
+
+    // 1) Tavily HTTP 401 回显原文与混合大小写编码密钥
+    await expect(
+      runExternalSearch({
+        query: 'redact tavily',
+        service: service('tavily', { apiKey: rawKey }),
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({ detail: `Invalid key ${rawKey} / ${mixedCaseEncoded}` }),
+            { status: 401 }
+          ),
+      })
+    ).rejects.toSatisfy((err: Error) => {
+      const msg = err.message;
+      return (
+        msg.includes('HTTP 401') &&
+        msg.includes('[REDACTED]') &&
+        !msg.includes(rawKey) &&
+        !msg.includes(mixedCaseEncoded)
+      );
+    });
+
+    // 2) SearXNG HTTP 403 回显可选 apiKey
+    await expect(
+      runExternalSearch({
+        query: 'redact searxng',
+        service: extendedService('searxng', {
+          apiKey: rawKey,
+          endpoint: 'https://searx.example.com',
+        }),
+        fetchImpl: async () =>
+          new Response(`Forbidden token ${rawKey} (${mixedCaseEncoded})`, { status: 403 }),
+      })
+    ).rejects.toSatisfy((err: Error) => {
+      const msg = err.message;
+      return (
+        msg.includes('HTTP 403') &&
+        msg.includes('[REDACTED]') &&
+        !msg.includes(rawKey) &&
+        !msg.includes(mixedCaseEncoded)
+      );
+    });
+
+    // 3) Bocha HTTP 200 业务错误码回显密钥
+    await expect(
+      runExternalSearch({
+        query: 'redact bocha',
+        service: extendedService('bocha', { apiKey: rawKey }),
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({ code: 401, msg: `Auth failed: ${rawKey} / ${mixedCaseEncoded}` }),
+            { status: 200 }
+          ),
+      })
+    ).rejects.toSatisfy((err: Error) => {
+      const msg = err.message;
+      return (
+        msg.includes('[REDACTED]') &&
+        !msg.includes(rawKey) &&
+        !msg.includes(mixedCaseEncoded)
+      );
+    });
+
+    // 4) Bing fetchText HTTP 500 回显可选 apiKey
+    await expect(
+      runExternalSearch({
+        query: 'redact bing',
+        service: service('bing', { apiKey: rawKey }),
+        fetchImpl: async () => new Response(`Upstream error ${rawKey}`, { status: 500 }),
+      })
+    ).rejects.toSatisfy((err: Error) => {
+      const msg = err.message;
+      return msg.includes('HTTP 500') && msg.includes('[REDACTED]') && !msg.includes(rawKey);
+    });
+
+    // 5) runDeepSeekFetch HTTP 401 与网络异常脱敏
+    await expect(
+      runDeepSeekFetch({
+        url: 'https://example.com/article',
+        apiKey: rawKey,
+        fetchImpl: async () =>
+          new Response(`Unauthorized ${rawKey} / ${mixedCaseEncoded}`, { status: 401 }),
+      })
+    ).rejects.toSatisfy((err: Error) => {
+      const msg = err.message;
+      return (
+        msg.includes('HTTP 401') &&
+        msg.includes('[REDACTED]') &&
+        !msg.includes(rawKey) &&
+        !msg.includes(mixedCaseEncoded)
+      );
+    });
+
+    await expect(
+      runDeepSeekFetch({
+        url: 'https://example.com/article',
+        apiKey: rawKey,
+        fetchImpl: async () => {
+          throw new Error(`fetch failed with ${rawKey}`);
+        },
+      })
+    ).rejects.toSatisfy((err: Error) => {
+      const msg = err.message;
+      return msg.includes('[REDACTED]') && !msg.includes(rawKey);
+    });
+  });
+
+  it('enforces redirect: error, rejects non-443 ports, and aborts hanging streams immediately', async () => {
+    const capturedInits: RequestInit[] = [];
+    const okFetch: typeof fetch = async (_input, init) => {
+      if (init) capturedInits.push(init);
+      return new Response(
+        JSON.stringify({
+          results: [{ title: 'OK', url: 'https://example.com/ok', content: 'body' }],
+        }),
+        { status: 200 }
+      );
+    };
+
+    await runExternalSearch({
+      query: 'redirect check',
+      service: service('tavily'),
+      fetchImpl: okFetch,
+    });
+    expect(capturedInits[0]?.redirect).toBe('error');
+
+    await runDeepSeekFetch({
+      url: 'https://example.com/doc',
+      apiKey: 'ds-key-1234',
+      fetchImpl: async (_input, init) => {
+        if (init) capturedInits.push(init);
+        return new Response(JSON.stringify({ data: { title: 'Doc', content: 'Body' } }), {
+          status: 200,
+        });
+      },
+    });
+    expect(capturedInits[1]?.redirect).toBe('error');
+
+    // 非标准 443 端口防 SSRF 端口扫描
+    await expect(
+      runExternalSearch({
+        query: 'port ssrf',
+        service: extendedService('searxng', {
+          apiKey: undefined,
+          endpoint: 'https://searx.example.com:8443/search',
+        }),
+        fetchImpl: okFetch,
+      })
+    ).rejects.toThrow(/443/);
+
+    await expect(
+      runDeepSeekFetch({
+        url: 'https://example.com:8080/internal',
+        apiKey: 'ds-key-1234',
+        fetchImpl: okFetch,
+      })
+    ).rejects.toThrow(/443/);
+
+    // 流挂起时 AbortSignal 在 < 200ms 内快速退出并确定性取消 reader
+    let streamCancelled = false;
+    let markReadingStarted: (() => void) | undefined;
+    let markStreamCancelled: (() => void) | undefined;
+    const readingStarted = new Promise<void>((resolve) => {
+      markReadingStarted = resolve;
+    });
+    const streamCancelledPromise = new Promise<void>((resolve) => {
+      markStreamCancelled = resolve;
+    });
+    const hangingStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"partial":'));
+      },
+      pull() {
+        markReadingStarted?.();
+      },
+      cancel() {
+        streamCancelled = true;
+        markStreamCancelled?.();
+      },
+    });
+    const abortCtrl = new AbortController();
+    const pending = runExternalSearch({
+      query: 'hang stream',
+      service: service('tavily'),
+      signal: abortCtrl.signal,
+      fetchImpl: async () => new Response(hangingStream, { status: 200 }),
+    });
+    const expectAbort = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    await readingStarted;
+    const startedAt = Date.now();
+    abortCtrl.abort();
+    await expectAbort;
+    expect(Date.now() - startedAt).toBeLessThan(200);
+    await streamCancelledPromise;
+    expect(streamCancelled).toBe(true);
+  });
+
+  it('falls back to DOM web detection and fails closed when react-native import fails or Platform.OS is missing', async () => {
+    const fetchSpy = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('window', { location: { protocol: 'https:', hostname: 'app.example.com' } });
+    vi.stubGlobal('document', {});
+    vi.stubGlobal('fetch', fetchSpy);
+
+    try {
+      // 1) import('react-native') 抛出异常时兜底识别为 web 并 fail-closed
+      vi.resetModules();
+      vi.doMock('react-native', () => {
+        throw new Error('react-native chunk unavailable');
+      });
+      const modWhenThrow = await import('../src/services/externalSearch');
+      await expect(
+        modWhenThrow.runExternalSearch({
+          query: 'dom fallback throw',
+          service: service('tavily'),
+          fetchImpl: fetchSpy,
+        })
+      ).rejects.toThrow(/正式 Web 构建不会发送/);
+      await expect(
+        modWhenThrow.runDeepSeekFetch({
+          url: 'https://example.com/article',
+          apiKey: 'ds-key-1234',
+          fetchImpl: fetchSpy,
+        })
+      ).rejects.toThrow(/正式 Web 构建不会发送/);
+
+      // 2) Platform.OS 缺失时同样兜底识别为 web 并 fail-closed
+      vi.resetModules();
+      vi.doMock('react-native', () => ({ Platform: {} }));
+      const modWhenMissingOs = await import('../src/services/externalSearch');
+      await expect(
+        modWhenMissingOs.runExternalSearch({
+          query: 'dom fallback empty os',
+          service: service('tavily'),
+          fetchImpl: fetchSpy,
+        })
+      ).rejects.toThrow(/正式 Web 构建不会发送/);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock('react-native');
+      vi.resetModules();
+      vi.unstubAllGlobals();
+    }
   });
 });

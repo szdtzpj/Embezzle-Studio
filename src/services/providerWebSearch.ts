@@ -1,16 +1,36 @@
-import type { ChatMessage, ChatTokenUsage, ProviderProfile } from '../domain/types';
+import type {
+  ChatMessage,
+  ChatTokenUsage,
+  ProviderContinuationBlock,
+  ProviderProfile,
+  ToolActivityItem,
+} from '../domain/types';
+import { isWeakSearchTitle, titleFromSearchUrl } from './externalSearch';
 import type { OpenAiResponsesInputMessage } from './openAiResponses';
 import {
   parseOpenAiResponsesResponse,
   toOpenAiResponsesInput,
 } from './openAiResponses';
+import {
+  isExactOfficialAnthropicProvider,
+  isExactOfficialDeepSeekProvider,
+  isExactOfficialGeminiProvider,
+  isExactOfficialXaiProvider,
+  isRelayOrCustomProvider,
+} from './providerSetup';
+import { isBlockedPublicHost } from './ssrfGuard';
 
 export type ProviderWebSearchProtocol =
   | 'openai-official'
+  | 'anthropic-official'
+  | 'gemini-official'
+  | 'xai-official'
+  | 'deepseek-official'
   | 'volcengine-ark'
   | 'bailian-compatible';
 
 export type OpenAiWebSearchContextSize = 'low' | 'medium' | 'high';
+export type AnthropicWebSearchToolType = 'web_search_20250305' | 'web_search_20260209';
 
 export interface ProviderWebSearchCitation {
   url: string;
@@ -25,6 +45,8 @@ export interface ProviderWebSearchResult {
   usage?: ChatTokenUsage;
   citations: ProviderWebSearchCitation[];
   webSearchTriggered: boolean;
+  toolActivity?: ToolActivityItem[];
+  providerContinuations?: ProviderContinuationBlock[];
 }
 
 export interface BuildProviderWebSearchRequestArgs {
@@ -32,25 +54,47 @@ export interface BuildProviderWebSearchRequestArgs {
   modelId: string;
   messages: ChatMessage[];
   searchContextSize?: OpenAiWebSearchContextSize;
+  anthropicToolType?: AnthropicWebSearchToolType;
   maxOutputTokens?: number;
+}
+
+export interface ProviderWebSearchRequestBody {
+  model?: string;
+  input?: OpenAiResponsesInputMessage[];
+  messages?: Array<Record<string, unknown>>;
+  contents?: Array<Record<string, unknown>>;
+  system?: string;
+  systemInstruction?: { parts: Array<{ text: string }> };
+  generationConfig?: { maxOutputTokens?: number };
+  tools: Array<Record<string, unknown>>;
+  store?: false;
+  max_output_tokens?: number;
+  max_tokens?: number;
 }
 
 export interface ProviderWebSearchRequest {
   protocol: ProviderWebSearchProtocol;
   url: string;
-  body: {
-    model: string;
-    input: OpenAiResponsesInputMessage[];
-    tools: Array<Record<string, unknown>>;
-    store?: false;
-    max_output_tokens?: number;
-  };
+  body: ProviderWebSearchRequestBody;
 }
 
 export interface ParseProviderWebSearchResponseArgs {
   provider: ProviderProfile;
   payload: unknown;
 }
+
+export type ProviderWebSearchCapability =
+  | {
+      supported: true;
+      mode: 'official-hosted';
+      protocol: ProviderWebSearchProtocol;
+    }
+  | {
+      supported: false;
+      mode: 'client-external-fallback';
+      isRelay: boolean;
+      reason: string;
+    };
 
 export class ProviderWebSearchProtocolError extends Error {
   constructor(message: string) {
@@ -106,6 +150,10 @@ function assertSupportedPath(url: URL, paths: ReadonlySet<string>, label: string
   }
 }
 
+/**
+ * 严格判定当前服务商是否允许启用官方托管联网搜索并返回协议标识。
+ * 中转站（`new-api-relay`）、仿冒域名或非 HTTPS 地址一律 fail-closed 抛出 `ProviderWebSearchProtocolError`。
+ */
 export function resolveProviderWebSearchProtocol(
   provider: ProviderProfile
 ): ProviderWebSearchProtocol {
@@ -141,7 +189,41 @@ export function resolveProviderWebSearchProtocol(
     return 'bailian-compatible';
   }
 
+  if (provider.kind === 'anthropic') {
+    if (!isExactOfficialAnthropicProvider(provider)) {
+      return protocolError('Anthropic 联网搜索只允许 api.anthropic.com 官方域名。');
+    }
+    return 'anthropic-official';
+  }
+
+  if (provider.kind === 'gemini') {
+    if (!isExactOfficialGeminiProvider(provider)) {
+      return protocolError('Gemini 联网搜索只允许 generativelanguage.googleapis.com 官方域名。');
+    }
+    return 'gemini-official';
+  }
+
+  if (provider.kind === 'xai-grok') {
+    if (!isExactOfficialXaiProvider(provider)) {
+      return protocolError('xAI Grok 联网搜索只允许 api.x.ai 官方域名。');
+    }
+    return 'xai-official';
+  }
+
+  if (provider.kind === 'deepseek') {
+    if (!isExactOfficialDeepSeekProvider(provider)) {
+      return protocolError('DeepSeek 联网搜索只允许 api.deepseek.com 官方域名。');
+    }
+    return 'deepseek-official';
+  }
+
   if (provider.kind === 'custom' || provider.kind === 'openai-compatible') {
+    if (provider.kind === 'custom' && host === 'api.deepseek.com') {
+      if (!isExactOfficialDeepSeekProvider(provider)) {
+        return protocolError('DeepSeek 联网搜索只允许 api.deepseek.com 官方域名。');
+      }
+      return 'deepseek-official';
+    }
     if (host !== 'api.openai.com') {
       return protocolError('OpenAI 联网搜索只允许 api.openai.com 官方域名。');
     }
@@ -156,12 +238,56 @@ export function resolveProviderWebSearchProtocol(
   return protocolError(`供应商类型 ${provider.kind} 未启用可信联网搜索协议。`);
 }
 
-export function getProviderWebSearchEndpoint(provider: ProviderProfile): string {
+/**
+ * 无异常地检测服务商官方托管搜索能力；对于中转站或自定义端点，引导降级使用客户端 `externalSearch`。
+ */
+export function resolveProviderWebSearchCapability(
+  provider: ProviderProfile
+): ProviderWebSearchCapability {
+  try {
+    const protocol = resolveProviderWebSearchProtocol(provider);
+    return {
+      supported: true,
+      mode: 'official-hosted',
+      protocol,
+    };
+  } catch (error) {
+    return {
+      supported: false,
+      mode: 'client-external-fallback',
+      isRelay: isRelayOrCustomProvider(provider),
+      reason:
+        error instanceof Error
+          ? `${error.message} 建议启用客户端外部搜索（DeepSeek Tools / Bocha / Exa / SearXNG / Tavily）通过 search_web 闭环联网。`
+          : '当前服务商不支持原生托管联网搜索，建议改用客户端外部搜索。',
+    };
+  }
+}
+
+/**
+ * 获取服务商官方托管搜索接口的规范化请求 URL。
+ */
+export function getProviderWebSearchEndpoint(
+  provider: ProviderProfile,
+  modelId?: string
+): string {
   const protocol = resolveProviderWebSearchProtocol(provider);
   const url = parsedProviderUrl(provider);
 
-  if (protocol === 'openai-official') {
+  if (protocol === 'openai-official' || protocol === 'xai-official') {
     return `${url.origin}/v1/responses`;
+  }
+  if (protocol === 'anthropic-official') {
+    return `${url.origin}/v1/messages`;
+  }
+  if (protocol === 'gemini-official') {
+    const cleanModel = modelId?.trim();
+    return cleanModel
+      ? `${url.origin}/v1beta/models/${encodeURIComponent(cleanModel)}:generateContent`
+      : `${url.origin}/v1beta/models`;
+  }
+  if (protocol === 'deepseek-official') {
+    return `${url.origin}/v1/chat/completions`;
   }
   if (protocol === 'volcengine-ark') {
     return `${url.origin}/api/v3/responses`;
@@ -170,10 +296,15 @@ export function getProviderWebSearchEndpoint(provider: ProviderProfile): string 
 }
 
 function assertTextOnlyMessages(messages: ChatMessage[], protocol: ProviderWebSearchProtocol): void {
-  if (
-    protocol !== 'openai-official' &&
-    messages.some((message) => (message.attachments?.length ?? 0) > 0)
-  ) {
+  const allowsMultimodal =
+    protocol === 'openai-official' ||
+    protocol === 'xai-official' ||
+    protocol === 'anthropic-official' ||
+    protocol === 'gemini-official';
+  if (!allowsMultimodal && messages.some((message) => (message.attachments?.length ?? 0) > 0)) {
+    if (protocol === 'deepseek-official') {
+      protocolError('DeepSeek 官方联网搜索仅支持纯文本对话输入。');
+    }
     protocolError('火山方舟和阿里百炼联网搜索首版只允许纯文本 Responses 输入。');
   }
 }
@@ -185,11 +316,124 @@ export function assertProviderWebSearchMessagesSupported(
   assertTextOnlyMessages(messages, resolveProviderWebSearchProtocol(provider));
 }
 
+function buildAnthropicWebSearchBody(
+  modelId: string,
+  messages: ChatMessage[],
+  anthropicToolType: AnthropicWebSearchToolType,
+  maxOutputTokens?: number
+): ProviderWebSearchRequestBody {
+  const systemParts: string[] = [];
+  const wireMessages: Array<Record<string, unknown>> = [];
+
+  for (const message of messages) {
+    if (message.status !== 'ready') {
+      protocolError('存在未完成的消息，不能发送联网搜索请求。');
+    }
+    if (message.role === 'system') {
+      if (message.content.trim()) {
+        systemParts.push(message.content.trim());
+      }
+      continue;
+    }
+    wireMessages.push({
+      role: message.role,
+      content: message.content,
+    });
+  }
+
+  return {
+    model: modelId,
+    max_tokens: maxOutputTokens ?? 4096,
+    ...(systemParts.length ? { system: systemParts.join('\n\n') } : {}),
+    messages: wireMessages,
+    tools: [
+      {
+        type: anthropicToolType,
+        name: 'web_search',
+        max_uses: 5,
+      },
+    ],
+  };
+}
+
+function buildGeminiWebSearchBody(
+  messages: ChatMessage[],
+  maxOutputTokens?: number
+): ProviderWebSearchRequestBody {
+  const systemParts: string[] = [];
+  const contents: Array<Record<string, unknown>> = [];
+
+  for (const message of messages) {
+    if (message.status !== 'ready') {
+      protocolError('存在未完成的消息，不能发送联网搜索请求。');
+    }
+    if (message.role === 'system') {
+      if (message.content.trim()) {
+        systemParts.push(message.content.trim());
+      }
+      continue;
+    }
+    contents.push({
+      role: message.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: message.content }],
+    });
+  }
+
+  return {
+    ...(systemParts.length
+      ? { systemInstruction: { parts: [{ text: systemParts.join('\n\n') }] } }
+      : {}),
+    contents,
+    tools: [{ google_search: {} }],
+    ...(maxOutputTokens !== undefined
+      ? { generationConfig: { maxOutputTokens } }
+      : {}),
+  };
+}
+
+function buildDeepSeekWebSearchBody(
+  modelId: string,
+  messages: ChatMessage[],
+  maxOutputTokens?: number
+): ProviderWebSearchRequestBody {
+  const wireMessages: Array<Record<string, unknown>> = [];
+
+  for (const message of messages) {
+    if (message.status !== 'ready') {
+      protocolError('存在未完成的消息，不能发送联网搜索请求。');
+    }
+    const patch =
+      message.role === 'assistant'
+        ? buildDeepSeekContinuationMessagePatch(message.providerContinuations)
+        : undefined;
+    wireMessages.push({
+      role: message.role,
+      content: message.content,
+      ...(patch ?? {}),
+    });
+  }
+
+  return {
+    model: modelId,
+    messages: wireMessages,
+    tools: [
+      { type: 'deepseek_web_search', name: 'deepseek_web_search' },
+      { type: 'deepseek_read_url', name: 'deepseek_read_url' },
+    ],
+    ...(maxOutputTokens !== undefined ? { max_tokens: maxOutputTokens } : {}),
+  };
+}
+
+/**
+ * 为各官方服务商构造标准化托管联网搜索请求。
+ * 注意：xAI 使用 `web_search` + `x_search`，严禁发送会返回 410 Gone 的 `search_parameters`。
+ */
 export function buildProviderWebSearchRequest({
   provider,
   modelId,
   messages,
   searchContextSize,
+  anthropicToolType = 'web_search_20250305',
   maxOutputTokens,
 }: BuildProviderWebSearchRequestArgs): ProviderWebSearchRequest {
   const protocol = resolveProviderWebSearchProtocol(provider);
@@ -212,6 +456,36 @@ export function buildProviderWebSearchRequest({
   }
 
   assertTextOnlyMessages(messages, protocol);
+
+  if (protocol === 'anthropic-official') {
+    return {
+      protocol,
+      url: getProviderWebSearchEndpoint(provider, normalizedModelId),
+      body: buildAnthropicWebSearchBody(
+        normalizedModelId,
+        messages,
+        anthropicToolType,
+        maxOutputTokens
+      ),
+    };
+  }
+
+  if (protocol === 'gemini-official') {
+    return {
+      protocol,
+      url: getProviderWebSearchEndpoint(provider, normalizedModelId),
+      body: buildGeminiWebSearchBody(messages, maxOutputTokens),
+    };
+  }
+
+  if (protocol === 'deepseek-official') {
+    return {
+      protocol,
+      url: getProviderWebSearchEndpoint(provider, normalizedModelId),
+      body: buildDeepSeekWebSearchBody(normalizedModelId, messages, maxOutputTokens),
+    };
+  }
+
   const input = toOpenAiResponsesInput(messages);
 
   if (protocol === 'openai-official') {
@@ -226,6 +500,20 @@ export function buildProviderWebSearchRequest({
         model: normalizedModelId,
         input,
         tools: [tool],
+        store: false,
+        ...(maxOutputTokens !== undefined ? { max_output_tokens: maxOutputTokens } : {}),
+      },
+    };
+  }
+
+  if (protocol === 'xai-official') {
+    return {
+      protocol,
+      url: getProviderWebSearchEndpoint(provider),
+      body: {
+        model: normalizedModelId,
+        input,
+        tools: [{ type: 'web_search' }, { type: 'x_search' }],
         store: false,
         ...(maxOutputTokens !== undefined ? { max_output_tokens: maxOutputTokens } : {}),
       },
@@ -262,66 +550,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function unsafeCitationHostname(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
-  if (
-    !host ||
-    (!host.includes('.') && !host.includes(':')) ||
-    host === 'localhost' ||
-    host.endsWith('.localhost') ||
-    host.endsWith('.local') ||
-    host.endsWith('.internal') ||
-    host.endsWith('.lan') ||
-    host.endsWith('.home.arpa')
-  ) {
-    return true;
-  }
-
-  if (host.includes(':')) {
-    const segments = host.split(':');
-    const first = Number.parseInt(segments[0] || '0', 16);
-    const second = Number.parseInt(segments[1] || '0', 16);
-    const third = Number.parseInt(segments[2] || '0', 16);
-    return (
-      host.startsWith('::') ||
-      host.startsWith('64:ff9b:') ||
-      host.startsWith('100::') ||
-      host.startsWith('2002:') ||
-      first === 0x5f00 ||
-      (first >= 0xfc00 && first <= 0xfdff) ||
-      (first >= 0xfe80 && first <= 0xfeff) ||
-      (first >= 0xff00 && first <= 0xffff) ||
-      (first === 0x3fff && second <= 0x0fff) ||
-      (first === 0x2001 &&
-        (second === 0 ||
-          (second === 2 && third === 0) ||
-          second === 0x0db8 ||
-          (second >= 0x10 && second <= 0x2f)))
-    );
-  }
-
-  const octets = host.split('.').map(Number);
-  if (
-    octets.length !== 4 ||
-    octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)
-  ) {
-    return /^[0-9.]+$/.test(host);
-  }
-  const [a, b, c] = octets;
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 192 && b === 0 && (c === 0 || c === 2)) ||
-    (a === 192 && b === 88 && c === 99) ||
-    (a === 198 && (b === 18 || b === 19)) ||
-    (a === 198 && b === 51 && c === 100) ||
-    (a === 203 && b === 0 && c === 113) ||
-    a >= 224
-  );
+  return isBlockedPublicHost(hostname);
 }
 
 function validatedCitationUrl(value: unknown): string | undefined {
@@ -355,7 +584,10 @@ interface PendingCitation extends ProviderWebSearchCitation {
   partOffset: number;
 }
 
-function citationsAndEvidence(payload: Record<string, unknown>): {
+function citationsAndEvidence(
+  payload: Record<string, unknown>,
+  protocol: ProviderWebSearchProtocol
+): {
   citations: ProviderWebSearchCitation[];
   annotationEvidence: boolean;
   callEvidence: boolean;
@@ -372,7 +604,7 @@ function citationsAndEvidence(payload: Record<string, unknown>): {
     if (!isRecord(item)) {
       continue;
     }
-    if (item.type === 'web_search_call') {
+    if (item.type === 'web_search_call' || item.type === 'x_search_call') {
       callEvidence = true;
     }
     if (item.type !== 'message' || !Array.isArray(item.content)) {
@@ -435,11 +667,17 @@ function citationsAndEvidence(payload: Record<string, unknown>): {
           continue;
         }
         annotationEvidence = true;
+        const rawTitle =
+          typeof annotation.title === 'string' && annotation.title.trim()
+            ? annotation.title.trim()
+            : undefined;
+        const normalizedTitle =
+          protocol === 'xai-official' && rawTitle && isWeakSearchTitle(rawTitle, url)
+            ? titleFromSearchUrl(url)
+            : rawTitle;
         pending.push({
           url,
-          ...(typeof annotation.title === 'string' && annotation.title.trim()
-            ? { title: annotation.title.trim() }
-            : {}),
+          ...(normalizedTitle ? { title: normalizedTitle } : {}),
           startIndex: start as number,
           endIndex: end as number,
           partOffset,
@@ -467,6 +705,27 @@ function citationsAndEvidence(payload: Record<string, unknown>): {
     includedMessageCount += 1;
   }
 
+  // xAI Responses 额外补充顶层 payload.citations
+  if (protocol === 'xai-official' && Array.isArray(payload.citations)) {
+    for (const entry of payload.citations) {
+      const rawUrl = typeof entry === 'string' ? entry : isRecord(entry) ? entry.url : undefined;
+      const url = validatedCitationUrl(rawUrl);
+      if (!url || seenUrls.has(url)) continue;
+      seenUrls.add(url);
+      annotationEvidence = true;
+      const rawTitle =
+        isRecord(entry) && typeof entry.title === 'string' ? entry.title.trim() : '';
+      const title =
+        !rawTitle || isWeakSearchTitle(rawTitle, url) ? titleFromSearchUrl(url) : rawTitle;
+      citations.push({
+        url,
+        ...(title ? { title } : {}),
+        startIndex: 0,
+        endIndex: 0,
+      });
+    }
+  }
+
   return { citations, annotationEvidence, callEvidence };
 }
 
@@ -491,17 +750,540 @@ function bailianWebSearchCount(payload: Record<string, unknown>): number {
   return count as number;
 }
 
+const DANGEROUS_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * 递归剥离 `__proto__`、`constructor`、`prototype` 等原型污染危险自有属性，返回安全的纯对象或数组。
+ */
+function sanitizePlainValue(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (seen.has(value)) {
+    return undefined;
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizePlainValue(item, seen));
+  }
+  const clean: Record<string, unknown> = {};
+  for (const key of Object.keys(value)) {
+    if (DANGEROUS_OBJECT_KEYS.has(key)) {
+      continue;
+    }
+    const sanitizedChild = sanitizePlainValue((value as Record<string, unknown>)[key], seen);
+    if (sanitizedChild !== undefined) {
+      clean[key] = sanitizedChild;
+    }
+  }
+  return clean;
+}
+
+function sanitizePlainRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return sanitizePlainValue(value) as Record<string, unknown>;
+}
+
+/**
+ * 从 DeepSeek 响应对象、message 或流式 delta 中提取服务端工具调用记录 `server_tool_calls`（已清洗危险键）。
+ */
+export function extractDeepSeekServerToolCalls(payloadOrMessageOrDelta: unknown): unknown[] {
+  if (!isRecord(payloadOrMessageOrDelta)) {
+    return [];
+  }
+  let rawList: unknown[] = [];
+  if (Array.isArray(payloadOrMessageOrDelta.server_tool_calls)) {
+    rawList = payloadOrMessageOrDelta.server_tool_calls;
+  } else if (
+    Array.isArray(payloadOrMessageOrDelta.choices) &&
+    isRecord(payloadOrMessageOrDelta.choices[0])
+  ) {
+    const choice = payloadOrMessageOrDelta.choices[0];
+    if (isRecord(choice.message) && Array.isArray(choice.message.server_tool_calls)) {
+      rawList = choice.message.server_tool_calls;
+    } else if (isRecord(choice.delta) && Array.isArray(choice.delta.server_tool_calls)) {
+      rawList = choice.delta.server_tool_calls;
+    }
+  }
+  return rawList.map((entry) => sanitizePlainValue(entry));
+}
+
+/**
+ * 将提取的 DeepSeek `server_tool_calls` 封装为可持久化的 `ProviderContinuationBlock`。
+ */
+export function toDeepSeekServerToolCallsBlock(
+  serverToolCalls: unknown[]
+): ProviderContinuationBlock | undefined {
+  if (!Array.isArray(serverToolCalls) || !serverToolCalls.length) {
+    return undefined;
+  }
+  return {
+    provider: 'deepseek',
+    type: 'server_tool_calls',
+    serverToolCalls: serverToolCalls.map((entry) => sanitizePlainValue(entry)),
+  };
+}
+
+/**
+ * 在多轮对话序列化 DeepSeek assistant 历史消息时，提取其中的 `server_tool_calls` 续接块并生成补丁字段。
+ */
+export function buildDeepSeekContinuationMessagePatch(
+  continuations?: ProviderContinuationBlock[]
+): { server_tool_calls: unknown[] } | undefined {
+  if (!Array.isArray(continuations) || !continuations.length) {
+    return undefined;
+  }
+  const merged: unknown[] = [];
+  for (const block of continuations) {
+    if (
+      block &&
+      block.provider === 'deepseek' &&
+      block.type === 'server_tool_calls' &&
+      Array.isArray(block.serverToolCalls)
+    ) {
+      merged.push(...block.serverToolCalls.map((entry) => sanitizePlainValue(entry)));
+    }
+  }
+  return merged.length ? { server_tool_calls: merged } : undefined;
+}
+
+/**
+ * 解析 DeepSeek Chat Completions `annotations` 中的 `url_citation`（自动过滤私网与非 HTTPS URL 并按 URL 去重）。
+ */
+export function parseDeepSeekUrlCitations(
+  annotations: unknown,
+  text?: string
+): ProviderWebSearchCitation[] {
+  if (!Array.isArray(annotations)) {
+    return [];
+  }
+  const citations: ProviderWebSearchCitation[] = [];
+  const seenUrls = new Set<string>();
+  const maxTextLen = typeof text === 'string' ? text.length : Number.MAX_SAFE_INTEGER;
+
+  for (const rawAnnotation of annotations) {
+    if (!isRecord(rawAnnotation)) continue;
+    const nestedCitation = isRecord(rawAnnotation.url_citation)
+      ? rawAnnotation.url_citation
+      : rawAnnotation;
+    if (
+      rawAnnotation.type !== 'url_citation' &&
+      typeof nestedCitation.url !== 'string'
+    ) {
+      continue;
+    }
+    const url = validatedCitationUrl(nestedCitation.url);
+    if (!url || seenUrls.has(url)) continue;
+
+    const rawStart = nestedCitation.start_index;
+    const rawEnd = nestedCitation.end_index;
+    const validRange =
+      Number.isInteger(rawStart) &&
+      Number.isInteger(rawEnd) &&
+      (rawStart as number) >= 0 &&
+      (rawEnd as number) > (rawStart as number) &&
+      (rawEnd as number) <= maxTextLen;
+
+    seenUrls.add(url);
+    const title =
+      typeof nestedCitation.title === 'string' && nestedCitation.title.trim()
+        ? nestedCitation.title.trim()
+        : undefined;
+    citations.push({
+      url,
+      ...(title ? { title } : {}),
+      startIndex: validRange ? (rawStart as number) : 0,
+      endIndex: validRange ? (rawEnd as number) : 0,
+    });
+  }
+
+  return citations;
+}
+
+/**
+ * 将 DeepSeek `server_tool_calls`（`deepseek_web_search` / `deepseek_read_url`）映射为统一的 `ToolActivityItem[]`。
+ */
+export function buildDeepSeekServerToolActivity(serverToolCalls: unknown[]): ToolActivityItem[] {
+  if (!Array.isArray(serverToolCalls) || !serverToolCalls.length) {
+    return [];
+  }
+  const items: ToolActivityItem[] = [];
+
+  serverToolCalls.forEach((rawCall, idx) => {
+    if (!isRecord(rawCall)) return;
+    const callType = typeof rawCall.type === 'string' ? rawCall.type.trim() : 'deepseek_web_search';
+    const id = typeof rawCall.id === 'string' && rawCall.id.trim() ? rawCall.id.trim() : `ds_tool_${idx}`;
+    const rawInput = isRecord(rawCall.input)
+      ? rawCall.input
+      : isRecord(rawCall.action)
+        ? rawCall.action
+        : undefined;
+    const input = rawInput ? sanitizePlainRecord(rawInput) : undefined;
+    const output = isRecord(rawCall.output) ? rawCall.output : undefined;
+    const query =
+      typeof input?.query === 'string' && input.query.trim() ? input.query.trim() : undefined;
+    const targetUrl =
+      typeof input?.url === 'string' && input.url.trim() ? input.url.trim() : undefined;
+
+    const rawResults = Array.isArray(output?.results)
+      ? output.results
+      : Array.isArray(output?.sources)
+        ? output.sources
+        : [];
+    const mappedItems: Array<{ title: string; url: string; text?: string }> = [];
+    for (const row of rawResults) {
+      if (!isRecord(row)) continue;
+      const url = validatedCitationUrl(row.url);
+      if (!url) continue;
+      const title =
+        typeof row.title === 'string' && row.title.trim() ? row.title.trim() : titleFromSearchUrl(url);
+      const snippet =
+        typeof row.snippet === 'string'
+          ? row.snippet.trim()
+          : typeof row.content === 'string'
+            ? row.content.trim()
+            : undefined;
+      mappedItems.push({ title, url, ...(snippet ? { text: snippet } : {}) });
+    }
+
+    const isReadUrl = callType === 'deepseek_read_url';
+    const title = isReadUrl
+      ? targetUrl
+        ? `读取网页「${targetUrl}」`
+        : '读取网页'
+      : query
+        ? `搜索「${query}」`
+        : 'DeepSeek 联网检索';
+    const summary = isReadUrl
+      ? typeof output?.title === 'string' && output.title.trim()
+        ? `已读取：${output.title.trim()}`
+        : '网页读取完成'
+      : mappedItems.length
+        ? `返回 ${mappedItems.length} 条结果`
+        : '检索完成';
+
+    items.push({
+      id,
+      toolName: isReadUrl ? 'deepseek_read_url' : 'web_search',
+      title,
+      ...(input ? { arguments: input } : {}),
+      status: 'completed',
+      summary,
+      ...(mappedItems.length || query
+        ? {
+            content: JSON.stringify({
+              ...(query ? { query } : {}),
+              items: mappedItems,
+            }),
+          }
+        : {}),
+      sequence: idx,
+    });
+  });
+
+  return items;
+}
+
+function parseJsonPayload(payload: unknown): Record<string, unknown> {
+  if (typeof payload === 'string') {
+    const trimmed = payload.trim();
+    if (!trimmed) {
+      return protocolError('联网搜索响应内容为空。');
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (!isRecord(parsed)) {
+        return protocolError('联网搜索响应必须是 JSON 对象。');
+      }
+      return parsed;
+    } catch (error) {
+      return protocolError(
+        `联网搜索响应 JSON 无法解析：${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+  if (!isRecord(payload)) {
+    return protocolError('联网搜索响应必须是 JSON 对象。');
+  }
+  return payload;
+}
+
+function extractChatTokenUsage(rawUsage: unknown): ChatTokenUsage | undefined {
+  if (!isRecord(rawUsage)) return undefined;
+  const promptTokens =
+    typeof rawUsage.prompt_tokens === 'number'
+      ? rawUsage.prompt_tokens
+      : typeof rawUsage.input_tokens === 'number'
+        ? rawUsage.input_tokens
+        : undefined;
+  const completionTokens =
+    typeof rawUsage.completion_tokens === 'number'
+      ? rawUsage.completion_tokens
+      : typeof rawUsage.output_tokens === 'number'
+        ? rawUsage.output_tokens
+        : undefined;
+  const totalTokens =
+    typeof rawUsage.total_tokens === 'number' ? rawUsage.total_tokens : undefined;
+  const usage: ChatTokenUsage = {
+    inputTokens: promptTokens,
+    outputTokens: completionTokens,
+    totalTokens,
+  };
+  return Object.values(usage).some((v) => typeof v === 'number') ? usage : undefined;
+}
+
+function parseDeepSeekWebSearchPayload(parsed: Record<string, unknown>): ProviderWebSearchResult {
+  if (isRecord(parsed.error)) {
+    const msg =
+      typeof parsed.error.message === 'string' && parsed.error.message.trim()
+        ? parsed.error.message.trim()
+        : 'DeepSeek 返回错误';
+    protocolError(`DeepSeek 联网搜索失败：${msg}`);
+  }
+  if (!Array.isArray(parsed.choices) || !isRecord(parsed.choices[0])) {
+    return protocolError('DeepSeek 联网搜索响应缺少 choices 数组。');
+  }
+  const message = isRecord(parsed.choices[0].message) ? parsed.choices[0].message : {};
+  const content = typeof message.content === 'string' ? message.content : '';
+  const reasoningContent =
+    typeof message.reasoning_content === 'string' && message.reasoning_content.trim()
+      ? message.reasoning_content
+      : undefined;
+  const serverToolCalls = extractDeepSeekServerToolCalls(parsed);
+  const continuationBlock = toDeepSeekServerToolCallsBlock(serverToolCalls);
+  const toolActivity = buildDeepSeekServerToolActivity(serverToolCalls);
+
+  const citations = parseDeepSeekUrlCitations(message.annotations, content);
+  const seenUrls = new Set(citations.map((c) => c.url));
+
+  // 同步提取 server_tool_calls 内部返回的合法公开 HTTPS URL
+  for (const call of serverToolCalls) {
+    if (!isRecord(call)) continue;
+    const output = isRecord(call.output) ? call.output : undefined;
+    const results = Array.isArray(output?.results) ? output.results : [];
+    for (const row of results) {
+      if (!isRecord(row)) continue;
+      const url = validatedCitationUrl(row.url);
+      if (!url || seenUrls.has(url)) continue;
+      seenUrls.add(url);
+      const title =
+        typeof row.title === 'string' && row.title.trim() ? row.title.trim() : undefined;
+      citations.push({
+        url,
+        ...(title ? { title } : {}),
+        startIndex: 0,
+        endIndex: 0,
+      });
+    }
+  }
+
+  if (!content.trim() && !reasoningContent && !serverToolCalls.length) {
+    return protocolError('DeepSeek 联网搜索未返回文本或工具调用结果。');
+  }
+
+  return {
+    content,
+    ...(reasoningContent ? { reasoningContent } : {}),
+    usage: extractChatTokenUsage(parsed.usage),
+    citations,
+    webSearchTriggered: citations.length > 0 || serverToolCalls.length > 0,
+    ...(toolActivity.length ? { toolActivity } : {}),
+    ...(continuationBlock ? { providerContinuations: [continuationBlock] } : {}),
+  };
+}
+
+function parseAnthropicWebSearchPayload(parsed: Record<string, unknown>): ProviderWebSearchResult {
+  if (parsed.type === 'error' || isRecord(parsed.error)) {
+    const errObj = isRecord(parsed.error) ? parsed.error : parsed;
+    const msg =
+      typeof errObj.message === 'string' && errObj.message.trim()
+        ? errObj.message.trim()
+        : 'Anthropic 返回错误';
+    protocolError(`Anthropic 联网搜索失败：${msg}`);
+  }
+  if (!Array.isArray(parsed.content)) {
+    return protocolError('Anthropic 联网搜索响应缺少 content 数组。');
+  }
+
+  const textParts: string[] = [];
+  const thinkingParts: string[] = [];
+  const citations: ProviderWebSearchCitation[] = [];
+  const seenUrls = new Set<string>();
+  let toolEvidence = false;
+
+  for (const block of parsed.content) {
+    if (!isRecord(block)) continue;
+    if (block.type === 'thinking' && typeof block.thinking === 'string') {
+      thinkingParts.push(block.thinking);
+    } else if (block.type === 'server_tool_use' || block.type === 'web_search_tool_result') {
+      toolEvidence = true;
+      if (block.type === 'web_search_tool_result' && Array.isArray(block.content)) {
+        for (const item of block.content) {
+          if (!isRecord(item)) continue;
+          const url = validatedCitationUrl(item.url);
+          if (!url || seenUrls.has(url)) continue;
+          seenUrls.add(url);
+          const title = typeof item.title === 'string' && item.title.trim() ? item.title.trim() : undefined;
+          citations.push({ url, ...(title ? { title } : {}), startIndex: 0, endIndex: 0 });
+        }
+      }
+    } else if (block.type === 'text' && typeof block.text === 'string') {
+      const startOffset = textParts.join('').length;
+      textParts.push(block.text);
+      if (Array.isArray(block.citations)) {
+        for (const c of block.citations) {
+          if (!isRecord(c)) continue;
+          const url = validatedCitationUrl(c.url);
+          if (!url || seenUrls.has(url)) continue;
+          seenUrls.add(url);
+          const title = typeof c.title === 'string' && c.title.trim() ? c.title.trim() : undefined;
+          citations.push({
+            url,
+            ...(title ? { title } : {}),
+            startIndex: startOffset,
+            endIndex: startOffset + block.text.length,
+          });
+        }
+      }
+    }
+  }
+
+  const content = textParts.join('');
+  const reasoningContent = thinkingParts.length ? thinkingParts.join('\n\n') : undefined;
+  if (!content.trim() && !reasoningContent) {
+    return protocolError('Anthropic 联网搜索未返回文本或推理内容。');
+  }
+
+  return {
+    content,
+    ...(reasoningContent ? { reasoningContent } : {}),
+    usage: extractChatTokenUsage(parsed.usage),
+    citations,
+    webSearchTriggered: toolEvidence || citations.length > 0,
+  };
+}
+
+function parseGeminiWebSearchPayload(parsed: Record<string, unknown>): ProviderWebSearchResult {
+  if (isRecord(parsed.error)) {
+    const msg =
+      typeof parsed.error.message === 'string' && parsed.error.message.trim()
+        ? parsed.error.message.trim()
+        : 'Gemini 返回错误';
+    protocolError(`Gemini 联网搜索失败：${msg}`);
+  }
+  const candidates = Array.isArray(parsed.candidates) ? parsed.candidates : [];
+  const firstCandidate = isRecord(candidates[0]) ? candidates[0] : undefined;
+  if (!firstCandidate) {
+    return protocolError('Gemini 联网搜索响应缺少 candidates 数组。');
+  }
+
+  const contentObj = isRecord(firstCandidate.content) ? firstCandidate.content : {};
+  const parts = Array.isArray(contentObj.parts) ? contentObj.parts : [];
+  const textParts: string[] = [];
+  const thoughtParts: string[] = [];
+
+  for (const part of parts) {
+    if (!isRecord(part) || typeof part.text !== 'string') continue;
+    if (part.thought === true) {
+      thoughtParts.push(part.text);
+    } else {
+      textParts.push(part.text);
+    }
+  }
+
+  const grounding = isRecord(firstCandidate.groundingMetadata)
+    ? firstCandidate.groundingMetadata
+    : undefined;
+  const webSearchQueries = Array.isArray(grounding?.webSearchQueries)
+    ? grounding.webSearchQueries
+    : [];
+  const groundingChunks = Array.isArray(grounding?.groundingChunks)
+    ? grounding.groundingChunks
+    : [];
+  const citations: ProviderWebSearchCitation[] = [];
+  const seenUrls = new Set<string>();
+
+  for (const chunk of groundingChunks) {
+    if (!isRecord(chunk) || !isRecord(chunk.web)) continue;
+    const url = validatedCitationUrl(chunk.web.uri ?? chunk.web.url);
+    if (!url || seenUrls.has(url)) continue;
+    seenUrls.add(url);
+    const title =
+      typeof chunk.web.title === 'string' && chunk.web.title.trim()
+        ? chunk.web.title.trim()
+        : undefined;
+    citations.push({ url, ...(title ? { title } : {}), startIndex: 0, endIndex: 0 });
+  }
+
+  const content = textParts.join('');
+  const reasoningContent = thoughtParts.length ? thoughtParts.join('\n\n') : undefined;
+  if (!content.trim() && !reasoningContent) {
+    return protocolError('Gemini 联网搜索未返回文本或推理内容。');
+  }
+
+  const usageMeta = isRecord(parsed.usageMetadata) ? parsed.usageMetadata : undefined;
+  const usage: ChatTokenUsage | undefined = usageMeta
+    ? {
+        inputTokens:
+          typeof usageMeta.promptTokenCount === 'number' ? usageMeta.promptTokenCount : undefined,
+        outputTokens:
+          typeof usageMeta.candidatesTokenCount === 'number'
+            ? usageMeta.candidatesTokenCount
+            : undefined,
+        reasoningTokens:
+          typeof usageMeta.thoughtsTokenCount === 'number'
+            ? usageMeta.thoughtsTokenCount
+            : undefined,
+        totalTokens:
+          typeof usageMeta.totalTokenCount === 'number' ? usageMeta.totalTokenCount : undefined,
+      }
+    : undefined;
+
+  return {
+    content,
+    ...(reasoningContent ? { reasoningContent } : {}),
+    ...(usage && Object.values(usage).some((v) => typeof v === 'number') ? { usage } : {}),
+    citations,
+    webSearchTriggered:
+      webSearchQueries.length > 0 || groundingChunks.length > 0 || citations.length > 0,
+  };
+}
+
+/**
+ * 解析各官方服务商联网搜索响应载荷，输出统一的正文、推理、引用列表与联网触发证据标识。
+ */
 export function parseProviderWebSearchResponse({
   provider,
   payload,
 }: ParseProviderWebSearchResponseArgs): ProviderWebSearchResult {
   const protocol = resolveProviderWebSearchProtocol(provider);
-  const parsedResult = parseOpenAiResponsesResponse(payload);
+  const parsedJson = parseJsonPayload(payload);
+
+  if (protocol === 'deepseek-official') {
+    return parseDeepSeekWebSearchPayload(parsedJson);
+  }
+  if (protocol === 'anthropic-official') {
+    return parseAnthropicWebSearchPayload(parsedJson);
+  }
+  if (protocol === 'gemini-official') {
+    return parseGeminiWebSearchPayload(parsedJson);
+  }
+
+  let parsedResult: ReturnType<typeof parseOpenAiResponsesResponse>;
+  try {
+    parsedResult = parseOpenAiResponsesResponse(parsedJson, {
+      continuationProvider: protocol === 'xai-official' ? 'xai' : 'openai',
+    });
+  } catch (error) {
+    return protocolError(error instanceof Error ? error.message : String(error));
+  }
   if (!isRecord(parsedResult.raw)) {
     return protocolError('联网搜索响应必须是 JSON 对象。');
   }
 
-  const { citations, annotationEvidence, callEvidence } = citationsAndEvidence(parsedResult.raw);
+  const { citations, annotationEvidence, callEvidence } = citationsAndEvidence(
+    parsedResult.raw,
+    protocol
+  );
   const bailianEvidence =
     protocol === 'bailian-compatible' && bailianWebSearchCount(parsedResult.raw) > 0;
 

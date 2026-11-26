@@ -2,6 +2,11 @@ import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 
 import type { CloudSyncProviderKind } from '../domain/types';
+import {
+  awaitStreamCancelSettled,
+  createAbortPromise,
+  isAbortError,
+} from './ssrfGuard';
 
 export const MAX_SYNC_OBJECT_BYTES = 10 * 1024 * 1024;
 export const MAX_SYNC_MANIFEST_BYTES = 64 * 1024;
@@ -136,13 +141,19 @@ function responseErrorCode(status: number): CloudSyncErrorCode {
 }
 
 export function redactSensitiveText(value: string, maximum = 4_096): string {
-  const sensitiveField = '(?:x-amz-[a-z-]+|authorization|password|secret|access[_-]?key|session[_-]?token|security[_-]?token|api[_-]?key|token|signature|credential)';
+  const sensitiveField =
+    '(?:x-amz-[a-z-]+|x-api-key|x-goog-api-key|authorization|password|secret|access[_-]?key|session[_-]?token|security[_-]?token|api[_-]?key|token|signature|credential)';
+  const combinedFieldPattern = new RegExp(
+    `(${sensitiveField})\\s*(?:\\\\*["'])?\\s*[:=]\\s*(?:((?:\\\\+)["'])[^\\r\\n]{0,2048}?\\2|"[^"\\r\\n]*"|'[^'\\r\\n]*'|(?:bearer|basic|token)\\s+(?:"[^"\\r\\n]*"|'[^'\\r\\n]*'|[^\\s"'\\r\\n,;&}\\])]+)|[^\\s"'\\r\\n,;&}\\])]+)`,
+    'giu'
+  );
   return value
+    .replace(combinedFieldPattern, '$1=[redacted]')
+    .replace(/\bBearer\s+(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s"'`,;)}\]]+)/giu, 'Bearer [redacted]')
     .replace(
-      new RegExp(`(${sensitiveField})\\s*(?:["']?\\s*[:=]\\s*["']?)([^"'\\r\\n,;&}]+)["']?`, 'giu'),
-      '$1=[redacted]'
+      /([?&](?:api[_-]?key|x-api-key|access[_-]?token|client[_-]?secret|token|key|password|secret|signature|credential)=)[^&\s]*/giu,
+      '$1[redacted]'
     )
-    .replace(/([?&](?:token|key|password|secret|signature|credential)=)[^&\s]*/giu, '$1[redacted]')
     .replace(/\s+/gu, ' ')
     .trim()
     .slice(0, maximum);
@@ -158,16 +169,49 @@ export async function readBoundedBytes(
   label: string,
   signal?: AbortSignal
 ): Promise<Uint8Array> {
+  if (signal?.aborted) {
+    void response.body?.cancel().catch(() => undefined);
+    throw new CloudSyncError('cancelled', '同步请求已取消。');
+  }
   const declared = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declared)) assertBoundedSize(declared, limit, label);
-  if (signal?.aborted) throw new CloudSyncError('cancelled', '同步请求已取消。');
+  if (Number.isFinite(declared)) {
+    try {
+      assertBoundedSize(declared, limit, label);
+    } catch (error) {
+      void response.body?.cancel().catch(() => undefined);
+      throw error;
+    }
+  }
 
   const reader = response.body?.getReader();
+  let cancelPromise: Promise<unknown> | null = null;
+  const { promise: abortPromise, cleanup: cleanupAbort } = createAbortPromise(signal, () => {
+    if (reader) {
+      cancelPromise = reader.cancel().catch(() => undefined);
+    } else if (response.body) {
+      cancelPromise = response.body.cancel().catch(() => undefined);
+    }
+  });
+
   if (!reader) {
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (signal?.aborted) throw new CloudSyncError('cancelled', '同步请求已取消。');
-    assertBoundedSize(bytes.byteLength, limit, label);
-    return bytes;
+    try {
+      const buffer = abortPromise
+        ? await Promise.race([response.arrayBuffer(), abortPromise])
+        : await response.arrayBuffer();
+      if (signal?.aborted) throw new CloudSyncError('cancelled', '同步请求已取消。');
+      const bytes = new Uint8Array(buffer);
+      assertBoundedSize(bytes.byteLength, limit, label);
+      return bytes;
+    } catch (error) {
+      if (error instanceof CloudSyncError) throw error;
+      if (isAbortError(error) || signal?.aborted) {
+        throw new CloudSyncError('cancelled', '同步请求已取消。');
+      }
+      throw abortAwareError(error, signal);
+    } finally {
+      cleanupAbort();
+      await awaitStreamCancelSettled(cancelPromise);
+    }
   }
 
   const chunks: Uint8Array[] = [];
@@ -175,10 +219,16 @@ export async function readBoundedBytes(
   try {
     while (true) {
       if (signal?.aborted) {
-        await reader.cancel();
+        await reader.cancel().catch(() => undefined);
         throw new CloudSyncError('cancelled', '同步请求已取消。');
       }
-      const { done, value } = await reader.read();
+      const { done, value } = abortPromise
+        ? await Promise.race([reader.read(), abortPromise])
+        : await reader.read();
+      if (signal?.aborted) {
+        await reader.cancel().catch(() => undefined);
+        throw new CloudSyncError('cancelled', '同步请求已取消。');
+      }
       if (done) break;
       if (!value) continue;
       total += value.byteLength;
@@ -192,9 +242,18 @@ export async function readBoundedBytes(
       // Best effort cancellation after a bounded-read failure.
     }
     if (error instanceof CloudSyncError) throw error;
+    if (isAbortError(error) || signal?.aborted) {
+      throw new CloudSyncError('cancelled', '同步请求已取消。');
+    }
     throw abortAwareError(error, signal);
   } finally {
-    reader.releaseLock();
+    cleanupAbort();
+    await awaitStreamCancelSettled(cancelPromise);
+    try {
+      reader.releaseLock();
+    } catch {
+      // 流已释放或取消时忽略
+    }
   }
   const joined = new Uint8Array(total);
   let offset = 0;

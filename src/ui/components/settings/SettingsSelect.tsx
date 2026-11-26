@@ -1,7 +1,9 @@
 import { useState } from 'react';
-import { Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Keyboard, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Check, ChevronDown } from 'lucide-react-native';
 import { AnimatedPressable } from '../AnimatedPressable';
+import { OverlayPortal } from '../AppDialogHost';
 import { MotionItem } from '../Motion';
 import { useKelivoTheme, type KelivoTheme } from '../../theme';
 
@@ -28,6 +30,7 @@ export function SettingsSelect<T extends string>({
   onChange,
 }: SettingsSelectProps<T>) {
   const theme = useKelivoTheme();
+  const insets = useSafeAreaInsets();
   const styles = getStyles(theme);
   const [open, setOpen] = useState(false);
   const selected = options.find((option) => option.key === value);
@@ -47,7 +50,10 @@ export function SettingsSelect<T extends string>({
         accessibilityLabel={accessibilityLabel ?? displayLabel}
         accessibilityState={{ disabled, expanded: open }}
         disabled={disabled}
-        onPress={() => setOpen(true)}
+        onPress={() => {
+          Keyboard.dismiss();
+          setOpen(true);
+        }}
         haptic="selection"
         pressScale={0.995}
         style={[styles.field, disabled && styles.fieldDisabled, open && styles.fieldOpen]}
@@ -66,14 +72,23 @@ export function SettingsSelect<T extends string>({
         />
       </AnimatedPressable>
 
-      <Modal
+      <OverlayPortal
         visible={open}
-        transparent
-        statusBarTranslucent
-        animationType="fade"
+        layer="sheet"
         onRequestClose={close}
       >
-        <Pressable style={styles.scrim} onPress={close}>
+        <Pressable
+          style={[
+            styles.scrim,
+            {
+              paddingTop: Math.max(24, insets.top + 12),
+              paddingBottom: Math.max(24, insets.bottom + 12),
+              paddingLeft: Math.max(28, insets.left + 12),
+              paddingRight: Math.max(28, insets.right + 12),
+            },
+          ]}
+          onPress={close}
+        >
           <MotionItem
             delay={16}
             distance={8}
@@ -87,40 +102,47 @@ export function SettingsSelect<T extends string>({
               style={styles.menu}
               onPress={(event) => event.stopPropagation()}
             >
-              {options.map((option, index) => {
-                const isSelected = option.key === value;
-                return (
-                  <AnimatedPressable
-                    key={option.key}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected: isSelected }}
-                    onPress={() => choose(option.key)}
-                    haptic="selection"
-                    pressScale={0.99}
-                    style={[
-                      styles.option,
-                      index < options.length - 1 && styles.optionBorder,
-                      isSelected && styles.optionSelected,
-                    ]}
-                  >
-                    <Text
-                      style={[styles.optionLabel, isSelected && styles.optionLabelSelected]}
-                      numberOfLines={1}
+              <ScrollView
+                style={styles.menuScroll}
+                keyboardShouldPersistTaps="handled"
+                bounces={false}
+                showsVerticalScrollIndicator
+              >
+                {options.map((option, index) => {
+                  const isSelected = option.key === value;
+                  return (
+                    <AnimatedPressable
+                      key={option.key}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected: isSelected }}
+                      onPress={() => choose(option.key)}
+                      haptic="selection"
+                      pressScale={0.99}
+                      style={[
+                        styles.option,
+                        index < options.length - 1 && styles.optionBorder,
+                        isSelected && styles.optionSelected,
+                      ]}
                     >
-                      {option.label}
-                    </Text>
-                    {isSelected ? (
-                      <Check size={18} color={theme.colors.primary} strokeWidth={2.5} />
-                    ) : (
-                      <View style={styles.checkPlaceholder} />
-                    )}
-                  </AnimatedPressable>
-                );
-              })}
+                      <Text
+                        style={[styles.optionLabel, isSelected && styles.optionLabelSelected]}
+                        numberOfLines={1}
+                      >
+                        {option.label}
+                      </Text>
+                      {isSelected ? (
+                        <Check size={18} color={theme.colors.primary} strokeWidth={2.5} />
+                      ) : (
+                        <View style={styles.checkPlaceholder} />
+                      )}
+                    </AnimatedPressable>
+                  );
+                })}
+              </ScrollView>
             </Pressable>
           </MotionItem>
         </Pressable>
-      </Modal>
+      </OverlayPortal>
     </>
   );
 }
@@ -162,25 +184,27 @@ function createStyles(theme: KelivoTheme) {
       justifyContent: 'center',
       paddingHorizontal: 28,
       backgroundColor: theme.colors.scrim,
-      ...(Platform.OS === 'web'
-        ? ({
-            position: 'fixed',
-            inset: 0,
-          } as any)
-        : {}),
     },
     menuMotion: {
       width: '100%',
       maxWidth: 360,
+      maxHeight: '100%',
+      flexShrink: 1,
       alignSelf: 'center',
     },
     menu: {
+      maxHeight: '100%',
+      flexShrink: 1,
       borderRadius: 14,
       borderWidth: 0.7,
       borderColor: theme.colors.outline,
       backgroundColor: theme.colors.card,
       overflow: 'hidden',
       ...theme.shadows.medium,
+    },
+    menuScroll: {
+      maxHeight: '100%',
+      flexShrink: 1,
     },
     option: {
       minHeight: 48,

@@ -194,6 +194,82 @@ function createChatMessagePresentationStyles(palette: AppPalette) {
       fontSize: 12,
       fontWeight: '600',
     },
+    webCitationSection: {
+      gap: 8,
+      alignSelf: 'stretch',
+    },
+    webCitationCarouselWrap: {
+      flexGrow: 0,
+    },
+    webCitationCarousel: {
+      gap: 8,
+      paddingRight: 8,
+    },
+    webCitationCard: {
+      width: 212,
+      borderRadius: radii.md,
+      borderWidth: 1,
+      borderColor: palette.border,
+      backgroundColor: palette.surface,
+      paddingHorizontal: 10,
+      paddingVertical: 9,
+      gap: 5,
+    },
+    webCitationCardFocused: {
+      borderColor: palette.accent,
+      backgroundColor: palette.accentSoft,
+    },
+    webCitationCardTop: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 6,
+    },
+    webCitationCardHostRow: {
+      flex: 1,
+      minWidth: 0,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    webCitationCardHost: {
+      flex: 1,
+      minWidth: 0,
+      color: palette.textSecondary,
+      fontSize: 11,
+      fontWeight: '500',
+    },
+    webCitationCardBadge: {
+      minWidth: 20,
+      height: 20,
+      borderRadius: 10,
+      paddingHorizontal: 5,
+      backgroundColor: palette.surfaceAlt,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    webCitationCardBadgeFocused: {
+      backgroundColor: palette.accent,
+    },
+    webCitationCardBadgeText: {
+      color: palette.textSecondary,
+      fontSize: 10,
+      fontWeight: '700',
+    },
+    webCitationCardBadgeTextFocused: {
+      color: palette.textOnAccent,
+    },
+    webCitationCardTitle: {
+      color: palette.text,
+      fontSize: 12,
+      lineHeight: 17,
+      fontWeight: '600',
+    },
+    webCitationCardSnippet: {
+      color: palette.textSecondary,
+      fontSize: 11,
+      lineHeight: 15,
+    },
     webCitationSheetScrim: {
       flex: 1,
       justifyContent: 'flex-end',
@@ -239,9 +315,14 @@ function createChatMessagePresentationStyles(palette: AppPalette) {
     },
     webCitationSheetRow: {
       paddingVertical: 12,
+      paddingHorizontal: 8,
+      borderRadius: radii.sm,
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: palette.border,
       gap: 6,
+    },
+    webCitationSheetRowFocused: {
+      backgroundColor: palette.accentSoft,
     },
     webCitationSheetRowTop: {
       flexDirection: 'row',

@@ -333,7 +333,39 @@ describe('workspace storage migrations and recovery', () => {
     expect(loaded?.providers.filter((provider) => provider.id === 'deepseek')).toHaveLength(1);
     expect(loaded?.providers.find((provider) => provider.id === 'deepseek')).toMatchObject({
       baseUrl: 'https://api.deepseek.com/v1',
+      kind: 'deepseek',
+    });
+  });
+
+  it('preserves legacy custom kind and secret binding for existing deepseek and custom-openai snapshots', async () => {
+    mocks.platform.OS = 'android';
+    const legacyWorkspace = createDefaultWorkspace();
+    legacyWorkspace.providers = legacyWorkspace.providers.map((provider) =>
+      provider.id === 'deepseek'
+        ? { ...provider, kind: 'custom' as const }
+        : provider
+    );
+    const persisted = v5Envelope(legacyWorkspace, 31);
+    persisted.schemaVersion = 6;
+    mocks.values.set(WORKSPACE_KEY, JSON.stringify(persisted));
+    mocks.secureValues.set(
+      `${SECRET_PREFIX}.deepseek`,
+      JSON.stringify({
+        schemaVersion: 1,
+        bindingFingerprint: 'custom::https://api.deepseek.com/v1',
+        secret: 'legacy-deepseek-secret',
+      })
+    );
+    const { loadWorkspace } = await subject();
+
+    const loaded = await loadWorkspace();
+    const deepseek = loaded?.providers.find((provider) => provider.id === 'deepseek');
+
+    expect(deepseek).toMatchObject({
+      id: 'deepseek',
       kind: 'custom',
+      baseUrl: 'https://api.deepseek.com/v1',
+      apiKey: 'legacy-deepseek-secret',
     });
   });
 
@@ -2534,5 +2566,115 @@ describe('appearance storage', () => {
     expect(mocks.values.get(COLOR_MODE_KEY)).toBe('dark');
     await expect(loadColorMode()).resolves.toBe('dark');
     expect(mocks.values.has(WORKSPACE_KEY)).toBe(false);
+  });
+});
+
+describe('2026 provider fields and continuation block persistence', () => {
+  it('round-trips new provider kinds, customHeaders, authHeaderMode, and imageApiMode while stripping unsafe headers', async () => {
+    const workspace = createDefaultWorkspace();
+    workspace.providers = workspace.providers.map((provider) =>
+      provider.id === 'anthropic'
+        ? {
+            ...provider,
+            authHeaderMode: 'x-api-key',
+            imageApiMode: 'unsupported',
+            customHeaders: [
+              { key: 'anthropic-beta', value: 'web-search-2025-03-05', enabled: true },
+              { key: 'Host', value: 'evil.example' },
+              { key: 'X-Bad', value: 'bad\r\nheader' },
+            ],
+          }
+        : provider
+    );
+    const { saveWorkspace, loadWorkspace } = await subject();
+    await saveWorkspace(workspace);
+
+    const loaded = await loadWorkspace();
+    const anthropic = loaded?.providers.find((provider) => provider.id === 'anthropic');
+    const gemini = loaded?.providers.find((provider) => provider.id === 'gemini');
+    const grok = loaded?.providers.find((provider) => provider.id === 'xai-grok');
+    const deepseek = loaded?.providers.find((provider) => provider.id === 'deepseek');
+
+    expect(anthropic?.kind).toBe('anthropic');
+    expect(anthropic?.authHeaderMode).toBe('x-api-key');
+    expect(anthropic?.imageApiMode).toBe('unsupported');
+    expect(anthropic?.customHeaders).toEqual([
+      { key: 'anthropic-beta', value: 'web-search-2025-03-05', enabled: true },
+    ]);
+    expect(gemini?.kind).toBe('gemini');
+    expect(grok?.kind).toBe('xai-grok');
+    expect(deepseek?.kind).toBe('deepseek');
+  });
+
+  it('round-trips thinkingDurationMs and providerContinuations while stripping prototype pollution keys', async () => {
+    const workspace = createDefaultWorkspace();
+    const pollutedInput = JSON.parse('{"query":"news","__proto__":{"polluted":true}}') as Record<string, unknown>;
+    const message: ChatMessage = {
+      id: 'msg-cont-1',
+      role: 'assistant',
+      content: 'Verified response.',
+      createdAt: 1000,
+      status: 'ready',
+      thinkingDurationMs: 2450,
+      providerContinuations: [
+        {
+          provider: 'anthropic',
+          type: 'thinking',
+          thinking: 'reasoning...',
+          signature: 'sig-abc',
+        },
+        {
+          provider: 'anthropic',
+          type: 'server_tool_use',
+          id: 'srv_1',
+          name: 'web_search',
+          input: pollutedInput,
+        },
+        {
+          provider: 'gemini',
+          type: 'thought_signature',
+          thoughtSignature: 'gem-sig-1',
+          partRole: 'image',
+          attachmentId: 'att-1',
+        },
+        {
+          provider: 'openai',
+          type: 'reasoning_encrypted',
+          id: 'rs_1',
+          encryptedContent: 'enc-xyz',
+          summary: ['step 1'],
+        },
+        {
+          provider: 'deepseek',
+          type: 'server_tool_calls',
+          serverToolCalls: [{ id: 'ds_1', tool: 'deepseek_web_search' }],
+        },
+      ],
+    };
+    workspace.conversations = [{ ...workspace.conversations[0], messages: [message] }];
+    workspace.messages = [message];
+
+    const { saveWorkspace, loadWorkspace } = await subject();
+    await saveWorkspace(workspace);
+    const loaded = await loadWorkspace();
+    const loadedMessage = loaded?.conversations[0].messages[0];
+
+    expect(loadedMessage?.thinkingDurationMs).toBe(2450);
+    expect(loadedMessage?.providerContinuations).toHaveLength(5);
+    expect(loadedMessage?.providerContinuations?.[0]).toEqual({
+      provider: 'anthropic',
+      type: 'thinking',
+      thinking: 'reasoning...',
+      signature: 'sig-abc',
+    });
+    const serverToolUse = loadedMessage?.providerContinuations?.[1];
+    expect(serverToolUse).toMatchObject({
+      provider: 'anthropic',
+      type: 'server_tool_use',
+      input: { query: 'news' },
+    });
+    if (serverToolUse?.provider === 'anthropic' && serverToolUse.type === 'server_tool_use') {
+      expect(Object.prototype.hasOwnProperty.call(serverToolUse.input, '__proto__')).toBe(false);
+    }
   });
 });

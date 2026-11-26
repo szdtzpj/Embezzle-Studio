@@ -1,8 +1,9 @@
 import { BookOpen, Check, Clock3, Download, FilePlus2, FileText, History, MessageCircle, Plus, RotateCcw, Save, Search, Star, Tag, Trash2, X } from 'lucide-react-native';
 import { useEffect, useMemo, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { OverlayPortal } from '../ui/components/AppDialogHost';
 import { useKelivoTheme, type KelivoTheme } from '../ui/theme';
 import { requestConfirm } from '../ui/components/dialogService';
 
@@ -266,7 +267,16 @@ export function WorkspaceWorkbench({
   };
 
   const content = (
-      <SafeAreaView style={styles.root}>
+      <View
+        style={[
+          styles.root,
+          presentation === 'modal' && {
+            paddingTop: insets.top,
+            paddingLeft: insets.left,
+            paddingRight: insets.right,
+          },
+        ]}
+      >
         <View style={styles.header}>
           <View style={styles.headerText}>
             <Text style={styles.title}>本地成果工作台</Text>
@@ -301,7 +311,10 @@ export function WorkspaceWorkbench({
         {tab === 'artifacts' ? (
           <ScrollView
             style={styles.body}
-            contentContainerStyle={[styles.bodyContent, { paddingBottom: Math.max(28, insets.bottom + 20) }]}
+            contentContainerStyle={[
+              styles.bodyContent,
+              { paddingBottom: presentation === 'modal' ? Math.max(28, insets.bottom + 20) : 28 },
+            ]}
             keyboardShouldPersistTaps="handled"
           >
             <View style={styles.searchBox}>
@@ -550,7 +563,10 @@ export function WorkspaceWorkbench({
         ) : (
           <ScrollView
             style={styles.body}
-            contentContainerStyle={[styles.bodyContent, { paddingBottom: Math.max(28, insets.bottom + 20) }]}
+            contentContainerStyle={[
+              styles.bodyContent,
+              { paddingBottom: presentation === 'modal' ? Math.max(28, insets.bottom + 20) : 28 },
+            ]}
             keyboardShouldPersistTaps="handled"
           >
             <View style={styles.searchBox}>
@@ -706,7 +722,7 @@ export function WorkspaceWorkbench({
             ) : null}
           </ScrollView>
         )}
-      </SafeAreaView>
+      </View>
   );
 
   if (presentation === 'screen') {
@@ -714,16 +730,13 @@ export function WorkspaceWorkbench({
   }
 
   return (
-    <Modal
+    <OverlayPortal
       visible={visible}
-      animationType="slide"
-      presentationStyle="fullScreen"
-      statusBarTranslucent
-      navigationBarTranslucent
+      layer="fullscreen"
       onRequestClose={requestClose}
     >
       {content}
-    </Modal>
+    </OverlayPortal>
   );
 }
 

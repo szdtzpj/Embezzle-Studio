@@ -1,7 +1,9 @@
 import type {
+  ActivityTimelineStep,
   AppWorkspace,
   ChatCompletionResult,
   ChatMessage,
+  ImageGenerationOptions,
   McpActivitySummary,
   ModelInfo,
   ModelParameterSettings,
@@ -49,6 +51,7 @@ export interface ChatRequestExecutionPlan {
   controller: AbortController;
   usageEvent: ProviderUsageEvent;
   parameterSettings: ModelParameterSettings;
+  imageOptions?: ImageGenerationOptions;
   finishRequest?: boolean;
   announceCancellation?: boolean;
 }
@@ -69,7 +72,7 @@ export interface ChatRequestExecutionHost {
   appState(): 'active' | 'background' | 'inactive' | 'unknown' | 'extension';
   streamUpdateDelayMs(): number;
   discardAttachments(attachments: NonNullable<ChatCompletionResult['attachments']>): Promise<void>;
-  authorize(plan: ProviderRequestPlan): Promise<boolean>;
+  authorize(plan: ProviderRequestPlan, signal?: AbortSignal): Promise<boolean>;
   persistUsageEvents(events: readonly ProviderUsageEvent[]): Promise<void>;
   finishUsageEvent(
     event: ProviderUsageEvent,
@@ -122,6 +125,7 @@ export class ChatRequestExecution {
     controller,
     usageEvent,
     parameterSettings,
+    imageOptions,
     finishRequest = true,
     announceCancellation = true,
   }: ChatRequestExecutionPlan): Promise<AssistantRequestOutcome> {
@@ -133,7 +137,14 @@ export class ChatRequestExecution {
     let latestUpdate:
       | Pick<
           ChatCompletionResult,
-          'content' | 'reasoningContent' | 'usage' | 'toolActivity' | 'activityTimeline'
+          | 'content'
+          | 'reasoningContent'
+          | 'thinkingDurationMs'
+          | 'usage'
+          | 'citations'
+          | 'webSearchTriggered'
+          | 'toolActivity'
+          | 'activityTimeline'
         >
       | undefined;
     let streamTimer: ReturnType<typeof setTimeout> | null = null;
@@ -145,7 +156,16 @@ export class ChatRequestExecution {
         {
           content: latestUpdate.content,
           reasoningContent: latestUpdate.reasoningContent,
+          ...(latestUpdate.thinkingDurationMs !== undefined
+            ? { thinkingDurationMs: latestUpdate.thinkingDurationMs }
+            : {}),
           usage: latestUpdate.usage,
+          ...(latestUpdate.citations !== undefined
+            ? { citations: latestUpdate.citations }
+            : {}),
+          ...(latestUpdate.webSearchTriggered !== undefined
+            ? { webSearchTriggered: latestUpdate.webSearchTriggered }
+            : {}),
           ...(latestUpdate.toolActivity ? { toolActivity: latestUpdate.toolActivity } : {}),
           ...(latestUpdate.activityTimeline
             ? { activityTimeline: latestUpdate.activityTimeline }
@@ -185,6 +205,7 @@ export class ChatRequestExecution {
         messages: transcript,
         reasoningEffort: runtime.reasoningEffort,
         parameterSettings,
+        ...(imageOptions ? { imageOptions } : {}),
         maxOutputTokens: this.host.readWorkspace().costGuard.enabled
           ? this.host.readWorkspace().costGuard.maxOutputTokens
           : undefined,
@@ -195,7 +216,7 @@ export class ChatRequestExecution {
           if (context.requestNumber <= trackedUsageEvent.providerRequestCount) return;
           const authorized = await this.host.authorize({
             operations: [this.providerRequestOperation(runtime, true)],
-          });
+          }, context.signal ?? controller.signal);
           if (!authorized || context.signal?.aborted) {
             throw abortError('外部搜索后续请求已取消。');
           }
@@ -239,7 +260,7 @@ export class ChatRequestExecution {
                 beforeContinuation: async (context) => {
                   const authorized = await this.host.authorize({
                     operations: [this.providerRequestOperation(runtime, false)],
-                  });
+                  }, context.signal ?? controller.signal);
                   if (!authorized || context.signal?.aborted) {
                     throw abortError('MCP 续接请求已取消。');
                   }
@@ -274,7 +295,21 @@ export class ChatRequestExecution {
           ) {
             firstTokenAt ??= Date.now();
           }
-          latestUpdate = update;
+          // 保留先前已流出的 thinkingDurationMs/citations/webSearchTriggered，避免后续纯文本分片将其覆盖
+          latestUpdate = {
+            ...update,
+            ...(update.thinkingDurationMs === undefined &&
+            latestUpdate?.thinkingDurationMs !== undefined
+              ? { thinkingDurationMs: latestUpdate.thinkingDurationMs }
+              : {}),
+            ...(update.citations === undefined && latestUpdate?.citations !== undefined
+              ? { citations: latestUpdate.citations }
+              : {}),
+            ...(update.webSearchTriggered === undefined &&
+            latestUpdate?.webSearchTriggered !== undefined
+              ? { webSearchTriggered: latestUpdate.webSearchTriggered }
+              : {}),
+          };
           if (!streamTimer) {
             streamTimer = setTimeout(() => {
               streamTimer = null;
@@ -285,21 +320,37 @@ export class ChatRequestExecution {
         signal: controller.signal,
       });
 
+      // 先清理节流定时器再处理可能的异步附件丢弃，防止 abort 后延迟触发 publishLatestUpdate
+      if (streamTimer) clearTimeout(streamTimer);
+      streamTimer = null;
+
       if (controller.signal.aborted) {
         await this.host.discardAttachments(result.attachments ?? []);
         throw abortError('请求已停止。');
       }
 
-      if (streamTimer) clearTimeout(streamTimer);
-      streamTimer = null;
+      const endedAt = Date.now();
       const requestMetrics = {
-        durationMs: Date.now() - startedAt,
+        durationMs: endedAt - startedAt,
         ...(firstTokenAt !== undefined ? { timeToFirstTokenMs: firstTokenAt - startedAt } : {}),
       };
+      const resolvedThinkingDurationMs = resolveTerminalThinkingDurationMs(
+        result.thinkingDurationMs,
+        latestUpdate?.thinkingDurationMs,
+        result.activityTimeline,
+        result.reasoningContent,
+        endedAt
+      );
       const completedMessage: ChatMessage = {
         ...assistantMessage,
         content: result.content,
         reasoningContent: result.reasoningContent,
+        ...(resolvedThinkingDurationMs !== undefined
+          ? { thinkingDurationMs: resolvedThinkingDurationMs }
+          : {}),
+        ...(result.providerContinuations?.length
+          ? { providerContinuations: result.providerContinuations }
+          : {}),
         usage: result.usage,
         ...(result.toolActivity ? { toolActivity: result.toolActivity } : {}),
         ...(result.activityTimeline ? { activityTimeline: result.activityTimeline } : {}),
@@ -316,11 +367,18 @@ export class ChatRequestExecution {
         .sort((left, right) => right.updatedAt - left.updatedAt)[0];
       const costEstimate = estimateMessageCost(completedMessage, pricing);
 
+      // 合并为单次终态提交，保留 M1 thinkingDurationMs 与 providerContinuations 落盘契约
       this.host.updateAssistantMessage(
         assistantMessage.id,
         {
           content: result.content,
           reasoningContent: result.reasoningContent,
+          ...(resolvedThinkingDurationMs !== undefined
+            ? { thinkingDurationMs: resolvedThinkingDurationMs }
+            : {}),
+          ...(result.providerContinuations?.length
+            ? { providerContinuations: result.providerContinuations }
+            : {}),
           usage: result.usage,
           citations: result.citations,
           webSearchTriggered: result.webSearchTriggered,
@@ -329,16 +387,10 @@ export class ChatRequestExecution {
           attachments: result.attachments,
           generationTask: result.generationTask,
           mcpActivity: result.mcpActivity,
-          status: 'ready',
-          error: undefined,
-        },
-        conversationId
-      );
-      this.host.updateAssistantMessage(
-        assistantMessage.id,
-        {
           requestMetrics,
           ...(costEstimate ? { costEstimate } : { costEstimate: undefined }),
+          status: 'ready',
+          error: undefined,
         },
         conversationId
       );
@@ -364,12 +416,28 @@ export class ChatRequestExecution {
           'cancelled',
           endedAt
         );
+        const resolvedThinkingDurationMs = resolveTerminalThinkingDurationMs(
+          undefined,
+          latestUpdate?.thinkingDurationMs,
+          activityTimeline,
+          latestUpdate?.reasoningContent,
+          endedAt
+        );
         this.host.updateAssistantMessage(
           assistantMessage.id,
           {
             content: latestUpdate?.content || '生成已停止。',
             reasoningContent: latestUpdate?.reasoningContent,
+            ...(resolvedThinkingDurationMs !== undefined
+              ? { thinkingDurationMs: resolvedThinkingDurationMs }
+              : {}),
             usage: latestUpdate?.usage,
+            ...(latestUpdate?.citations !== undefined
+              ? { citations: latestUpdate.citations }
+              : {}),
+            ...(latestUpdate?.webSearchTriggered !== undefined
+              ? { webSearchTriggered: latestUpdate.webSearchTriggered }
+              : {}),
             status: 'cancelled',
             error: undefined,
             requestMetrics: {
@@ -406,12 +474,28 @@ export class ChatRequestExecution {
         'error',
         endedAt
       );
+      const resolvedThinkingDurationMs = resolveTerminalThinkingDurationMs(
+        undefined,
+        latestUpdate?.thinkingDurationMs,
+        activityTimeline,
+        latestUpdate?.reasoningContent,
+        endedAt
+      );
       this.host.updateAssistantMessage(
         assistantMessage.id,
         {
           content: latestUpdate?.content || message,
           reasoningContent: latestUpdate?.reasoningContent,
+          ...(resolvedThinkingDurationMs !== undefined
+            ? { thinkingDurationMs: resolvedThinkingDurationMs }
+            : {}),
           usage: latestUpdate?.usage,
+          ...(latestUpdate?.citations !== undefined
+            ? { citations: latestUpdate.citations }
+            : {}),
+          ...(latestUpdate?.webSearchTriggered !== undefined
+            ? { webSearchTriggered: latestUpdate.webSearchTriggered }
+            : {}),
           status: 'error',
           error: message,
           requestMetrics: {
@@ -499,6 +583,40 @@ function abortError(message: string): Error {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
+}
+
+/**
+ * 终态思考耗时兜底派生：优先保留适配器显式返回的 thinkingDurationMs；
+ * 仅在缺失时依据 activityTimeline 中具备实质推理文本的 thinking 步骤累计耗时，
+ * 避免为无推理占位步骤伪造耗时。
+ */
+function resolveTerminalThinkingDurationMs(
+  explicitDurationMs: number | undefined,
+  fallbackUpdateDurationMs: number | undefined,
+  activityTimeline: readonly ActivityTimelineStep[] | undefined,
+  reasoningContent: string | undefined,
+  endedAt: number
+): number | undefined {
+  if (typeof explicitDurationMs === 'number' && Number.isFinite(explicitDurationMs)) {
+    return explicitDurationMs;
+  }
+  if (typeof fallbackUpdateDurationMs === 'number' && Number.isFinite(fallbackUpdateDurationMs)) {
+    return fallbackUpdateDurationMs;
+  }
+  if (!activityTimeline?.length) return undefined;
+  const thinkingSteps = activityTimeline.filter(
+    (step) => step.kind === 'thinking' && typeof step.startedAt === 'number'
+  );
+  if (!thinkingSteps.length) return undefined;
+  const hasSubstantiveThinking =
+    Boolean(reasoningContent?.trim()) ||
+    thinkingSteps.some((step) => Boolean(step.content?.trim()));
+  if (!hasSubstantiveThinking) return undefined;
+  return thinkingSteps.reduce(
+    (total, step) =>
+      total + Math.max(0, (step.finishedAt ?? endedAt) - (step.startedAt as number)),
+    0
+  );
 }
 
 function mcpAuditCandidate(

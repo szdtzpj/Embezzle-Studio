@@ -9,6 +9,19 @@ export const DEFAULT_WEB_ORIGINS = Object.freeze([
   'http://localhost:8081',
   'http://127.0.0.1:8081',
 ]);
+export const OFFICIAL_PROVIDER_HOSTS = Object.freeze([
+  'api.openai.com',
+  'api.anthropic.com',
+  'generativelanguage.googleapis.com',
+  'api.x.ai',
+  'api.deepseek.com',
+  'ark.cn-beijing.volces.com',
+  'ark.cn-beijing.volcengineapi.com',
+  'dashscope.aliyuncs.com',
+  'dashscope-intl.aliyuncs.com',
+  'dashscope-us.aliyuncs.com',
+  '*.maas.aliyuncs.com',
+]);
 
 const blockedUpstreamHeaders = new Set([
   'accept-encoding',
@@ -314,7 +327,284 @@ export function cleanUpstreamHeaders(headers) {
   return result;
 }
 
-function parseProxyPayload(rawBody, maxBodyBytes) {
+function normalizeTargetHostname(hostname) {
+  return String(hostname)
+    .trim()
+    .toLowerCase()
+    .replace(/^\[/, '')
+    .replace(/\]$/, '')
+    .replace(/\.+$/, '');
+}
+
+function isLoopbackHostname(hostname) {
+  const normalized = normalizeTargetHostname(hostname);
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
+}
+
+function parseIpv4Octets(value) {
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) {
+    return null;
+  }
+  const octets = value.split('.').map(Number);
+  if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) {
+    return null;
+  }
+  return octets;
+}
+
+function parseIpv6SegmentList(segmentText, allowTrailingIpv4) {
+  if (!segmentText) {
+    return [];
+  }
+  const parts = segmentText.split(':');
+  const groups = [];
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (!part) {
+      return null;
+    }
+    if (allowTrailingIpv4 && index === parts.length - 1 && part.includes('.')) {
+      const octets = parseIpv4Octets(part);
+      if (!octets) {
+        return null;
+      }
+      groups.push((octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3]);
+      continue;
+    }
+    if (!/^[0-9a-f]{1,4}$/i.test(part)) {
+      return null;
+    }
+    groups.push(Number.parseInt(part, 16));
+  }
+  return groups;
+}
+
+function parseIpv6Groups(value) {
+  if (!value || !value.includes(':') || value.includes('%')) {
+    return null;
+  }
+  const compressionParts = value.split('::');
+  if (compressionParts.length > 2) {
+    return null;
+  }
+  if (compressionParts.length === 1) {
+    const groups = parseIpv6SegmentList(compressionParts[0], true);
+    return groups && groups.length === 8 ? groups : null;
+  }
+
+  const [headText, tailText] = compressionParts;
+  const headGroups = parseIpv6SegmentList(headText, !tailText);
+  const tailGroups = parseIpv6SegmentList(tailText, true);
+  if (!headGroups || !tailGroups) {
+    return null;
+  }
+  const missingCount = 8 - (headGroups.length + tailGroups.length);
+  if (missingCount < 1) {
+    return null;
+  }
+  return [...headGroups, ...new Array(missingCount).fill(0), ...tailGroups];
+}
+
+function isBlockedIpv4Octets(octets, { allowExactLoopback = false } = {}) {
+  const [a, b, c, d] = octets;
+  if (a === 0) {
+    // 0.0.0.0/8 未指定网络
+    return true;
+  }
+  if (a === 169 && b === 254) {
+    // 169.254.0.0/16 链路本地与云元数据 (IMDS)
+    return true;
+  }
+  if (a === 100 && b >= 64 && b <= 127) {
+    // 100.64.0.0/10 CGNAT / 阿里云 ECS 元数据 (100.100.100.200)
+    return true;
+  }
+  if (a === 127) {
+    // 仅放行显式 127.0.0.1；阻止 IPv6 映射/隧道封装伪装回环及 127.0.0.0/8 其他地址
+    return !(allowExactLoopback && b === 0 && c === 0 && d === 1);
+  }
+  if (a >= 224) {
+    // 224.0.0.0/4 组播与 240.0.0.0/4 保留地址
+    return true;
+  }
+  return false;
+}
+
+function isBlockedIpv6Groups(groups, { allowExactLoopback = true } = {}) {
+  const isAllZero = groups.every((group) => group === 0);
+  if (isAllZero) {
+    // ::/128 未指定地址
+    return true;
+  }
+  const isLoopback = groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1;
+  if (isLoopback) {
+    // 仅在显式直接目标为 [::1] 时允许作为本机 IPv6 调试回环
+    return !allowExactLoopback;
+  }
+
+  const first = groups[0];
+  const second = groups[1];
+  const third = groups[2];
+  if ((first & 0xffc0) === 0xfe80 || (first & 0xffc0) === 0xfec0) {
+    // fe80::/10 链路本地与 fec0::/10 站点本地
+    return true;
+  }
+  if ((first & 0xfe00) === 0xfc00) {
+    // fc00::/7 ULA 唯一本地地址（含 AWS IPv6 IMDS fd00:ec2::254）
+    return true;
+  }
+  if ((first & 0xff00) === 0xff00) {
+    // ff00::/8 组播地址
+    return true;
+  }
+
+  // 严格拦截全部 IPv4-兼容(::/96)、IPv4-映射(::ffff:0:0/96)、IPv4-转换、NAT64(64:ff9b::/96 & 64:ff9b:1::/48)
+  const isIpv4Compatible = groups.slice(0, 6).every((group) => group === 0);
+  const isIpv4Mapped = groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff;
+  const isIpv4Translated =
+    groups.slice(0, 4).every((group) => group === 0) && groups[4] === 0xffff && groups[5] === 0;
+  const isNat64WellKnown =
+    first === 0x0064 && second === 0xff9b && groups.slice(2, 6).every((group) => group === 0);
+  const isNat64LocalUse = first === 0x0064 && second === 0xff9b && third === 0x0001;
+
+  if (isIpv4Compatible || isIpv4Mapped || isIpv4Translated || isNat64WellKnown || isNat64LocalUse) {
+    return true;
+  }
+
+  // 严格拦截 Teredo (2001::/32)、6to4 (2002::/16) 与 ISATAP (*::5efe:<ipv4>)
+  const isTeredo = first === 0x2001 && second === 0x0000;
+  const is6to4 = first === 0x2002;
+  const isIsatap = (groups[4] & 0xfcff) === 0x0000 && groups[5] === 0x5efe;
+  if (isTeredo || is6to4 || isIsatap) {
+    return true;
+  }
+
+  return false;
+}
+
+function isBlockedMetadataOrLinkLocalHost(hostname) {
+  const normalized = normalizeTargetHostname(hostname);
+  if (!normalized) {
+    return true;
+  }
+  if (
+    normalized === 'metadata.google.internal' ||
+    normalized === 'metadata' ||
+    normalized.endsWith('.internal')
+  ) {
+    return true;
+  }
+
+  const ipv4Octets = parseIpv4Octets(normalized);
+  if (ipv4Octets) {
+    return isBlockedIpv4Octets(ipv4Octets, { allowExactLoopback: true });
+  }
+
+  if (normalized.includes(':')) {
+    const ipv6Groups = parseIpv6Groups(normalized);
+    if (!ipv6Groups) {
+      return true;
+    }
+    return isBlockedIpv6Groups(ipv6Groups);
+  }
+
+  return false;
+}
+
+function parseAllowedTargetHosts(value) {
+  if (value == null || value === '') {
+    return null;
+  }
+  const entries = Array.isArray(value) ? value : String(value).split(',');
+  const patterns = entries
+    .map((entry) => normalizeTargetHostname(entry))
+    .filter(Boolean);
+  return patterns.length ? patterns : null;
+}
+
+function isTargetHostAllowed(hostname, allowedTargetHosts) {
+  if (!allowedTargetHosts || !allowedTargetHosts.length) {
+    return true;
+  }
+  const normalized = normalizeTargetHostname(hostname);
+  return allowedTargetHosts.some((pattern) => {
+    if (pattern.startsWith('*.')) {
+      const suffix = pattern.slice(1);
+      return normalized.length > suffix.length && normalized.endsWith(suffix);
+    }
+    return normalized === pattern;
+  });
+}
+
+const blockedResponseHeaders = new Set([
+  'set-cookie',
+  'set-cookie2',
+  'transfer-encoding',
+  'content-length',
+  'content-encoding',
+  'connection',
+  'keep-alive',
+]);
+
+function isSafeForwardedResponseHeader(lowerName) {
+  if (blockedResponseHeaders.has(lowerName)) {
+    return false;
+  }
+  return (
+    lowerName === 'x-request-id' ||
+    lowerName === 'request-id' ||
+    lowerName === 'retry-after' ||
+    lowerName.startsWith('x-ratelimit-') ||
+    lowerName.startsWith('anthropic-ratelimit-') ||
+    lowerName.startsWith('openai-') ||
+    lowerName.startsWith('x-goog-') ||
+    lowerName.startsWith('x-grok-')
+  );
+}
+
+function extractForwardedResponseHeaders(upstreamHeaders) {
+  const forwarded = {};
+  if (!upstreamHeaders || typeof upstreamHeaders.forEach !== 'function') {
+    return { headers: forwarded, exposed: [] };
+  }
+  upstreamHeaders.forEach((value, key) => {
+    const lowerKey = String(key).toLowerCase();
+    if (!isSafeForwardedResponseHeader(lowerKey)) {
+      return;
+    }
+    if (typeof value !== 'string' || /[\r\n\0]/.test(value)) {
+      return;
+    }
+    forwarded[lowerKey] = value;
+  });
+  return {
+    headers: forwarded,
+    exposed: Object.keys(forwarded),
+  };
+}
+
+function decodeUpstreamBody(rawBody, bodyEncoding, maxBodyBytes) {
+  if (bodyEncoding == null || bodyEncoding === 'utf8') {
+    if (Buffer.byteLength(rawBody) > maxBodyBytes) {
+      throw new ProxyHttpError(413, `Upstream body exceeds ${maxBodyBytes} bytes.`);
+    }
+    return rawBody;
+  }
+  if (bodyEncoding === 'base64') {
+    const compact = rawBody.replace(/\s+/g, '');
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(compact)) {
+      throw new ProxyHttpError(400, 'Invalid base64 upstream body.');
+    }
+    const decoded = Buffer.from(compact, 'base64');
+    if (decoded.byteLength > maxBodyBytes) {
+      throw new ProxyHttpError(413, `Upstream body exceeds ${maxBodyBytes} bytes.`);
+    }
+    return decoded;
+  }
+  throw new ProxyHttpError(400, 'Unsupported bodyEncoding; expected utf8 or base64.');
+}
+
+function parseProxyPayload(rawBody, maxBodyBytes, allowedTargetHosts = null) {
   let payload;
   try {
     payload = JSON.parse(rawBody);
@@ -340,6 +630,15 @@ function parseProxyPayload(rawBody, maxBodyBytes) {
   if (parsedUrl.username || parsedUrl.password) {
     throw new ProxyHttpError(400, 'Target URL credentials are not allowed; use an Authorization header instead.');
   }
+  if (isBlockedMetadataOrLinkLocalHost(parsedUrl.hostname)) {
+    throw new ProxyHttpError(403, 'Target host is blocked by proxy SSRF policy.');
+  }
+  if (parsedUrl.protocol === 'http:' && !isLoopbackHostname(parsedUrl.hostname)) {
+    throw new ProxyHttpError(400, 'Plaintext http targets are only allowed for loopback hosts.');
+  }
+  if (!isTargetHostAllowed(parsedUrl.hostname, allowedTargetHosts)) {
+    throw new ProxyHttpError(403, 'Target host is not in the allowed target hosts list.');
+  }
 
   const method = typeof payload.method === 'string' ? payload.method.trim().toUpperCase() : 'GET';
   if (!['GET', 'POST'].includes(method)) {
@@ -351,15 +650,16 @@ function parseProxyPayload(rawBody, maxBodyBytes) {
   if (method === 'GET' && payload.body != null) {
     throw new ProxyHttpError(400, 'GET upstream requests cannot include a body.');
   }
-  if (typeof payload.body === 'string' && Buffer.byteLength(payload.body) > maxBodyBytes) {
-    throw new ProxyHttpError(413, `Upstream body exceeds ${maxBodyBytes} bytes.`);
-  }
+
+  const body = payload.body == null
+    ? undefined
+    : decodeUpstreamBody(payload.body, payload.bodyEncoding, maxBodyBytes);
 
   return {
     targetUrl: parsedUrl,
     method,
     headers: cleanUpstreamHeaders(payload.headers),
-    body: payload.body == null ? undefined : payload.body,
+    body,
   };
 }
 
@@ -487,7 +787,7 @@ async function handleProxy(request, response, options) {
   let payload;
   try {
     const rawBody = await readBody(request, options.maxBodyBytes);
-    payload = parseProxyPayload(rawBody, options.maxBodyBytes);
+    payload = parseProxyPayload(rawBody, options.maxBodyBytes, options.allowedTargetHosts);
   } catch (error) {
     const statusCode = error instanceof ProxyHttpError ? error.statusCode : 400;
     if (statusCode !== 499) {
@@ -540,8 +840,15 @@ async function handleProxy(request, response, options) {
       return;
     }
 
+    const forwarded = extractForwardedResponseHeaders(upstream.headers);
+    const exposedHeaders = Array.from(
+      new Set(['x-request-id', 'request-id', 'retry-after', ...forwarded.exposed])
+    ).join(', ');
+
     response.writeHead(upstream.status, {
       ...corsHeaders(options.origin),
+      ...forwarded.headers,
+      'Access-Control-Expose-Headers': exposedHeaders,
       'Cache-Control': 'no-cache, no-transform',
       'Content-Type': upstream.headers.get('content-type') ?? 'application/octet-stream',
       'X-Accel-Buffering': 'no',
@@ -578,6 +885,7 @@ async function handleProxy(request, response, options) {
 export function createProxyServer({
   fetchImpl = globalThis.fetch,
   allowedOrigins = process.env.WEB_PROXY_ALLOWED_ORIGINS ?? '',
+  allowedTargetHosts = process.env.WEB_PROXY_ALLOWED_HOSTS ?? '',
   maxBodyBytes = positiveInteger(
     process.env.WEB_PROXY_MAX_BODY_BYTES,
     DEFAULT_MAX_BODY_BYTES,
@@ -594,6 +902,7 @@ export function createProxyServer({
   }
 
   const originPolicy = createOriginPolicy(allowedOrigins);
+  const parsedAllowedTargetHosts = parseAllowedTargetHosts(allowedTargetHosts);
   const resolvedMaxBodyBytes = positiveInteger(maxBodyBytes, DEFAULT_MAX_BODY_BYTES, 'maxBodyBytes');
   const resolvedUpstreamTimeoutMs = positiveInteger(
     upstreamTimeoutMs,
@@ -644,6 +953,7 @@ export function createProxyServer({
       fetchImpl,
       maxBodyBytes: resolvedMaxBodyBytes,
       upstreamTimeoutMs: resolvedUpstreamTimeoutMs,
+      allowedTargetHosts: parsedAllowedTargetHosts,
       origin,
     }).catch((error) => {
       if (!response.headersSent) {

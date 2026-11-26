@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Keyboard,
-  Modal,
   PanResponder,
   Pressable,
   ScrollView,
@@ -14,6 +13,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { ModelInfo, ProviderProfile } from '../../../../domain/types';
 import { inferModelTask } from '../../../../services/modelCapabilities';
+import { OverlayPortal } from '../../../../ui/components/AppDialogHost';
 import { ModelAvatar } from '../../../../ui/components/ModelAvatar';
 import { useChatModelPickerTheme } from './ChatModelPickerStyles';
 import { AnimatedPressable } from './ChatMotion';
@@ -229,8 +229,17 @@ export function ModelPickerModal({
   }
 
   return (
-    <Modal visible={mounted} transparent animationType="none" onRequestClose={onClose}>
-      <View style={styles.modelPickerModalRoot}>
+    <OverlayPortal visible={mounted} layer="sheet" onRequestClose={onClose}>
+      <View
+        style={[
+          styles.modelPickerModalRoot,
+          {
+            paddingTop: Math.max(16, insets.top),
+            paddingLeft: insets.left,
+            paddingRight: insets.right,
+          },
+        ]}
+      >
         <AnimatePresence>
           {visible ? (
             <MotiView
@@ -351,7 +360,7 @@ export function ModelPickerModal({
           ) : null}
         </AnimatePresence>
       </View>
-    </Modal>
+    </OverlayPortal>
   );
 }
 

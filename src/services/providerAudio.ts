@@ -7,6 +7,13 @@ import type {
   ProviderProfile,
 } from '../domain/types';
 import { inferModelTask } from './modelCapabilities';
+import {
+  awaitStreamCancelSettled,
+  createAbortPromise,
+  isAbortError,
+  isBlockedPublicHost,
+  redactApiKeySecrets,
+} from './ssrfGuard';
 import { isProviderEnabled } from './workspaceRuntime';
 
 export type ProviderAudioProtocol = 'openai-official' | 'bailian-compatible';
@@ -806,50 +813,7 @@ export function parseAudioTranscriptionResponse(
 }
 
 function privateOrLocalHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
-  if (
-    !host ||
-    !host.includes('.') && !host.includes(':') ||
-    host === 'localhost' ||
-    host.endsWith('.localhost') ||
-    host.endsWith('.local') ||
-    host.endsWith('.internal') ||
-    host.endsWith('.lan')
-  ) {
-    return true;
-  }
-
-  if (host.includes(':')) {
-    return (
-      host === '::' ||
-      host === '::1' ||
-      host.startsWith('::ffff:') ||
-      host.startsWith('fc') ||
-      host.startsWith('fd') ||
-      /^fe[89ab]/.test(host)
-    );
-  }
-
-  const octets = host.split('.').map(Number);
-  if (
-    octets.length !== 4 ||
-    octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)
-  ) {
-    return false;
-  }
-  const [a, b, c] = octets;
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && (b === 0 || b === 168)) ||
-    (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) ||
-    (a === 203 && b === 0 && c === 113) ||
-    a >= 224
-  );
+  return isBlockedPublicHost(hostname);
 }
 
 export function validateProviderAudioDownloadUrl(value: unknown): string {
@@ -987,19 +951,40 @@ async function readBoundedBytes(
   limit: number,
   signal: AbortSignal
 ): Promise<Uint8Array> {
+  if (signal.aborted) {
+    void response.body?.cancel().catch(() => undefined);
+    throw abortError();
+  }
   const declared = declaredContentLength(response);
   if (declared != null && declared > limit) {
+    void response.body?.cancel().catch(() => undefined);
     return protocolError('Provider response Content-Length exceeded the safe size limit.');
   }
   const reader = response.body?.getReader();
-  if (!reader) {
-    throwIfAborted(signal);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    throwIfAborted(signal);
-    if (bytes.byteLength > limit) {
-      return protocolError('Provider response exceeded the safe size limit.');
+  let cancelPromise: Promise<unknown> | null = null;
+  const { promise: abortPromise, cleanup: cleanupAbort } = createAbortPromise(signal, () => {
+    if (reader) {
+      cancelPromise = reader.cancel().catch(() => undefined);
+    } else if (response.body) {
+      cancelPromise = response.body.cancel().catch(() => undefined);
     }
-    return bytes;
+  });
+
+  if (!reader) {
+    try {
+      const buffer = abortPromise
+        ? await Promise.race([response.arrayBuffer(), abortPromise])
+        : await response.arrayBuffer();
+      throwIfAborted(signal);
+      const bytes = new Uint8Array(buffer);
+      if (bytes.byteLength > limit) {
+        return protocolError('Provider response exceeded the safe size limit.');
+      }
+      return bytes;
+    } finally {
+      cleanupAbort();
+      await awaitStreamCancelSettled(cancelPromise);
+    }
   }
 
   const chunks: Uint8Array[] = [];
@@ -1007,18 +992,27 @@ async function readBoundedBytes(
   try {
     while (true) {
       throwIfAborted(signal);
-      const { done, value } = await reader.read();
+      const { done, value } = abortPromise
+        ? await Promise.race([reader.read(), abortPromise])
+        : await reader.read();
+      throwIfAborted(signal);
       if (done) break;
       if (!value) continue;
       total += value.byteLength;
       if (total > limit) {
-        await reader.cancel();
+        await reader.cancel().catch(() => undefined);
         return protocolError('Provider response exceeded the safe size limit.');
       }
       chunks.push(value);
     }
   } finally {
-    reader.releaseLock();
+    cleanupAbort();
+    await awaitStreamCancelSettled(cancelPromise);
+    try {
+      reader.releaseLock();
+    } catch {
+      // 流已释放或取消时忽略
+    }
   }
   const joined = new Uint8Array(total);
   let offset = 0;
@@ -1045,15 +1039,23 @@ async function readBoundedText(
   return decodeUtf8(await readBoundedBytes(response, limit, signal));
 }
 
-async function assertSuccessfulResponse(response: Response, signal: AbortSignal): Promise<void> {
+async function assertSuccessfulResponse(
+  response: Response,
+  signal: AbortSignal,
+  apiKey?: string
+): Promise<void> {
   if (response.ok) return;
   let detail = '';
   try {
-    detail = (await readBoundedText(response, maxErrorResponseBytes, signal))
+    const rawDetail = (await readBoundedText(response, maxErrorResponseBytes, signal))
       .replace(/[\u0000-\u001f\u007f]+/g, ' ')
       .trim()
       .slice(0, 1000);
-  } catch {
+    detail = redactApiKeySecrets(rawDetail, apiKey);
+  } catch (error) {
+    if (isAbortError(error) || signal.aborted) {
+      throw error;
+    }
     // Status remains enough evidence when an error body is malformed or oversized.
   }
   protocolError(`Provider audio request failed with HTTP ${response.status}${detail ? `: ${detail}` : ''}.`);
@@ -1189,7 +1191,7 @@ export async function transcribeAudio({
     : effectiveFetch(fetchImpl);
   const payload = await withTimeout(signal, timeoutMs, async (requestSignal) => {
     const response = await fetcher(request.url, requestInit(request, requestSignal));
-    await assertSuccessfulResponse(response, requestSignal);
+    await assertSuccessfulResponse(response, requestSignal, provider.apiKey);
     return readBoundedText(response, maxJsonResponseBytes, requestSignal);
   });
   return { protocol, ...parseAudioTranscriptionResponse(provider, payload) };
@@ -1200,10 +1202,11 @@ async function fetchSpeechBytes(
   init: RequestInit,
   fetcher: ProviderAudioFetch,
   signal: AbortSignal,
-  fallbackFormat: OpenAiSpeechFormat
+  fallbackFormat: OpenAiSpeechFormat,
+  apiKey?: string
 ): Promise<{ bytes: Uint8Array; mimeType: string; extension: string }> {
   const response = await fetcher(url, { ...init, signal, redirect: 'error' });
-  await assertSuccessfulResponse(response, signal);
+  await assertSuccessfulResponse(response, signal, apiKey);
   if (response.url) validateProviderAudioDownloadUrl(response.url);
   const bytes = await readBoundedBytes(response, maxSpeechResponseBytes, signal);
   const contentType = normalizedResponseContentType(response.headers.get('content-type') ?? undefined);
@@ -1248,7 +1251,7 @@ export async function synthesizeSpeech({
   if (protocol === 'openai-official') {
     speech = await withTimeout(signal, timeoutMs, async (requestSignal) => {
       const response = await fetcher(request.url, requestInit(request, requestSignal));
-      await assertSuccessfulResponse(response, requestSignal);
+      await assertSuccessfulResponse(response, requestSignal, provider.apiKey);
       const bytes = await readBoundedBytes(response, maxSpeechResponseBytes, requestSignal);
       const parsed = parseSpeechSynthesisResponse(provider, bytes, {
         contentType: response.headers.get('content-type') ?? undefined,
@@ -1262,7 +1265,7 @@ export async function synthesizeSpeech({
   } else {
     const downloadUrl = await withTimeout(signal, timeoutMs, async (requestSignal) => {
       const response = await fetcher(request.url, requestInit(request, requestSignal));
-      await assertSuccessfulResponse(response, requestSignal);
+      await assertSuccessfulResponse(response, requestSignal, provider.apiKey);
       const payload = await readBoundedText(response, maxJsonResponseBytes, requestSignal);
       const parsed = parseSpeechSynthesisResponse(provider, payload, { responseFormat });
       if (parsed.kind !== 'download') {
@@ -1276,7 +1279,8 @@ export async function synthesizeSpeech({
         { method: 'GET' },
         fetcher,
         requestSignal,
-        responseFormat
+        responseFormat,
+        provider.apiKey
       )
     );
   }

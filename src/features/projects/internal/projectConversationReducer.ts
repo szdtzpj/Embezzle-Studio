@@ -685,7 +685,7 @@ export function reduceProjectConversationCommand(
         workspace.conversations,
         command.conversationId
       );
-      const nextActive = deletingActiveConversation
+      let resolvedActive = deletingActiveConversation
         ? sortConversations(
             conversations.filter(
               (conversation) => conversation.projectId === workspace.activeProjectId
@@ -693,23 +693,48 @@ export function reduceProjectConversationCommand(
           )[0] ?? conversations[0]
         : conversations.find((item) => item.id === workspace.activeConversationId);
 
+      // 删除最后一条对话或当前活跃会话无可选回退项时，自动初始化空默认对话对象以防 activeConversation 悬空
+      let finalConversations = conversations;
+      if (!resolvedActive) {
+        const fallbackProjectId =
+          workspace.projects.find((project) => project.id === workspace.activeProjectId)?.id ??
+          workspace.projects[0].id;
+        const fallbackProject = workspace.projects.find(
+          (project) => project.id === fallbackProjectId
+        );
+        const instruction = fallbackProject
+          ? projectInstructionMessage(fallbackProject, now, createId)
+          : undefined;
+        const fallbackConversation: ChatConversation = {
+          id: createId('conversation'),
+          title: '新对话',
+          projectId: fallbackProjectId,
+          createdAt: now,
+          updatedAt: now,
+          messages: instruction ? [instruction] : [],
+        };
+        finalConversations = [fallbackConversation];
+        resolvedActive = fallbackConversation;
+      }
+
       return ok(
         {
           ...workspace,
           ...lineage,
-          conversations,
-          activeProjectId: nextActive?.projectId ?? workspace.projects[0].id,
-          activeConversationId: nextActive?.id ?? 'conversation-default',
+          conversations: finalConversations,
+          activeProjectId: resolvedActive.projectId ?? workspace.projects[0].id,
+          activeConversationId: resolvedActive.id,
           composerDrafts: workspace.composerDrafts.filter(
             (draft) => draft.conversationId !== command.conversationId
           ),
-          messages: deletingActiveConversation
-            ? nextActive?.messages ?? []
-            : workspace.messages,
+          messages:
+            deletingActiveConversation || finalConversations !== conversations
+              ? resolvedActive.messages
+              : workspace.messages,
         },
         {
           notice: '已从本地移除该聊天记录。',
-          activeContextChanged: deletingActiveConversation,
+          activeContextChanged: deletingActiveConversation || finalConversations !== conversations,
           taskQueriesInvalidated: true,
           orphanedAttachments,
         }

@@ -120,12 +120,15 @@ describe('MCP approval UI safety regressions', () => {
       source('src/features/chat/internal/decisions/useChatRequestDecisions.ts'),
     ]);
 
-    expect(modalSource).toContain("import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';");
+    expect(modalSource).toContain("import { useSafeAreaInsets } from 'react-native-safe-area-context';");
     expect(modalSource).toContain('const insets = useSafeAreaInsets();');
-    expect(modalSource).toContain('navigationBarTranslucent');
+    expect(modalSource).toContain('<OverlayPortal');
+    expect(modalSource).toContain('layer="fullscreen"');
     expect(modalSource).toContain("onRequestClose={() => settleOnce('cancel')}");
-    expect(modalSource).toContain('<SafeAreaView style={styles.root}>');
-    expect(modalSource).toContain('contentContainerStyle={[styles.content, { paddingBottom: Math.max(24, insets.bottom + 16) }]}');
+    expect(modalSource).not.toContain('<SafeAreaView');
+    expect(modalSource).not.toContain('<Modal');
+    expect(modalSource).toContain('paddingTop: insets.top');
+    expect(modalSource).toContain('contentContainerStyle={styles.content}');
     expect(modalSource).toContain('style={[styles.footer, { paddingBottom: Math.max(12, insets.bottom) }]}');
 
     for (const field of [

@@ -14,6 +14,19 @@ export type ModelCapabilityFilter =
 export interface RemoteModelMetadata {
   id?: string;
   name?: string;
+  displayName?: unknown;
+  display_name?: unknown;
+  type?: unknown;
+  created_at?: unknown;
+  context_length?: unknown;
+  max_context_length?: unknown;
+  context_window?: unknown;
+  input_token_limit?: unknown;
+  inputTokenLimit?: unknown;
+  output_token_limit?: unknown;
+  outputTokenLimit?: unknown;
+  supportedGenerationMethods?: unknown;
+  supported_generation_methods?: unknown;
   capabilities?: unknown;
   modalities?: {
     input?: unknown;
@@ -96,6 +109,7 @@ const visionKeywords = [
   '4v',
   'qwen-vl',
   'qwen2-vl',
+  'qwen2-5-vl',
   'qwen2.5-vl',
   'qwen3-vl',
   'qvq',
@@ -107,17 +121,24 @@ const visionKeywords = [
   'llama-3.2-vision',
   'phi-3.5-vision',
   'gpt-4o',
+  'gpt-4-1',
   'gpt-4.1',
   'gpt-5',
+  'gpt-6',
   'o3',
   'o4',
   'claude-3',
   'claude-sonnet-4',
   'claude-opus-4',
   'claude-haiku-4',
+  'claude-sonnet-5',
+  'claude-opus-5',
+  'claude-haiku-5',
+  'claude-fable-5',
   'gemini',
   'grok-4',
   'grok-vision',
+  'deepseek-flash',
   'doubao-seed',
   'doubao-1-5-vision',
   'doubao-1.5-vision',
@@ -126,6 +147,13 @@ const visionKeywords = [
 const visionExclusions = [
   'gpt-image',
   'gpt-4o-image',
+  'gemini-2-5-flash-image',
+  'gemini-3-1-flash-image',
+  'gemini-3-1-flash-lite-image',
+  'gemini-3-pro-image',
+  'nano-banana',
+  'grok-imagine',
+  'grok-2-image',
   'qwen-max',
   'qwen3-max',
   'qwen3-6-max-preview',
@@ -146,10 +174,29 @@ const videoInputKeywords = [
   'qwen3-vl',
   'qvq',
 ];
-const videoGenerationKeywords = ['video-generation', 'text-to-video', 'seedance', 'sora', 'veo', 'kling', 'wan-video', 'wanx2.1-t2v'];
+const videoGenerationKeywords = [
+  'video-generation',
+  'text-to-video',
+  'grok-imagine-video',
+  'seedance',
+  'sora',
+  'veo',
+  'kling',
+  'wan-video',
+  'wanx2.1-t2v',
+];
 const imageGenerationKeywords = [
   'image-generation',
   'text-to-image',
+  'grok-imagine-image',
+  'grok-2-image',
+  'nano-banana',
+  'gemini-2-5-flash-image',
+  'gemini-3-1-flash-image',
+  'gemini-3-1-flash-lite-image',
+  'gemini-3-pro-image',
+  'flash-image',
+  'pro-image',
   'seedream',
   'dall-e',
   'gpt-image',
@@ -173,6 +220,8 @@ const reasoningKeywords = [
   'think',
   'deepseek-r1',
   'deepseek-v4',
+  'deepseek-v4-pro',
+  'deepseek-flash',
   'deepseek-v3-2',
   'deepseek-v3-1',
   '-r1',
@@ -188,7 +237,20 @@ const reasoningKeywords = [
   'glm-4-5',
   'hunyuan-t1',
   'grok-4',
+  'grok-3-mini',
   'gpt-5',
+  'gpt-6',
+  'claude-fable-5',
+  'claude-opus-5',
+  'claude-sonnet-5',
+  'claude-haiku-5',
+  'claude-opus-4',
+  'claude-sonnet-4',
+  'claude-haiku-4',
+  'claude-3-7-sonnet',
+  'gemini-2-5',
+  'gemini-3',
+  'gemini-4',
   'doubao-seed',
   'doubao-1-5-thinking',
 ];
@@ -553,6 +615,14 @@ function supportedReasoningEffortsFromMetadata(metadata?: RemoteModelMetadata): 
   collectReasoningEffortValues(efforts, metadata.reasoning_efforts);
   collectReasoningEffortValues(efforts, metadata.supported_reasoning_efforts);
   collectReasoningEffortValues(efforts, metadata.thinking);
+  if (metadata.capabilities && typeof metadata.capabilities === 'object' && !Array.isArray(metadata.capabilities)) {
+    const capRecord = metadata.capabilities as Record<string, unknown>;
+    collectReasoningEffortValues(efforts, capRecord.reasoning);
+    collectReasoningEffortValues(efforts, capRecord.reasoning_effort);
+    collectReasoningEffortValues(efforts, capRecord.reasoning_efforts);
+    collectReasoningEffortValues(efforts, capRecord.supported_reasoning_efforts);
+    collectReasoningEffortValues(efforts, capRecord.thinking);
+  }
 
   const sorted = sortedReasoningEfforts(efforts);
   return sorted.length ? sorted : undefined;
@@ -573,16 +643,36 @@ function addExternalCapability(caps: Set<Capability>, raw: string): void {
   if (value.includes('function') || value.includes('tool')) {
     add(caps, 'tool-calling');
   }
-  if (value.includes('reasoning') || value.includes('thinking')) {
+  if (
+    value.includes('reasoning') ||
+    value.includes('thinking') ||
+    value === 'reasoning_effort' ||
+    value === 'reasoning-effort'
+  ) {
     add(caps, 'reasoning');
   }
-  if (value.includes('web-search') || value.includes('web_search') || value.includes('grounding')) {
+  if (
+    value.includes('web-search') ||
+    value.includes('web_search') ||
+    value.includes('grounding') ||
+    value === 'search'
+  ) {
     add(caps, 'web-search');
   }
-  if (value.includes('image-generation')) {
+  if (
+    value.includes('image-generation') ||
+    value.includes('image_generation') ||
+    value === 'image-gen' ||
+    value === 'image_gen'
+  ) {
     add(caps, 'image-generation');
   }
-  if (value.includes('video-generation')) {
+  if (
+    value.includes('video-generation') ||
+    value.includes('video_generation') ||
+    value === 'video-gen' ||
+    value === 'video_gen'
+  ) {
     add(caps, 'video-generation');
   }
   if (value.includes('speech-to-text') || value.includes('transcription')) {
@@ -729,12 +819,39 @@ function addCapabilitiesFromMetadata(
   if (ark && taskTypes.some((item) => arkVideoGenerationTaskTypes.has(item.replace(/[\s_-]+/g, '')))) {
     add(caps, 'video-generation');
   }
+  const supportedGenerationMethods = [
+    ...stringArray(metadata.supportedGenerationMethods),
+    ...stringArray(metadata.supported_generation_methods),
+  ];
+  if (
+    supportedGenerationMethods.some(
+      (method) => method === 'generatecontent' || method === 'streamgeneratecontent'
+    )
+  ) {
+    add(caps, 'text');
+    add(caps, 'streaming');
+  }
+  if (
+    supportedGenerationMethods.some(
+      (method) => method === 'embedcontent' || method === 'batchembedcontents'
+    )
+  ) {
+    add(caps, 'embedding');
+  }
+
   if (supportedParameters.some((item) => item.includes('tool') || item.includes('function'))) add(caps, 'tool-calling');
   if (metadata.features?.tools?.function_calling === true) add(caps, 'tool-calling');
   if (supportedParameters.some((item) => item.includes('reasoning') || item.includes('thinking'))) add(caps, 'reasoning');
   if (metadata.attachment === true) add(caps, 'file-input');
   if (metadata.tool_call === true) add(caps, 'tool-calling');
-  if (metadata.reasoning === true || supportedReasoningEffortsFromMetadata(metadata)?.length) add(caps, 'reasoning');
+  if (
+    metadata.reasoning === true ||
+    metadata.thinking === true ||
+    (metadata.thinking && typeof metadata.thinking === 'object' && !Array.isArray(metadata.thinking)) ||
+    supportedReasoningEffortsFromMetadata(metadata)?.length
+  ) {
+    add(caps, 'reasoning');
+  }
 
   if (Array.isArray(metadata.capabilities)) {
     metadata.capabilities.forEach((capability) => {
@@ -744,11 +861,52 @@ function addCapabilitiesFromMetadata(
     });
   } else if (metadata.capabilities && typeof metadata.capabilities === 'object') {
     Object.entries(metadata.capabilities).forEach(([key, value]) => {
-      if (value) {
+      const enabled = Array.isArray(value) ? value.length > 0 : Boolean(value);
+      if (enabled) {
         addExternalCapability(caps, key);
       }
     });
   }
+}
+
+const deepSeekOfficialPaths = new Set([
+  '',
+  '/v1',
+  '/v1/models',
+  '/v1/chat/completions',
+  '/v1/responses',
+  '/anthropic',
+  '/anthropic/v1/messages',
+]);
+
+function isDeepSeekOfficialBaseUrl(baseUrl: string): boolean {
+  try {
+    const parsed = new URL(baseUrl.trim());
+    const pathname = parsed.pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '').toLowerCase();
+    return (
+      parsed.protocol === 'https:' &&
+      parsed.hostname.toLowerCase().replace(/\.+$/, '') === 'api.deepseek.com' &&
+      !parsed.username &&
+      !parsed.password &&
+      !parsed.port &&
+      !parsed.search &&
+      !parsed.hash &&
+      deepSeekOfficialPaths.has(pathname === '/' ? '' : pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+const geminiImageGenerationPattern = /(?:^|-)gemini-[^\s]*-image(?:-|$)/;
+const geminiImageInputSuffixPattern =
+  /(?:^|-)gemini-[^\s]*-image-(?:input|recognition|understanding|vision)(?:-|$)/;
+
+function isGeminiImageGenerationId(normalizedId: string): boolean {
+  return (
+    geminiImageGenerationPattern.test(normalizedId) &&
+    !geminiImageInputSuffixPattern.test(normalizedId)
+  );
 }
 
 function addCapabilitiesFromModelId(caps: Set<Capability>, provider: ProviderProfile, modelId: string, name?: string): void {
@@ -762,7 +920,13 @@ function addCapabilitiesFromModelId(caps: Set<Capability>, provider: ProviderPro
 
   if (includesAny(text, embeddingKeywords)) add(caps, 'embedding');
   if (includesAny(text, rerankKeywords)) add(caps, 'rerank');
-  if (includesAny(text, imageGenerationKeywords)) add(caps, 'image-generation');
+  const excludedGeminiVisionInput = geminiImageInputSuffixPattern.test(id);
+  if (
+    !excludedGeminiVisionInput &&
+    (includesAny(text, imageGenerationKeywords) || isGeminiImageGenerationId(id))
+  ) {
+    add(caps, 'image-generation');
+  }
   if (includesAny(text, videoGenerationKeywords)) add(caps, 'video-generation');
   if (includesAny(text, speechToTextKeywords)) add(caps, 'speech-to-text');
   if (includesAny(text, textToSpeechKeywords)) add(caps, 'text-to-speech');
@@ -775,7 +939,10 @@ function addCapabilitiesFromModelId(caps: Set<Capability>, provider: ProviderPro
     caps.has('embedding') ||
     caps.has('rerank');
 
-  if (!isGenerationOrVector && includesAny(text, reasoningKeywords)) add(caps, 'reasoning');
+  const isExplicitNonReasoning = /(?:^|[\s-])non-(?:reasoning|thinking)(?:[\s-]|$)/.test(text);
+  if (!isGenerationOrVector && !isExplicitNonReasoning && includesAny(text, reasoningKeywords)) {
+    add(caps, 'reasoning');
+  }
   if (
     !isGenerationOrVector &&
     provider.kind === 'bailian-compatible' &&
@@ -789,11 +956,23 @@ function addCapabilitiesFromModelId(caps: Set<Capability>, provider: ProviderPro
   if (qwenVision.video) add(caps, 'video-input');
 
   const excludedFromVision = includesAny(text, visionExclusions);
-  if (!excludedFromVision && !caps.has('embedding') && !caps.has('rerank') && includesAny(text, visionKeywords)) {
+  if (
+    !excludedFromVision &&
+    !caps.has('image-generation') &&
+    !caps.has('embedding') &&
+    !caps.has('rerank') &&
+    includesAny(text, visionKeywords)
+  ) {
     add(caps, 'image-input');
   }
 
-  if (!caps.has('embedding') && !caps.has('rerank') && includesAny(text, videoInputKeywords)) {
+  if (
+    !caps.has('image-generation') &&
+    !caps.has('embedding') &&
+    !caps.has('rerank') &&
+    !text.includes('grok-imagine-video') &&
+    includesAny(text, videoInputKeywords)
+  ) {
     add(caps, 'video-input');
   }
 
@@ -801,15 +980,32 @@ function addCapabilitiesFromModelId(caps: Set<Capability>, provider: ProviderPro
     add(caps, 'tool-calling');
   }
 
-  if (includesAny(text, webSearchKeywords)) {
+  if (!isGenerationOrVector && includesAny(text, webSearchKeywords)) {
     add(caps, 'web-search');
   }
 
-  if (/^hunyuan(?!-lite\b)/.test(id)) add(caps, 'web-search');
-  if (/^gemini-(?:2|3)\b/.test(id) || id === 'gemini-flash-latest' || id === 'gemini-pro-latest') add(caps, 'web-search');
-  if (/^grok-(?:3|4)\b/.test(id)) add(caps, 'web-search');
-  if (/^(?:gpt-4o|gpt-5|o3|o4)(?:\b|-)/.test(id)) add(caps, 'web-search');
-  if (/^claude-(?:opus-4|sonnet-4|haiku-4|3-5-haiku|3-5-sonnet|3-7-sonnet)\b/.test(id)) add(caps, 'web-search');
+  if (!isGenerationOrVector) {
+    if (/^hunyuan(?!-lite\b)/.test(id)) add(caps, 'web-search');
+    if (/^gemini-(?:2|3|4)(?:\b|-)/.test(id) || id === 'gemini-flash-latest' || id === 'gemini-pro-latest') {
+      add(caps, 'web-search');
+    }
+    if (/^grok-(?:3|4)(?:\b|-)/.test(id)) add(caps, 'web-search');
+    if (/^(?:gpt-4o|gpt-4-1|gpt-5|gpt-6|o3|o4)(?:\b|-)/.test(id)) add(caps, 'web-search');
+    if (
+      /^claude-(?:opus-4|sonnet-4|haiku-4|opus-5|sonnet-5|haiku-5|fable-5|3-5-haiku|3-5-sonnet|3-7-sonnet)(?:\b|-)/.test(
+        id
+      )
+    ) {
+      add(caps, 'web-search');
+    }
+    if (
+      (provider.kind === 'deepseek' || provider.kind === 'custom') &&
+      isDeepSeekOfficialBaseUrl(provider.baseUrl) &&
+      /^(?:deepseek-flash|deepseek-v4-pro|deepseek-chat|deepseek-reasoner)(?:\b|-)/.test(id)
+    ) {
+      add(caps, 'web-search');
+    }
+  }
 
   if (isVolcengineArkProvider(provider) && includesAny(text, arkThinkingKeywords)) {
     add(caps, 'reasoning');
@@ -863,12 +1059,23 @@ export function inferModelTask(model: Pick<ModelInfo, 'id' | 'name' | 'task' | '
     return model.task;
   }
 
-  const text = typeof model === 'string' ? normalizedModelId(model) : modelSearchText(model);
+  const normalizedId = typeof model === 'string' ? normalizedModelId(model) : normalizedModelId(model.id);
+  const normalizedName = typeof model === 'string' || !model.name ? '' : normalizedModelId(model.name);
+  const text = normalizedName ? `${normalizedId} ${normalizedName}` : normalizedId;
   const capabilities = typeof model === 'string' ? [] : model.capabilities;
 
   if (capabilities.includes('speech-to-text') || includesAny(text, speechToTextKeywords)) return 'audio-transcription';
   if (capabilities.includes('text-to-speech') || includesAny(text, textToSpeechKeywords)) return 'speech-generation';
-  if (capabilities.includes('image-generation') || includesAny(text, imageGenerationKeywords)) return 'image-generation';
+  const excludedGeminiVisionInput = geminiImageInputSuffixPattern.test(normalizedId);
+  if (
+    capabilities.includes('image-generation') ||
+    (!excludedGeminiVisionInput &&
+      (includesAny(text, imageGenerationKeywords) ||
+        isGeminiImageGenerationId(normalizedId) ||
+        (normalizedName ? isGeminiImageGenerationId(normalizedName) : false)))
+  ) {
+    return 'image-generation';
+  }
   if (capabilities.includes('video-generation') || includesAny(text, videoGenerationKeywords)) return 'video-generation';
   if (capabilities.includes('embedding') || includesAny(text, embeddingKeywords)) return 'embedding';
   if (capabilities.includes('rerank') || includesAny(text, rerankKeywords)) return 'rerank';
@@ -915,25 +1122,95 @@ function sanitizeArkModelForImplementedAdapters(model: ModelInfo): ModelInfo {
   return { ...model, task, capabilities: sortedCapabilities(capabilities) };
 }
 
+function metadataDisplayName(metadata?: RemoteModelMetadata): string | undefined {
+  if (!metadata) {
+    return undefined;
+  }
+  const candidates = [metadata.name, metadata.display_name, metadata.displayName];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return undefined;
+}
+
+function metadataContextWindow(metadata?: RemoteModelMetadata): number | undefined {
+  if (!metadata) {
+    return undefined;
+  }
+  const candidates = [
+    metadata.token_limits?.context_window,
+    metadata.context_window,
+    metadata.context_length,
+    metadata.max_context_length,
+    metadata.input_token_limit,
+    metadata.inputTokenLimit,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'number' && Number.isSafeInteger(candidate) && candidate > 0) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 将 OpenAI / xAI / DeepSeek / Anthropic / Gemini 等各厂商模型列表条目标准化为 RemoteModelMetadata。
+ */
+export function normalizeRemoteModelEntry(raw: unknown): RemoteModelMetadata | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+
+  const record = raw as Record<string, unknown>;
+  const rawId = typeof record.id === 'string' ? record.id.trim() : '';
+  const rawName = typeof record.name === 'string' ? record.name.trim() : '';
+  const id = rawId || (rawName ? rawName.replace(/^models\//i, '') : '');
+  if (!id) {
+    return null;
+  }
+
+  const displayName =
+    (typeof record.display_name === 'string' && record.display_name.trim()) ||
+    (typeof record.displayName === 'string' && record.displayName.trim()) ||
+    (rawId && rawName ? rawName : '') ||
+    id;
+
+  const entry: RemoteModelMetadata = {
+    ...record,
+    id,
+    name: displayName,
+  };
+  const contextWindow = metadataContextWindow(entry);
+  if (contextWindow && !entry.token_limits?.context_window) {
+    entry.token_limits = {
+      ...(entry.token_limits && typeof entry.token_limits === 'object' ? entry.token_limits : {}),
+      context_window: contextWindow,
+    };
+  }
+  return entry;
+}
+
 export function createModelInfoFromId(
   provider: ProviderProfile,
   modelId: string,
   source: CapabilitySource = 'manual',
   metadata?: RemoteModelMetadata
 ): ModelInfo {
-  const capabilities = inferModelCapabilities(provider, modelId, metadata, source);
-  const supportedReasoningEfforts = supportedReasoningEffortsFromMetadata(metadata);
-  const contextWindow = metadata?.token_limits?.context_window;
-  const inferredTask = inferModelTask({ id: modelId, name: metadata?.name ?? modelId, capabilities });
-  const resolvedArkTask = isVolcengineArkProvider(provider) ? arkMetadataTask(metadata) : undefined;
+  const resolvedName = metadataDisplayName(metadata) ?? modelId;
+  const normalizedMetadata = metadata ? { ...metadata, name: resolvedName } : undefined;
+  const capabilities = inferModelCapabilities(provider, modelId, normalizedMetadata, source);
+  const supportedReasoningEfforts = supportedReasoningEffortsFromMetadata(normalizedMetadata);
+  const contextWindow = metadataContextWindow(normalizedMetadata);
+  const inferredTask = inferModelTask({ id: modelId, name: resolvedName, capabilities });
+  const resolvedArkTask = isVolcengineArkProvider(provider) ? arkMetadataTask(normalizedMetadata) : undefined;
   const model: ModelInfo = {
     id: modelId,
-    name: metadata?.name ?? modelId,
+    name: resolvedName,
     capabilities,
     ...(supportedReasoningEfforts ? { supportedReasoningEfforts } : {}),
-    ...(typeof contextWindow === 'number' && Number.isSafeInteger(contextWindow) && contextWindow > 0
-      ? { contextWindow }
-      : {}),
+    ...(contextWindow ? { contextWindow } : {}),
     task: resolvedArkTask && resolvedArkTask !== 'unsupported' && resolvedArkTask !== 'conflict'
       ? resolvedArkTask
       : inferredTask,
@@ -944,29 +1221,30 @@ export function createModelInfoFromId(
 }
 
 export function enrichDiscoveredModel(provider: ProviderProfile, metadata: RemoteModelMetadata): ModelInfo | null {
-  if (typeof metadata.id !== 'string' || metadata.id.length === 0) {
+  const normalized = normalizeRemoteModelEntry(metadata);
+  if (!normalized || typeof normalized.id !== 'string' || normalized.id.length === 0) {
     return null;
   }
 
   const ark = isVolcengineArkProvider(provider);
   if (
     ark &&
-    typeof metadata.status === 'string' &&
-    metadata.status.trim().toLowerCase() === 'shutdown'
+    typeof normalized.status === 'string' &&
+    normalized.status.trim().toLowerCase() === 'shutdown'
   ) {
     return null;
   }
 
-  const resolvedArkTask = ark ? arkMetadataTask(metadata) : undefined;
+  const resolvedArkTask = ark ? arkMetadataTask(normalized) : undefined;
   if (resolvedArkTask === 'unsupported' || resolvedArkTask === 'conflict') {
     return null;
   }
 
-  const model = createModelInfoFromId(provider, metadata.id, 'remote', metadata);
+  const model = createModelInfoFromId(provider, normalized.id, 'remote', normalized);
   if (
     ark &&
-    typeof metadata.status === 'string' &&
-    metadata.status.trim().toLowerCase() === 'retiring'
+    typeof normalized.status === 'string' &&
+    normalized.status.trim().toLowerCase() === 'retiring'
   ) {
     model.name = `${model.name || model.id}（即将下线）`;
   }

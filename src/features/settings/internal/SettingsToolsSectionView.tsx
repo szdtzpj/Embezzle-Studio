@@ -52,8 +52,9 @@ import {
 } from '../../../services/generationTasks';
 import { createId } from '../../../services/id';
 import {
-  externalSearchProviderLabels,
+  allExternalSearchProviderLabels,
   externalSearchProviderRequiresApiKey,
+  validateExternalSearchEndpoint,
 } from '../../../services/externalSearch';
 import { resolveProviderWebSearchProtocol } from '../../../services/providerWebSearch';
 import { inferModelTask } from '../../../services/modelCapabilities';
@@ -81,6 +82,7 @@ import {
 import {
   createRedactedDiagnosticBundle,
   exportRedactedDiagnosticBundle,
+  resolveReferencedAttachmentsForMediaCleanup,
   type RedactedDiagnosticBundle,
 } from '../../../services/localDiagnostics';
 import {
@@ -156,7 +158,72 @@ export function SettingsToolsSectionView(props: {
   );
   const session = useWorkspaceSession();
   const status = useWorkspaceStatus();
-  const workspace = useWorkspaceSelector((snapshot) => snapshot);
+  // 拆分为 19 条独立字段切片，消除全量快照订阅
+  const providers = useWorkspaceSelector((snapshot) => snapshot.providers);
+  const activeProviderId = useWorkspaceSelector((snapshot) => snapshot.activeProviderId);
+  const projects = useWorkspaceSelector((snapshot) => snapshot.projects);
+  const activeProjectId = useWorkspaceSelector((snapshot) => snapshot.activeProjectId);
+  const activeModelIdByProvider = useWorkspaceSelector(
+    (snapshot) => snapshot.activeModelIdByProvider
+  );
+  const modelPricing = useWorkspaceSelector((snapshot) => snapshot.modelPricing);
+  const comparisonTargets = useWorkspaceSelector((snapshot) => snapshot.comparisonTargets);
+  const comparisonEnabled = useWorkspaceSelector((snapshot) => snapshot.comparisonEnabled);
+  const costGuard = useWorkspaceSelector((snapshot) => snapshot.costGuard);
+  const voice = useWorkspaceSelector((snapshot) => snapshot.voice);
+  const cloudSync = useWorkspaceSelector((snapshot) => snapshot.cloudSync);
+  const providerUsageEvents = useWorkspaceSelector((snapshot) => snapshot.providerUsageEvents);
+  const conversations = useWorkspaceSelector((snapshot) => snapshot.conversations);
+  const webSearch = useWorkspaceSelector((snapshot) => snapshot.webSearch);
+  const externalSearch = useWorkspaceSelector((snapshot) => snapshot.externalSearch);
+  const promptTemplates = useWorkspaceSelector((snapshot) => snapshot.promptTemplates);
+  const composerDrafts = useWorkspaceSelector((snapshot) => snapshot.composerDrafts);
+  const backupPreferences = useWorkspaceSelector((snapshot) => snapshot.backupPreferences);
+  const plugins = useWorkspaceSelector((snapshot) => snapshot.plugins);
+  const workspace = useMemo(
+    () => ({
+      providers,
+      activeProviderId,
+      projects,
+      activeProjectId,
+      activeModelIdByProvider,
+      modelPricing,
+      comparisonTargets,
+      comparisonEnabled,
+      costGuard,
+      voice,
+      cloudSync,
+      providerUsageEvents,
+      conversations,
+      webSearch,
+      externalSearch,
+      promptTemplates,
+      composerDrafts,
+      backupPreferences,
+      plugins,
+    }),
+    [
+      providers,
+      activeProviderId,
+      projects,
+      activeProjectId,
+      activeModelIdByProvider,
+      modelPricing,
+      comparisonTargets,
+      comparisonEnabled,
+      costGuard,
+      voice,
+      cloudSync,
+      providerUsageEvents,
+      conversations,
+      webSearch,
+      externalSearch,
+      promptTemplates,
+      composerDrafts,
+      backupPreferences,
+      plugins,
+    ]
+  );
   const runtime = useMemo(() => new SettingsWorkspaceRuntime(session), [session]);
   const commitWorkspaceCommand = runtime.execute.bind(runtime);
   const chatActivity = useChatActivity();
@@ -189,7 +256,7 @@ export function SettingsToolsSectionView(props: {
   const [projectNameDraft, setProjectNameDraft] = useState('');
   const [projectSystemPromptDraft, setProjectSystemPromptDraft] = useState('');
   const queryingTaskByMessageId = chatTasks.queryingByMessageId;
-  const drafts = useSettingsToolsDrafts(workspace);
+  const drafts = useSettingsToolsDrafts(session.getSnapshot());
   const {
     promptTemplateName, setPromptTemplateName,
     promptTemplateContent, setPromptTemplateContent,
@@ -361,12 +428,6 @@ export function SettingsToolsSectionView(props: {
   const visibleGenerationTasks = useMemo(
     () => filterGenerationTasks(generationTasks, generationTaskFilter),
     [generationTaskFilter, generationTasks]
-  );
-  const referencedAttachments = useMemo(
-    () => workspace.conversations.flatMap((conversation) =>
-      conversation.messages.flatMap((message) => message.attachments ?? [])
-    ),
-    [workspace.conversations]
   );
 
   useEffect(() => {
@@ -724,14 +785,26 @@ export function SettingsToolsSectionView(props: {
     model?: string;
   }) {
     if (!ensureWorkspaceWritable() || !ensureProviderConfigurationIdle()) return;
-    const apiKey = input.apiKey?.trim();
-    if (externalSearchProviderRequiresApiKey(input.kind, input.endpoint) && !apiKey) {
-      setNotice(`请填写 ${externalSearchProviderLabels[input.kind]} 的 API Key。`);
+    // 校验 Endpoint（拦截 SearXNG 空地址、非 HTTPS 与本机/私网 SSRF）
+    const endpointValidation = validateExternalSearchEndpoint(input.kind, input.endpoint);
+    if (!endpointValidation.ok) {
+      setNotice(endpointValidation.error);
       return;
     }
+    const apiKey = input.apiKey?.trim();
+    if (externalSearchProviderRequiresApiKey(input.kind, input.endpoint) && !apiKey) {
+      setNotice(`请填写 ${allExternalSearchProviderLabels[input.kind]} 的 API Key。`);
+      return;
+    }
+    setNotice('');
     void commitWorkspaceCommand({
       type: 'external-search.upsert',
-      input: { ...input, apiKey, newId: createId('ext-search') },
+      input: {
+        ...input,
+        apiKey,
+        endpoint: endpointValidation.endpoint,
+        newId: createId('ext-search'),
+      },
     });
   }
 
@@ -932,9 +1005,11 @@ export function SettingsToolsSectionView(props: {
     if (!confirmed) return;
     setDiagnosticsBusy(true);
     try {
+      const snapshot = session.getSnapshot();
+      const referencedAttachments = await resolveReferencedAttachmentsForMediaCleanup(snapshot);
       const result = await cleanupOrphanedMediaStorage(referencedAttachments);
       setNotice(`已清理 ${result.deletedCount} 个未引用文件，释放 ${formatBytes(result.deletedBytes)}。`);
-      setDiagnostics(await createRedactedDiagnosticBundle(session.getSnapshot(), session.getStatus()));
+      setDiagnostics(await createRedactedDiagnosticBundle(snapshot, session.getStatus()));
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '媒体缓存清理失败。');
     } finally {
@@ -1122,7 +1197,8 @@ export function SettingsToolsSectionView(props: {
     const plugin = workspace.plugins.find((item) => item.id === pluginId);
     if (!plugin) return;
     if (enabled) {
-      const prepared = prepareRemoteMcpEnable(workspace, pluginId);
+      const workspaceSnapshot = session.getSnapshot();
+      const prepared = prepareRemoteMcpEnable(workspaceSnapshot, pluginId);
       if (!prepared.ok) {
         setNotice(prepared.notice);
         return;
@@ -1451,6 +1527,11 @@ export function SettingsToolsSectionView(props: {
                   });
                 }}
               />
+              {notice ? (
+                <Text accessibilityLiveRegion="assertive" style={styles.settingsNotice}>
+                  {notice}
+                </Text>
+              ) : null}
             </>
           );
         case 'prompts':
